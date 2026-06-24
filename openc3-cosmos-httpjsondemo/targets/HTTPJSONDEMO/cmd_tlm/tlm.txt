@@ -1,3 +1,10 @@
+TELEMETRY HTTPJSONDEMO INBOUND BIG_ENDIAN "Inbound JSON POST from an external source via HttpJsonServerInterface."
+  # POST to /httpjsondemo/inbound — item names must match incoming JSON keys exactly.
+  # Keyword   Name         BitSize  Type    Description
+  APPEND_ITEM temperature  64       FLOAT   "Temperature reading"
+  APPEND_ITEM pressure     64       FLOAT   "Pressure reading"
+  APPEND_ITEM label        0        STRING  "Sensor identifier label"
+
 TELEMETRY HTTPJSONDEMO RESPONSE BIG_ENDIAN "Successful API response (2xx). JSON keys map to fields by name."
   # HTTP_STATUS is injected automatically into packet.extra — no declaration needed.
   # Keyword   Name         BitSize  Type    Description

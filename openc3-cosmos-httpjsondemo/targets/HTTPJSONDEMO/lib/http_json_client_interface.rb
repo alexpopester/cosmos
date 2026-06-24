@@ -120,9 +120,10 @@ module OpenC3
     # @param packet [Packet] Packet to extract data from
     # @return [Array<String, Hash>] [json_string, extra]
     def convert_packet_to_data(packet)
-      # Build flat hash from all packet fields
+      # Build flat hash from all packet fields, skipping COSMOS internal reserved items
       fields = {}
       packet.sorted_items.each do |item|
+        next if Packet::RESERVED_ITEM_NAMES.include?(item.name)
         fields[item.name] = packet.read(item.name)
       end
       json_string = JSON.generate(fields)

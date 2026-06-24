@@ -135,10 +135,11 @@ class HttpJsonClientInterface(Interface):
                    packet fields and extra contains HTTP_METHOD, HTTP_HEADERS,
                    and HTTP_URI.
         """
-        # Build flat dict from all packet fields
+        # Build flat dict from all packet fields, skipping COSMOS internal reserved items
         fields = {}
         for item in packet.sorted_items:
-            fields[item.name] = packet.read(item.name)
+            if item.name not in Packet.RESERVED_ITEM_NAMES:
+                fields[item.name] = packet.read(item.name)
         json_string = json.dumps(fields)
 
         # Build extra with HTTP metadata from interface-level config
