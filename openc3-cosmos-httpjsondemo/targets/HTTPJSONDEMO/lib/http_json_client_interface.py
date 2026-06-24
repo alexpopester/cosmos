@@ -65,6 +65,7 @@ class HttpJsonClientInterface(Interface):
         if self.connect_timeout is not None:
             self.connect_timeout = float(self.connect_timeout)
 
+        self.http = None
         self.response_queue = queue.Queue()
 
         # Interface-level configuration

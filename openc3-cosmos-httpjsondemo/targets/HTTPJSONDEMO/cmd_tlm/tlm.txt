@@ -1,12 +1,54 @@
 TELEMETRY HTTPJSONDEMO INBOUND BIG_ENDIAN "Inbound JSON POST from an external source via HttpJsonServerInterface."
   # POST to /httpjsondemo/inbound — item names must match incoming JSON keys exactly.
+  ACCESSOR JsonAccessor
   # Keyword   Name         BitSize  Type    Description
   APPEND_ITEM temperature  64       FLOAT   "Temperature reading"
   APPEND_ITEM pressure     64       FLOAT   "Pressure reading"
   APPEND_ITEM label        0        STRING  "Sensor identifier label"
 
+TELEMETRY HTTPJSONDEMO METRICS BIG_ENDIAN "Wide numeric telemetry — system resource snapshot (12 fields)."
+  # POST to /httpjsondemo/metrics
+  ACCESSOR JsonAccessor
+  # Keyword   Name          BitSize  Type    Description
+  APPEND_ITEM cpu_pct       64       FLOAT   "CPU utilization %"
+  APPEND_ITEM mem_pct       64       FLOAT   "Memory utilization %"
+  APPEND_ITEM disk_pct      64       FLOAT   "Disk utilization %"
+  APPEND_ITEM net_rx_kbps   64       FLOAT   "Network receive rate kbps"
+  APPEND_ITEM net_tx_kbps   64       FLOAT   "Network transmit rate kbps"
+  APPEND_ITEM load_1m       64       FLOAT   "1-minute load average"
+  APPEND_ITEM load_5m       64       FLOAT   "5-minute load average"
+  APPEND_ITEM load_15m      64       FLOAT   "15-minute load average"
+  APPEND_ITEM uptime_secs   32       UINT    "System uptime in seconds"
+  APPEND_ITEM proc_count    32       UINT    "Running process count"
+  APPEND_ITEM thread_count  32       UINT    "Total thread count"
+  APPEND_ITEM fd_count      32       UINT    "Open file descriptor count"
+
+TELEMETRY HTTPJSONDEMO EVENT BIG_ENDIAN "Event notification — string-heavy (5 fields)."
+  # POST to /httpjsondemo/event
+  ACCESSOR JsonAccessor
+  # Keyword   Name        BitSize  Type    Description
+  APPEND_ITEM event_type  0        STRING  "Event category (FAULT, INFO, WARNING, etc.)"
+  APPEND_ITEM source      0        STRING  "Originating subsystem"
+  APPEND_ITEM message     0        STRING  "Human-readable event description"
+  APPEND_ITEM severity    0        STRING  "Severity level (DEBUG/INFO/WARNING/ERROR/CRITICAL)"
+  APPEND_ITEM sequence    32       UINT    "Monotonic event counter"
+
+TELEMETRY HTTPJSONDEMO STATUS BIG_ENDIAN "Integer and flag fields (8 fields)."
+  # POST to /httpjsondemo/status
+  ACCESSOR JsonAccessor
+  # Keyword   Name          BitSize  Type  Description
+  APPEND_ITEM power_on      8        UINT  "Power state (1=on)"
+  APPEND_ITEM comm_active   8        UINT  "Communication link active (1=yes)"
+  APPEND_ITEM safe_mode     8        UINT  "Safe mode engaged (1=yes)"
+  APPEND_ITEM error_flags   8        UINT  "Bitmask of active error flags"
+  APPEND_ITEM mode          32       UINT  "Operating mode identifier"
+  APPEND_ITEM cycle_count   32       UINT  "Total operational cycle count"
+  APPEND_ITEM last_cmd_seq  32       UINT  "Sequence number of last command received"
+  APPEND_ITEM checksum      32       UINT  "Last computed packet checksum"
+
 TELEMETRY HTTPJSONDEMO RESPONSE BIG_ENDIAN "Successful API response (2xx). JSON keys map to fields by name."
   # HTTP_STATUS is injected automatically into packet.extra — no declaration needed.
+  ACCESSOR JsonAccessor
   # Keyword   Name         BitSize  Type    Description
   APPEND_ITEM status       0        STRING  "Response status string from the API"
   APPEND_ITEM message      0        STRING  "Human-readable message from the API"
@@ -15,6 +57,7 @@ TELEMETRY HTTPJSONDEMO RESPONSE BIG_ENDIAN "Successful API response (2xx). JSON 
 
 TELEMETRY HTTPJSONDEMO ERROR BIG_ENDIAN "Error API response (3xx/4xx/5xx). Routed here when ERROR_PACKET is configured."
   # HTTP_STATUS is injected automatically into packet.extra — no declaration needed.
+  ACCESSOR JsonAccessor
   # Keyword   Name     BitSize  Type    Description
   APPEND_ITEM error    0        STRING  "Error type or title from the API"
   APPEND_ITEM detail   0        STRING  "Detailed error description"

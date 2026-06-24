@@ -9,6 +9,10 @@ VARIABLE httpjsondemo_path /api/v1/data
 VARIABLE httpjsondemo_method post
 VARIABLE httpjsondemo_content_type application/json
 VARIABLE httpjsondemo_server_port 4567
+# Name of the COSMOS secret holding the inbound API key (set via Admin → Secrets).
+# Leave blank to disable authentication.
+VARIABLE httpjsondemo_api_key_secret HTTPJSONDEMO_API_KEY
+VARIABLE httpjsondemo_max_queue_depth 1000
 
 TARGET HTTPJSONDEMO <%= httpjsondemo_target_name %>
   # Decom tlm and cmd data in the time-series database is kept forever by default.
@@ -27,4 +31,8 @@ INTERFACE <%= httpjsondemo_target_name %>_INT http_json_client_interface.py <%= 
 
 # Inbound: external sources POST JSON to /targetname/packetname and COSMOS stores it as telemetry.
 INTERFACE <%= httpjsondemo_target_name %>_SERVER_INT http_json_server_interface.py <%= httpjsondemo_server_port %>
+  # Require callers to send X-Api-Key: <value> matching the COSMOS secret below.
+  # Remove the SECRET line to disable authentication entirely.
+  SECRET ENV <%= httpjsondemo_api_key_secret %> <%= httpjsondemo_api_key_secret %> API_KEY
+  OPTION MAX_QUEUE_DEPTH <%= httpjsondemo_max_queue_depth %>
   MAP_TARGET <%= httpjsondemo_target_name %>
