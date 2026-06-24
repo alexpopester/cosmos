@@ -122,8 +122,8 @@ module OpenC3
     def convert_packet_to_data(packet)
       # Build flat hash from all packet fields
       fields = {}
-      packet.item_names.each do |name|
-        fields[name] = packet.read(name)
+      packet.sorted_items.each do |item|
+        fields[item.name] = packet.read(item.name)
       end
       json_string = JSON.generate(fields)
 

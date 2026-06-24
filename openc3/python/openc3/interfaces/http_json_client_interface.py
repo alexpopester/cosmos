@@ -137,8 +137,8 @@ class HttpJsonClientInterface(Interface):
         """
         # Build flat dict from all packet fields
         fields = {}
-        for name in packet.item_names:
-            fields[name] = packet.read(name)
+        for item in packet.sorted_items:
+            fields[item.name] = packet.read(item.name)
         json_string = json.dumps(fields)
 
         # Build extra with HTTP metadata from interface-level config
