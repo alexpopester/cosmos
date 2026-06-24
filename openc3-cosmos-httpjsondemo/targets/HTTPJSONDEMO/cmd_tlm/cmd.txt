@@ -1,0 +1,6 @@
+COMMAND HTTPJSONDEMO SUBMIT BIG_ENDIAN "Submit a sensor reading to the API"
+  # Field names map directly to JSON keys in the request body.
+  # Keyword        Name          BitSize  Type    Min  Max   Default    Description
+  APPEND_PARAMETER temperature   64       FLOAT   -273 1000  0.0        "Temperature in Celsius"
+  APPEND_PARAMETER pressure      64       FLOAT   0    2000  101.325    "Pressure in hPa"
+  APPEND_PARAMETER label         0        STRING               "sensor1" "Sensor identifier label"

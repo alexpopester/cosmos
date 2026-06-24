@@ -1,0 +1,23 @@
+# LANGUAGE python
+# Set VARIABLEs here to allow variation in your plugin
+
+VARIABLE httpjsondemo_target_name HTTPJSONDEMO
+VARIABLE httpjsondemo_host api.example.com
+VARIABLE httpjsondemo_port 80
+VARIABLE httpjsondemo_protocol http
+VARIABLE httpjsondemo_path /api/v1/data
+VARIABLE httpjsondemo_method post
+VARIABLE httpjsondemo_content_type application/json
+
+TARGET HTTPJSONDEMO <%= httpjsondemo_target_name %>
+  # Decom tlm and cmd data in the time-series database is kept forever by default.
+  # Uncomment to enforce a 30 day retention time. See https://docs.openc3.com/docs/configuration/plugins
+  # CMD_DECOM_RETAIN_TIME 30d
+  # TLM_DECOM_RETAIN_TIME 30d
+INTERFACE <%= httpjsondemo_target_name %>_INT openc3/interfaces/http_json_client_interface.py <%= httpjsondemo_host %> <%= httpjsondemo_port %> <%= httpjsondemo_protocol %> 5 10 5
+  OPTION PATH <%= httpjsondemo_path %>
+  OPTION METHOD <%= httpjsondemo_method %>
+  OPTION HEADER Content-Type <%= httpjsondemo_content_type %>
+  OPTION RESPONSE_PACKET <%= httpjsondemo_target_name %> RESPONSE
+  OPTION ERROR_PACKET <%= httpjsondemo_target_name %> ERROR
+  MAP_TARGET <%= httpjsondemo_target_name %>
