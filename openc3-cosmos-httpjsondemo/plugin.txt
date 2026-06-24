@@ -14,7 +14,7 @@ TARGET HTTPJSONDEMO <%= httpjsondemo_target_name %>
   # Uncomment to enforce a 30 day retention time. See https://docs.openc3.com/docs/configuration/plugins
   # CMD_DECOM_RETAIN_TIME 30d
   # TLM_DECOM_RETAIN_TIME 30d
-INTERFACE <%= httpjsondemo_target_name %>_INT openc3/interfaces/http_json_client_interface.py <%= httpjsondemo_host %> <%= httpjsondemo_port %> <%= httpjsondemo_protocol %> 5 10 5
+INTERFACE <%= httpjsondemo_target_name %>_INT http_json_client_interface.py <%= httpjsondemo_host %> <%= httpjsondemo_port %> <%= httpjsondemo_protocol %> 5 10 5
   OPTION PATH <%= httpjsondemo_path %>
   OPTION METHOD <%= httpjsondemo_method %>
   OPTION HEADER Content-Type <%= httpjsondemo_content_type %>
