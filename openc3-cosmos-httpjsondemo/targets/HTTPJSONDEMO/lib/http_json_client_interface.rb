@@ -14,6 +14,7 @@
 require 'openc3/interfaces/interface'
 require 'openc3/config/config_parser'
 require 'openc3/packets/packet'
+require 'openc3/accessors/json_accessor'
 require 'faraday'
 require 'faraday/follow_redirects'
 require 'json'
@@ -114,40 +115,81 @@ module OpenC3
     end
 
     # Called to convert a packet into data.
-    # Reads all packet fields and serializes them to JSON.
-    # Also builds an extra hash with HTTP metadata.
+    # HTTP_* items in the packet override interface-level defaults; all other
+    # items are serialized to a flat JSON body.
     #
     # @param packet [Packet] Packet to extract data from
     # @return [Array<String, Hash>] [json_string, extra]
     def convert_packet_to_data(packet)
-      # Build flat hash from all packet fields, skipping COSMOS internal reserved items
       fields = {}
+      http_path = nil
+      http_method = nil
+      http_packet = nil
+      http_error_packet = nil
+      http_queries = {}
+      http_headers = {}
+
       packet.sorted_items.each do |item|
         next if Packet::RESERVED_ITEM_NAMES.include?(item.name)
-        fields[item.name] = packet.read(item.name)
+        case item.name
+        when 'HTTP_PATH'
+          http_path = packet.read(item.name)
+        when 'HTTP_METHOD'
+          http_method = packet.read(item.name)
+        when 'HTTP_PACKET'
+          http_packet = packet.read(item.name)
+        when 'HTTP_ERROR_PACKET'
+          http_error_packet = packet.read(item.name)
+        when /^HTTP_QUERY_/
+          http_queries[item.name[11..].downcase] = packet.read(item.name)
+        when /^HTTP_HEADER_/
+          http_headers[item.name[12..].downcase] = packet.read(item.name)
+        else
+          fields[item.name] = packet.read(item.name)
+        end
       end
+
       json_string = JSON.generate(fields)
 
-      # Build extra with HTTP metadata from interface-level config
       extra = {}
-      extra['HTTP_METHOD'] = @http_method
-      extra['HTTP_HEADERS'] = @headers.dup
-      extra['HTTP_URI'] = "#{@url}#{@path}"
+      extra['HTTP_METHOD'] = http_method || @http_method
+      extra['HTTP_HEADERS'] = @headers.merge(http_headers)
+      extra['HTTP_QUERIES'] = http_queries unless http_queries.empty?
+      extra['HTTP_URI'] = "#{@url}#{http_path || @path}"
+
+      # Per-command response routing — stored in extra so convert_data_to_packet can use it
+      if http_packet
+        extra['HTTP_PACKET'] = http_packet.upcase
+        extra['HTTP_ERROR_PACKET'] = http_error_packet.upcase if http_error_packet
+        extra['HTTP_REQUEST_TARGET_NAME'] = packet.target_name
+      end
 
       return json_string, extra
     end
 
-    # Called to convert the read data into a Packet object
+    # Called to convert the read data into a Packet object.
+    # Sets JsonAccessor automatically so telemetry definitions don't require it.
+    # Per-command routing (HTTP_PACKET in extra) takes priority over interface-level config.
     #
     # @param data [String] Raw JSON response data
-    # @param extra [Hash] Contains HTTP_STATUS, etc.
+    # @param extra [Hash] Contains HTTP_STATUS, HTTP_PACKET, etc.
     # @return [Packet] OpenC3 Packet
     def convert_data_to_packet(data, extra = nil)
       packet = Packet.new(nil, nil, :BIG_ENDIAN, nil, data.to_s)
+      packet.accessor = JsonAccessor.new(packet)
 
-      # Route based on HTTP status code and stored packet config
       status = extra ? extra['HTTP_STATUS'].to_i : 0
-      if status >= 300 && @error_packet_name
+
+      if extra && extra['HTTP_PACKET']
+        target_name = extra['HTTP_REQUEST_TARGET_NAME']
+        if status >= 300 && extra['HTTP_ERROR_PACKET']
+          packet.target_name = target_name
+          packet.packet_name = extra['HTTP_ERROR_PACKET']
+        else
+          packet.target_name = target_name
+          packet.packet_name = extra['HTTP_PACKET']
+        end
+      elsif status >= 300 && @error_packet_name
         packet.target_name = @error_target_name
         packet.packet_name = @error_packet_name
       else

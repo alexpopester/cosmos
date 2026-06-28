@@ -141,7 +141,7 @@ module OpenC3
     # @param filename [String] The name of the configuration file
     # @param process_target_name [String] The target name. Pass nil when parsing
     #   an xtce file to automatically determine the target name.
-    def process_file(filename, process_target_name, language = 'ruby')
+    def process_file(filename, process_target_name, language = 'ruby', default_accessor_class = nil, default_accessor_args = [])
       # Handle .xtce files
       extension = File.extname(filename).to_s.downcase
       if extension == ".xtce" or extension == ".xml"
@@ -153,6 +153,8 @@ module OpenC3
       return if File.basename(filename)[0] == '_' # Partials start with underscore
 
       @language = language
+      @default_accessor_class = default_accessor_class
+      @default_accessor_args = default_accessor_args || []
       @converted_type = nil
       @converted_bit_size = nil
       @proc_text = ''
@@ -191,11 +193,13 @@ module OpenC3
             finish_packet()
             @current_packet = PacketParser.parse_command(parser, process_target_name, @commands, @warnings)
             @current_cmd_or_tlm = COMMAND
+            apply_default_accessor(parser)
 
           when 'TELEMETRY'
             finish_packet()
             @current_packet = PacketParser.parse_telemetry(parser, process_target_name, @telemetry, @latest_data, @warnings)
             @current_cmd_or_tlm = TELEMETRY
+            apply_default_accessor(parser)
 
           # Select an existing packet for editing
           when 'SELECT_COMMAND', 'SELECT_TELEMETRY'
@@ -476,6 +480,28 @@ module OpenC3
       @current_packet = nil
       @current_item = nil
       @current_limits_group = nil
+    end
+
+    def apply_default_accessor(parser)
+      return unless @default_accessor_class
+      begin
+        if @language == 'ruby'
+          klass = OpenC3.require_class(@default_accessor_class)
+          if @default_accessor_args.length > 0
+            @current_packet.accessor = klass.new(@current_packet, *@default_accessor_args)
+          else
+            @current_packet.accessor = klass.new(@current_packet)
+          end
+        else
+          if @default_accessor_args.length > 0
+            @current_packet.accessor = PythonProxy.new('Accessor', @default_accessor_class, @current_packet, *@default_accessor_args)
+          else
+            @current_packet.accessor = PythonProxy.new('Accessor', @default_accessor_class, @current_packet)
+          end
+        end
+      rescue Exception => e
+        raise parser.error(e.formatted)
+      end
     end
 
     def process_current_packet(parser, keyword, params)

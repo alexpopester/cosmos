@@ -171,26 +171,31 @@ module OpenC3
     #
     # @param target_names [Array of target names]
     # @param target_config_dir Directory where target config folders are
-    def initialize(target_names, target_config_dir)
+    def initialize(target_names, target_config_dir, target_overrides: {})
       OpenC3.add_to_search_path(target_config_dir, true) if target_config_dir
       @targets = {}
       @packet_config = PacketConfig.new
       @commands = Commands.new(@packet_config)
       @telemetry = Telemetry.new(@packet_config)
       @limits = Limits.new(@packet_config)
-      target_names.each { |target_name| add_target(target_name, target_config_dir) }
+      target_names.each { |target_name| add_target(target_name, target_config_dir, **(target_overrides[target_name] || {})) }
     end
 
-    def add_target(target_name, target_config_dir)
+    def add_target(target_name, target_config_dir, default_accessor: nil, default_accessor_args: [])
       parser = ConfigParser.new
       folder_name = File.join(target_config_dir, target_name)
       raise parser.error("Target folder must exist '#{folder_name}'.") unless Dir.exist?(folder_name)
 
       target = Target.new(target_name, target_config_dir)
+      # plugin.txt DEFAULT_ACCESSOR overrides target.txt value when set
+      if default_accessor
+        target.default_accessor = default_accessor
+        target.default_accessor_args = default_accessor_args
+      end
       @targets[target.name] = target
       errors = [] # Store all errors processing the cmd_tlm files
       target.cmd_tlm_files.each do |cmd_tlm_file|
-        @packet_config.process_file(cmd_tlm_file, target.name, target.language)
+        @packet_config.process_file(cmd_tlm_file, target.name, target.language, target.default_accessor, target.default_accessor_args)
       rescue Exception => e
         errors << "Error processing #{cmd_tlm_file}:\n#{e.message}"
       end

@@ -1,6 +1,5 @@
 TELEMETRY HTTPJSONDEMO INBOUND BIG_ENDIAN "Inbound JSON POST from an external source via HttpJsonServerInterface."
-  # POST to /httpjsondemo/inbound — item names must match incoming JSON keys exactly.
-  ACCESSOR JsonAccessor
+  # POST to /httpjsondemo/inbound — JSON keys must be UPPERCASE to match COSMOS item names.
   # Keyword   Name         BitSize  Type    Description
   APPEND_ITEM temperature  64       FLOAT   "Temperature reading"
   APPEND_ITEM pressure     64       FLOAT   "Pressure reading"
@@ -8,7 +7,6 @@ TELEMETRY HTTPJSONDEMO INBOUND BIG_ENDIAN "Inbound JSON POST from an external so
 
 TELEMETRY HTTPJSONDEMO METRICS BIG_ENDIAN "Wide numeric telemetry — system resource snapshot (12 fields)."
   # POST to /httpjsondemo/metrics
-  ACCESSOR JsonAccessor
   # Keyword   Name          BitSize  Type    Description
   APPEND_ITEM cpu_pct       64       FLOAT   "CPU utilization %"
   APPEND_ITEM mem_pct       64       FLOAT   "Memory utilization %"
@@ -25,7 +23,6 @@ TELEMETRY HTTPJSONDEMO METRICS BIG_ENDIAN "Wide numeric telemetry — system res
 
 TELEMETRY HTTPJSONDEMO EVENT BIG_ENDIAN "Event notification — string-heavy (5 fields)."
   # POST to /httpjsondemo/event
-  ACCESSOR JsonAccessor
   # Keyword   Name        BitSize  Type    Description
   APPEND_ITEM event_type  0        STRING  "Event category (FAULT, INFO, WARNING, etc.)"
   APPEND_ITEM source      0        STRING  "Originating subsystem"
@@ -35,7 +32,6 @@ TELEMETRY HTTPJSONDEMO EVENT BIG_ENDIAN "Event notification — string-heavy (5 
 
 TELEMETRY HTTPJSONDEMO STATUS BIG_ENDIAN "Integer and flag fields (8 fields)."
   # POST to /httpjsondemo/status
-  ACCESSOR JsonAccessor
   # Keyword   Name          BitSize  Type  Description
   APPEND_ITEM power_on      8        UINT  "Power state (1=on)"
   APPEND_ITEM comm_active   8        UINT  "Communication link active (1=yes)"
@@ -48,7 +44,6 @@ TELEMETRY HTTPJSONDEMO STATUS BIG_ENDIAN "Integer and flag fields (8 fields)."
 
 TELEMETRY HTTPJSONDEMO RESPONSE BIG_ENDIAN "Successful API response (2xx). JSON keys map to fields by name."
   # HTTP_STATUS is injected automatically into packet.extra — no declaration needed.
-  ACCESSOR JsonAccessor
   # Keyword   Name         BitSize  Type    Description
   APPEND_ITEM status       0        STRING  "Response status string from the API"
   APPEND_ITEM message      0        STRING  "Human-readable message from the API"
@@ -57,7 +52,6 @@ TELEMETRY HTTPJSONDEMO RESPONSE BIG_ENDIAN "Successful API response (2xx). JSON 
 
 TELEMETRY HTTPJSONDEMO ERROR BIG_ENDIAN "Error API response (3xx/4xx/5xx). Routed here when ERROR_PACKET is configured."
   # HTTP_STATUS is injected automatically into packet.extra — no declaration needed.
-  ACCESSOR JsonAccessor
   # Keyword   Name     BitSize  Type    Description
   APPEND_ITEM error    0        STRING  "Error type or title from the API"
   APPEND_ITEM detail   0        STRING  "Detailed error description"

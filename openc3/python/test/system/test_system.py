@@ -210,6 +210,19 @@ class TestSystem(unittest.TestCase):
         with self.assertRaises(Exception):
             System.instance(["NONEXISTENT_TARGET"], target_config_dir)
 
+    def test_add_target_with_default_accessor_override(self):
+        """Test that plugin.txt DEFAULT_ACCESSOR overrides target.txt accessor"""
+        from openc3.accessors.json_accessor import JsonAccessor
+
+        target_config_dir = os.path.join(TEST_DIR, "install", "config", "targets")
+        target_overrides = {"INST": {"default_accessor": "JsonAccessor", "default_accessor_args": []}}
+        system = System.instance(["INST"], target_config_dir, target_overrides=target_overrides)
+
+        self.assertIn("INST", system.targets)
+        # Every packet should have JsonAccessor applied
+        for _name, packet in system.packet_config.telemetry.get("INST", {}).items():
+            self.assertIsInstance(packet.accessor, JsonAccessor)
+
     def test_add_post_instance_callback(self):
         """Test that post-instance callbacks work correctly"""
         callback_executed = []

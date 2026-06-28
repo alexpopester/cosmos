@@ -60,7 +60,7 @@ class JsonAccessor(Accessor):
         if item.data_type == "DERIVED":
             return None
         if isinstance(buffer, bytearray):
-            decoded = json_loads(buffer)
+            decoded = {} if (len(buffer) == 0 or buffer[0] == 0) else json_loads(buffer)
         else:
             decoded = buffer
 
@@ -87,7 +87,7 @@ class JsonAccessor(Accessor):
     @classmethod
     def class_write_items(cls, items, values, buffer):
         if isinstance(buffer, bytearray):
-            decoded = json_loads(buffer)
+            decoded = {} if (len(buffer) == 0 or buffer[0] == 0) else json_loads(buffer)
         else:
             decoded = buffer
 

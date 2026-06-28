@@ -13,6 +13,7 @@
 
 require 'openc3/interfaces/interface'
 require 'openc3/packets/packet'
+require 'openc3/accessors/json_accessor'
 require 'webrick'
 require 'json'
 
@@ -22,8 +23,8 @@ module OpenC3
   # Path format: POST /targetname/packetname
   # The path segments are uppercased and used to identify the telemetry packet.
   # Item names in the packet definition must match the incoming JSON key names.
-  # Telemetry definitions for packets received by this interface must declare
-  # ACCESSOR JsonAccessor so that all COSMOS microservices parse the buffer correctly.
+  # JsonAccessor is set automatically on received packets — no ACCESSOR declaration
+  # needed in telemetry definitions.
   #
   # Supported options:
   #   LISTEN_ADDRESS <ip>  — bind address (default 0.0.0.0)
@@ -72,11 +73,15 @@ module OpenC3
 
     def connect
       # Build the valid-packet lookup so the handler can reject unknown paths before 200 OK.
+      # Also set JsonAccessor on every defined packet so the CVT singleton already has the
+      # right accessor — ensures telemetry.update! and decom cloning both work without
+      # requiring ACCESSOR declarations in the telemetry definitions.
       @valid_packets = {}
       @target_names.each do |target_name|
         begin
-          System.telemetry.packets(target_name).each do |pkt_name, _packet|
+          System.telemetry.packets(target_name).each do |pkt_name, pkt|
             (@valid_packets[target_name] ||= {})[pkt_name] = true
+            pkt.accessor = JsonAccessor.new(pkt)
           end
         rescue => e
           Logger.error("HttpJsonServerInterface: failed to enumerate packets for #{target_name}\n#{e.formatted}")
@@ -190,6 +195,7 @@ module OpenC3
 
     def convert_data_to_packet(data, extra = nil)
       packet = Packet.new(nil, nil, :BIG_ENDIAN, nil, data.to_s)
+      packet.accessor = JsonAccessor.new(packet)
       if extra
         target_name = extra.delete('HTTP_REQUEST_TARGET_NAME')
         packet_name = extra.delete('HTTP_REQUEST_PACKET_NAME')

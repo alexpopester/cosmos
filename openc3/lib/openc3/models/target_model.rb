@@ -404,6 +404,8 @@ module OpenC3
       disable_erb: nil,
       shard: 0,
       db_shard: 0,
+      default_accessor: nil,
+      default_accessor_args: [],
       scope:
     )
       super("#{scope}__#{PRIMARY_KEY}", name: name, plugin: plugin, updated_at: updated_at, scope: scope)
@@ -430,6 +432,8 @@ module OpenC3
       @disable_erb = disable_erb
       @shard = shard.to_i # to_i to handle nil
       @db_shard = db_shard.to_i # to_i to handle nil
+      @default_accessor = default_accessor
+      @default_accessor_args = default_accessor_args || []
       @bucket = Bucket.getClient()
       @children = []
     end
@@ -462,6 +466,8 @@ module OpenC3
         'disable_erb' => @disable_erb,
         'shard' => @shard,
         'db_shard' => @db_shard,
+        'default_accessor' => @default_accessor,
+        'default_accessor_args' => @default_accessor_args,
       }
     end
 
@@ -557,6 +563,12 @@ module OpenC3
         parser.verify_num_parameters(1, 1, "#{keyword} <Shard Number Starting from 0>")
         @db_shard = Integer(parameters[0])
 
+      when 'DEFAULT_ACCESSOR'
+        usage = "#{keyword} <CLASS NAME> <Optional args>..."
+        parser.verify_num_parameters(1, nil, usage)
+        @default_accessor = parameters[0]
+        @default_accessor_args = parameters[1..-1]
+
       else
         raise ConfigParser::Error.new(parser, "Unknown keyword and parameters for Target: #{keyword} #{parameters.join(" ")}")
       end
@@ -607,8 +619,12 @@ module OpenC3
         raise "No target files found at #{target_path}" unless found
 
         target_folder = File.join(temp_dir, @name)
-        # Build a System for just this target
-        system = System.new([@name], temp_dir)
+        # Build a System for just this target; plugin.txt DEFAULT_ACCESSOR overrides target.txt
+        target_overrides = {}
+        if @default_accessor
+          target_overrides[@name] = { default_accessor: @default_accessor, default_accessor_args: @default_accessor_args }
+        end
+        system = System.new([@name], temp_dir, target_overrides: target_overrides)
         if variables["xtce_output"]
           puts "Converting target #{@name} to .xtce files in #{variables["xtce_output"]}/#{@name}"
           puts "    Using mnemonic '#{variables['time_association_name']}' as the packet time item."

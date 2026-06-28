@@ -15,6 +15,7 @@
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Optional
 
+from openc3.accessors.binary_accessor import BinaryAccessor
 
 # TYPE_CHECKING is False at runtime but True during type checking.
 # This allows us to import types for type hints without causing circular import errors.
@@ -354,6 +355,9 @@ class Telemetry:
                 return None
 
             identified_packet = identified_packet.clone()
+            # Inherit the interface-set accessor when the definition doesn't declare one
+            if isinstance(identified_packet.accessor, BinaryAccessor) and not isinstance(packet.accessor, BinaryAccessor):
+                identified_packet.accessor = type(packet.accessor)(identified_packet)
             identified_packet.buffer = packet.buffer
             identified_packet.received_time = packet.received_time
             identified_packet.stored = packet.stored
@@ -368,6 +372,9 @@ class Telemetry:
             except Exception:
                 return None
             identified_packet = identified_packet.clone()
+            # Inherit the interface-set accessor when the definition doesn't declare one
+            if isinstance(identified_packet.accessor, BinaryAccessor) and not isinstance(packet.accessor, BinaryAccessor):
+                identified_packet.accessor = type(packet.accessor)(identified_packet)
             identified_packet.buffer = packet.buffer
             identified_packet.received_time = packet.received_time
             identified_packet.stored = packet.stored

@@ -163,6 +163,56 @@ module OpenC3
         end
       end
 
+      context "with DEFAULT_ACCESSOR" do
+        it "stores the class name" do
+          tf = Tempfile.new('unittest')
+          tf.puts("DEFAULT_ACCESSOR JsonAccessor")
+          tf.close
+          tgt = Target.new("TGT", 'path')
+          tgt.process_file(tf.path)
+          expect(tgt.default_accessor).to eql "JsonAccessor"
+          expect(tgt.default_accessor_args).to eql []
+          tf.unlink
+        end
+
+        it "stores the class name and args" do
+          tf = Tempfile.new('unittest')
+          tf.puts("DEFAULT_ACCESSOR HttpAccessor JsonAccessor extra")
+          tf.close
+          tgt = Target.new("TGT", 'path')
+          tgt.process_file(tf.path)
+          expect(tgt.default_accessor).to eql "HttpAccessor"
+          expect(tgt.default_accessor_args).to eql ["JsonAccessor", "extra"]
+          tf.unlink
+        end
+
+        it "requires at least 1 parameter" do
+          tf = Tempfile.new('unittest')
+          tf.puts("DEFAULT_ACCESSOR")
+          tf.close
+          expect { Target.new("TGT", 'path').process_file(tf.path) }.to raise_error(ConfigParser::Error, /Not enough parameters for DEFAULT_ACCESSOR/)
+          tf.unlink
+        end
+
+        it "is nil by default" do
+          tgt = Target.new("TGT", 'path')
+          expect(tgt.default_accessor).to be_nil
+          expect(tgt.default_accessor_args).to eql []
+        end
+
+        it "is included in as_json" do
+          tf = Tempfile.new('unittest')
+          tf.puts("DEFAULT_ACCESSOR JsonAccessor arg1")
+          tf.close
+          tgt = Target.new("TGT", 'path')
+          tgt.process_file(tf.path)
+          json = tgt.as_json
+          expect(json['default_accessor']).to eql "JsonAccessor"
+          expect(json['default_accessor_args']).to eql ["arg1"]
+          tf.unlink
+        end
+      end
+
       context "with COMMANDS and TELEMETRY" do
         it "takes 1 parameters" do
           tf = Tempfile.new('unittest')

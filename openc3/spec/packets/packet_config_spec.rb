@@ -624,6 +624,80 @@ module OpenC3
         end
       end
 
+      context "with DEFAULT_ACCESSOR" do
+        it "applies the accessor to every COMMAND and TELEMETRY packet" do
+          tf = Tempfile.new('unittest')
+          tf.puts 'TELEMETRY tgt1 pkt1 LITTLE_ENDIAN "Description"'
+          tf.puts '  APPEND_ITEM item1 8 UINT'
+          tf.puts 'COMMAND tgt1 cmd1 LITTLE_ENDIAN "Description"'
+          tf.puts '  APPEND_PARAMETER param1 8 UINT MIN MAX 0'
+          tf.close
+          @pc.process_file(tf.path, "TGT1", 'ruby', 'JsonAccessor')
+          expect(@pc.telemetry["TGT1"]["PKT1"].accessor.class).to be OpenC3::JsonAccessor
+          expect(@pc.commands["TGT1"]["CMD1"].accessor.class).to be OpenC3::JsonAccessor
+          tf.unlink
+        end
+
+        it "forwards constructor args to the accessor" do
+          tf = Tempfile.new('unittest')
+          tf.puts 'TELEMETRY tgt1 pkt1 LITTLE_ENDIAN "Description"'
+          tf.puts '  APPEND_ITEM item1 8 UINT'
+          tf.close
+          @pc.process_file(tf.path, "TGT1", 'ruby', 'HttpAccessor', ['JsonAccessor'])
+          expect(@pc.telemetry["TGT1"]["PKT1"].accessor.class).to be OpenC3::HttpAccessor
+          tf.unlink
+        end
+
+        it "is overridden by a per-packet ACCESSOR keyword" do
+          tf = Tempfile.new('unittest')
+          tf.puts 'TELEMETRY tgt1 pkt1 LITTLE_ENDIAN "Description"'
+          tf.puts '  ACCESSOR XmlAccessor'
+          tf.puts '  APPEND_ITEM item1 8 UINT'
+          tf.close
+          @pc.process_file(tf.path, "TGT1", 'ruby', 'JsonAccessor')
+          expect(@pc.telemetry["TGT1"]["PKT1"].accessor.class).to be OpenC3::XmlAccessor
+          tf.unlink
+        end
+
+        it "does not apply to SELECT_TELEMETRY patches" do
+          tf = Tempfile.new('unittest')
+          tf.puts 'TELEMETRY tgt1 pkt1 LITTLE_ENDIAN "Description"'
+          tf.puts '  APPEND_ITEM item1 8 UINT'
+          tf.close
+          @pc.process_file(tf.path, "TGT1", 'ruby')
+          expect(@pc.telemetry["TGT1"]["PKT1"].accessor.class).to be OpenC3::BinaryAccessor
+
+          tf2 = Tempfile.new('unittest')
+          tf2.puts 'SELECT_TELEMETRY tgt1 pkt1'
+          tf2.puts '  SELECT_ITEM item1'
+          tf2.puts '    DESCRIPTION "Updated"'
+          tf2.close
+          @pc.process_file(tf2.path, "TGT1", 'ruby', 'JsonAccessor')
+          expect(@pc.telemetry["TGT1"]["PKT1"].accessor.class).to be OpenC3::BinaryAccessor
+          tf.unlink
+          tf2.unlink
+        end
+
+        it "raises a meaningful error for a bad class name" do
+          tf = Tempfile.new('unittest')
+          tf.puts 'TELEMETRY tgt1 pkt1 LITTLE_ENDIAN "Description"'
+          tf.puts '  APPEND_ITEM item1 8 UINT'
+          tf.close
+          expect { @pc.process_file(tf.path, "TGT1", 'ruby', 'NonExistentAccessor99') }.to raise_error(ConfigParser::Error)
+          tf.unlink
+        end
+
+        it "does not affect targets without DEFAULT_ACCESSOR" do
+          tf = Tempfile.new('unittest')
+          tf.puts 'TELEMETRY tgt1 pkt1 LITTLE_ENDIAN "Description"'
+          tf.puts '  APPEND_ITEM item1 8 UINT'
+          tf.close
+          @pc.process_file(tf.path, "TGT1")
+          expect(@pc.telemetry["TGT1"]["PKT1"].accessor.class).to be OpenC3::BinaryAccessor
+          tf.unlink
+        end
+      end
+
       context "with RESPONSE" do
         it "only applies to commands" do
           tf = Tempfile.new('unittest')

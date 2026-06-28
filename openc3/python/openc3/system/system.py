@@ -189,16 +189,35 @@ class System(metaclass=SystemMeta):
                     local_path = f"{targets_path}/{target_name}/cmd_tlm/{file['name']}"
                     bucket.get_object(bucket=OPENC3_CONFIG_BUCKET, key=bucket_key, path=local_path)
 
+            # Build target_overrides from Redis so plugin.txt DEFAULT_ACCESSOR reaches the DECOM microservice.
+            # Lazy import avoids the circular dependency: target_model.py imports system.py.
+            target_overrides = {}
+            try:
+                from openc3.models.target_model import TargetModel  # noqa: PLC0415
+
+                for target_name in target_names:
+                    model_data = TargetModel.get(name=target_name, scope=scope)
+                    if model_data:
+                        default_accessor = model_data.get("default_accessor")
+                        if default_accessor:
+                            target_overrides[target_name] = {
+                                "default_accessor": default_accessor,
+                                "default_accessor_args": model_data.get("default_accessor_args") or [],
+                            }
+            except Exception:
+                pass  # Don't block startup if Redis is unavailable
+
             # Build System from targets
-            System.instance(target_names, targets_path)
+            System.instance(target_names, targets_path, target_overrides=target_overrides)
 
     @classmethod
-    def instance(cls, target_names=None, target_config_dir=None):
+    def instance(cls, target_names=None, target_config_dir=None, target_overrides=None):
         """Get the singleton instance of System
 
         Args:
             target_names [Array of target_names]
             target_config_dir Directory where target config folders are
+            target_overrides [dict] Optional per-target overrides, e.g. {"TARGET": {"default_accessor": "JsonAccessor"}}
 
         Returns:
             [System] The System singleton
@@ -211,7 +230,7 @@ class System(metaclass=SystemMeta):
         with System.instance_mutex:
             if System.instance_obj:  # type: ignore[has-type]
                 return System.instance_obj  # type: ignore[has-type]
-            System.instance_obj = cls(target_names, target_config_dir)  # type: ignore[has-type]
+            System.instance_obj = cls(target_names, target_config_dir, target_overrides=target_overrides or {})  # type: ignore[has-type]
             for callback in System.post_instance_callbacks:
                 callback()
             return System.instance_obj  # type: ignore[has-type]
@@ -233,7 +252,8 @@ class System(metaclass=SystemMeta):
     #
     # @param target_names [Array of target names]
     # @param target_config_dir Directory where target config folders are
-    def __init__(self, target_names, target_config_dir):
+    # @param target_overrides [dict] Optional per-target overrides keyed by target name
+    def __init__(self, target_names, target_config_dir, target_overrides=None):
         # Find all the base gem lib directories and add them to the search path
         # Ruby handles this because the gem is installed so lib is in the path
         for path in glob.glob("/gems/gems/**/lib"):
@@ -246,20 +266,24 @@ class System(metaclass=SystemMeta):
         self.telemetry = Telemetry(self.packet_config, self)
         self.limits = Limits(self.packet_config, self)
         for target_name in target_names:
-            self.add_target(target_name, target_config_dir)
+            self.add_target(target_name, target_config_dir, **((target_overrides or {}).get(target_name, {})))
 
-    def add_target(self, target_name, target_config_dir):
+    def add_target(self, target_name, target_config_dir, default_accessor=None, default_accessor_args=None):
         parser = ConfigParser()
         folder_name = f"{target_config_dir}/{target_name}"
         if not os.path.exists(folder_name):
             raise parser.error(f"Target folder must exist '{folder_name}'.")
 
         target = Target(target_name, target_config_dir)
+        # plugin.txt DEFAULT_ACCESSOR overrides target.txt value when set
+        if default_accessor:
+            target.default_accessor = default_accessor
+            target.default_accessor_args = default_accessor_args or []
         self.targets[target.name] = target
         errors = []  # Store all errors processing the cmd_tlm files
         try:
             for cmd_tlm_file in target.cmd_tlm_files:
-                self.packet_config.process_file(cmd_tlm_file, target.name)
+                self.packet_config.process_file(cmd_tlm_file, target.name, target.default_accessor, target.default_accessor_args)
         except Exception as error:
             trace = "".join(traceback.TracebackException.from_exception(error).format())
             errors.append(f"Error processing {target_name}:\n{trace}")

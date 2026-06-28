@@ -66,6 +66,12 @@ module OpenC3
     # @return [String] Id of the target configuration
     attr_accessor :id
 
+    # @return [String, nil] Default accessor class name for all packets in this target
+    attr_accessor :default_accessor
+
+    # @return [Array<String>] Arguments to pass to the default accessor constructor
+    attr_accessor :default_accessor_args
+
     # Creates a new target by processing the target.txt file in the directory
     # given by the path joined with the target_name. Records all the command
     # and telemetry definition files found in the targets cmd_tlm directory.
@@ -84,6 +90,8 @@ module OpenC3
       @routers = []
       @cmd_cnt = 0
       @tlm_cnt = 0
+      @default_accessor = nil
+      @default_accessor_args = []
       @name = target_name.clone.upcase.freeze
       get_target_dir(path, gem_path)
       process_target_config_file()
@@ -160,6 +168,12 @@ module OpenC3
 
           @cmd_tlm_files << filename
 
+        when 'DEFAULT_ACCESSOR'
+          usage = "#{keyword} <CLASS NAME> <Optional args>..."
+          parser.verify_num_parameters(1, nil, usage)
+          @default_accessor = parameters[0]
+          @default_accessor_args = parameters[1..-1]
+
         when 'CMD_UNIQUE_ID_MODE', 'TLM_UNIQUE_ID_MODE'
           # Deprecated - Now autodetected
 
@@ -178,6 +192,8 @@ module OpenC3
       config['ignored_items'] = @ignored_items
       config['cmd_tlm_files'] = @cmd_tlm_files
       config['id'] = @id
+      config['default_accessor'] = @default_accessor
+      config['default_accessor_args'] = @default_accessor_args
       config
     end
 

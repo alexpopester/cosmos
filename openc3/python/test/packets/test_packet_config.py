@@ -670,6 +670,66 @@ class TestPacketConfig(unittest.TestCase):
             ):
                 self.pc.process_file(tf.name, "SYSTEM")
 
+    def test_default_accessor_applies_to_all_command_and_telemetry_packets(self):
+        with tempfile.NamedTemporaryFile(mode="w") as tf:
+            tf.write('TELEMETRY tgt1 pkt1 LITTLE_ENDIAN "Description"\n')
+            tf.write("  APPEND_ITEM item1 8 UINT\n")
+            tf.write('COMMAND tgt1 cmd1 LITTLE_ENDIAN "Description"\n')
+            tf.write("  APPEND_PARAMETER param1 8 UINT MIN MAX 0\n")
+            tf.seek(0)
+            self.pc.process_file(tf.name, "TGT1", "JsonAccessor")
+            self.assertEqual(self.pc.telemetry["TGT1"]["PKT1"].accessor.__class__.__name__, "JsonAccessor")
+            self.assertEqual(self.pc.commands["TGT1"]["CMD1"].accessor.__class__.__name__, "JsonAccessor")
+
+    def test_default_accessor_forwards_constructor_args(self):
+        with tempfile.NamedTemporaryFile(mode="w") as tf:
+            tf.write('TELEMETRY tgt1 pkt1 LITTLE_ENDIAN "Description"\n')
+            tf.write("  APPEND_ITEM item1 8 UINT\n")
+            tf.seek(0)
+            self.pc.process_file(tf.name, "TGT1", "HttpAccessor", ["JsonAccessor"])
+            self.assertEqual(self.pc.telemetry["TGT1"]["PKT1"].accessor.__class__.__name__, "HttpAccessor")
+
+    def test_default_accessor_is_overridden_by_per_packet_accessor(self):
+        with tempfile.NamedTemporaryFile(mode="w") as tf:
+            tf.write('TELEMETRY tgt1 pkt1 LITTLE_ENDIAN "Description"\n')
+            tf.write("  ACCESSOR openc3/accessors/xml_accessor.py\n")
+            tf.write("  APPEND_ITEM item1 8 UINT\n")
+            tf.seek(0)
+            self.pc.process_file(tf.name, "TGT1", "JsonAccessor")
+            self.assertEqual(self.pc.telemetry["TGT1"]["PKT1"].accessor.__class__.__name__, "XmlAccessor")
+
+    def test_default_accessor_does_not_apply_to_select_telemetry(self):
+        with tempfile.NamedTemporaryFile(mode="w") as tf:
+            tf.write('TELEMETRY tgt1 pkt1 LITTLE_ENDIAN "Description"\n')
+            tf.write("  APPEND_ITEM item1 8 UINT\n")
+            tf.seek(0)
+            self.pc.process_file(tf.name, "TGT1")
+            self.assertEqual(self.pc.telemetry["TGT1"]["PKT1"].accessor.__class__.__name__, "BinaryAccessor")
+
+        with tempfile.NamedTemporaryFile(mode="w") as tf2:
+            tf2.write("SELECT_TELEMETRY tgt1 pkt1\n")
+            tf2.write("  SELECT_ITEM item1\n")
+            tf2.write('    DESCRIPTION "Updated"\n')
+            tf2.seek(0)
+            self.pc.process_file(tf2.name, "TGT1", "JsonAccessor")
+            self.assertEqual(self.pc.telemetry["TGT1"]["PKT1"].accessor.__class__.__name__, "BinaryAccessor")
+
+    def test_default_accessor_raises_error_for_bad_class_name(self):
+        with tempfile.NamedTemporaryFile(mode="w") as tf:
+            tf.write('TELEMETRY tgt1 pkt1 LITTLE_ENDIAN "Description"\n')
+            tf.write("  APPEND_ITEM item1 8 UINT\n")
+            tf.seek(0)
+            with self.assertRaises(Exception):
+                self.pc.process_file(tf.name, "TGT1", "NonExistentAccessor99")
+
+    def test_no_default_accessor_leaves_binary_accessor(self):
+        with tempfile.NamedTemporaryFile(mode="w") as tf:
+            tf.write('TELEMETRY tgt1 pkt1 LITTLE_ENDIAN "Description"\n')
+            tf.write("  APPEND_ITEM item1 8 UINT\n")
+            tf.seek(0)
+            self.pc.process_file(tf.name, "TGT1")
+            self.assertEqual(self.pc.telemetry["TGT1"]["PKT1"].accessor.__class__.__name__, "BinaryAccessor")
+
     def test_response_only_applies_to_commands(self):
         with tempfile.NamedTemporaryFile(mode="w") as tf:
             tf.write('TELEMETRY tgt1 pkt1 LITTLE_ENDIAN "Packet"\n')

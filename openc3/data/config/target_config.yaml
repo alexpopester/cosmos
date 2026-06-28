@@ -89,6 +89,25 @@ TELEMETRY:
       description: Name of a telemetry definition file in the target's cmd_tlm
         directory, e.g. "tlm.txt".
       values: '.*\.txt'
+DEFAULT_ACCESSOR:
+  summary: Default accessor class for all packets in this target
+  description: Applies the named accessor class to every COMMAND and TELEMETRY packet
+    defined in this target without requiring an individual ACCESSOR keyword on each
+    packet. A per-packet ACCESSOR keyword still overrides this default for that packet
+    only. Targets without DEFAULT_ACCESSOR continue to use BinaryAccessor as before.
+  example: DEFAULT_ACCESSOR JsonAccessor
+  parameters:
+    - name: Class Name
+      required: true
+      description: The accessor class name (e.g. JsonAccessor, XmlAccessor, CborAccessor).
+        For Ruby targets pass the class name directly. For Python targets pass either
+        the module path (e.g. openc3/accessors/json_accessor.py) or the class name.
+      values: .+
+    - name: Args
+      required: false
+      description: Optional constructor arguments forwarded to the accessor's initializer.
+        Multiple args may be listed separated by spaces.
+      values: .+
 CMD_UNIQUE_ID_MODE:
   summary: Command packet identifiers don't all share the same bit offset, size, and type
   description:

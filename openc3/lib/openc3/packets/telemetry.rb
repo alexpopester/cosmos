@@ -338,6 +338,10 @@ module OpenC3
         identified_packet.received_time = packet.received_time
         identified_packet.stored = packet.stored
         identified_packet.extra = packet.extra
+        # Inherit the interface-set accessor when the definition doesn't declare one
+        if identified_packet.accessor.is_a?(BinaryAccessor) && !packet.accessor.is_a?(BinaryAccessor)
+          identified_packet.accessor = packet.accessor.class.new(identified_packet)
+        end
         return identified_packet
       end
 
@@ -352,6 +356,10 @@ module OpenC3
         identified_packet.received_time = packet.received_time
         identified_packet.stored = packet.stored
         identified_packet.extra = packet.extra
+        # Inherit the interface-set accessor when the definition doesn't declare one
+        if identified_packet.accessor.is_a?(BinaryAccessor) && !packet.accessor.is_a?(BinaryAccessor)
+          identified_packet.accessor = packet.accessor.class.new(identified_packet)
+        end
         return identified_packet
       end
 

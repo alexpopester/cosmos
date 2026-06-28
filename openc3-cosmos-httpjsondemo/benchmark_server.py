@@ -38,56 +38,58 @@ import threading
 import time
 
 # ---------------------------------------------------------------------------
-# Packet definitions — field names must match tlm.txt exactly.
+# Packet definitions — JSON keys must be UPPERCASE to match COSMOS item names.
+# COSMOS upcases all item names (e.g. APPEND_ITEM power_on → key "POWER_ON"),
+# so incoming JSON must use the same uppercase keys for JsonAccessor to parse them.
 # ---------------------------------------------------------------------------
 
 ALL_PACKETS = {
     "INBOUND": {
         "description": "baseline  — 3 fields  (2 floats, 1 string)",
         "body": {
-            "temperature": 72.5,
-            "pressure": 101.3,
-            "label": "bench_sensor",
+            "TEMPERATURE": 72.5,
+            "PRESSURE": 101.3,
+            "LABEL": "bench_sensor",
         },
     },
     "METRICS": {
         "description": "wide numeric — 12 fields (8 floats, 4 uints)",
         "body": {
-            "cpu_pct": 45.2,
-            "mem_pct": 62.1,
-            "disk_pct": 78.3,
-            "net_rx_kbps": 1024.5,
-            "net_tx_kbps": 512.0,
-            "load_1m": 1.45,
-            "load_5m": 1.32,
-            "load_15m": 1.10,
-            "uptime_secs": 86400,
-            "proc_count": 142,
-            "thread_count": 891,
-            "fd_count": 2048,
+            "CPU_PCT": 45.2,
+            "MEM_PCT": 62.1,
+            "DISK_PCT": 78.3,
+            "NET_RX_KBPS": 1024.5,
+            "NET_TX_KBPS": 512.0,
+            "LOAD_1M": 1.45,
+            "LOAD_5M": 1.32,
+            "LOAD_15M": 1.10,
+            "UPTIME_SECS": 86400,
+            "PROC_COUNT": 142,
+            "THREAD_COUNT": 891,
+            "FD_COUNT": 2048,
         },
     },
     "EVENT": {
         "description": "string-heavy — 5 fields  (4 strings, 1 uint)",
         "body": {
-            "event_type": "FAULT",
-            "source": "subsystem_a",
-            "message": "Threshold exceeded on channel 3 — value 112.4 > limit 100.0",
-            "severity": "WARNING",
-            "sequence": 1001,
+            "EVENT_TYPE": "FAULT",
+            "SOURCE": "subsystem_a",
+            "MESSAGE": "Threshold exceeded on channel 3 — value 112.4 > limit 100.0",
+            "SEVERITY": "WARNING",
+            "SEQUENCE": 1001,
         },
     },
     "STATUS": {
         "description": "integer flags — 8 fields  (all uint)",
         "body": {
-            "power_on": 1,
-            "comm_active": 1,
-            "safe_mode": 0,
-            "error_flags": 0,
-            "mode": 2,
-            "cycle_count": 50000,
-            "last_cmd_seq": 999,
-            "checksum": 65280,
+            "POWER_ON": 1,
+            "COMM_ACTIVE": 1,
+            "SAFE_MODE": 0,
+            "ERROR_FLAGS": 0,
+            "MODE": 2,
+            "CYCLE_COUNT": 50000,
+            "LAST_CMD_SEQ": 999,
+            "CHECKSUM": 65280,
         },
     },
 }

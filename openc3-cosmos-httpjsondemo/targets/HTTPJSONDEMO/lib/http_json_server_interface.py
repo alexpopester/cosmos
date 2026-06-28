@@ -12,10 +12,12 @@
 import json
 import queue
 import traceback
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
 from threading import Thread
 from urllib.parse import parse_qsl
 
+from openc3.accessors.json_accessor import JsonAccessor
 from openc3.interfaces.interface import Interface
 from openc3.packets.packet import Packet
 from openc3.system.system import System
@@ -25,7 +27,6 @@ _OK_BODY = b'{"status":"ok"}'
 _OK_HEADERS = [
     ("Content-Type", "application/json"),
     ("Content-Length", str(len(_OK_BODY))),
-    ("Connection", "close"),
 ]
 
 
@@ -34,12 +35,22 @@ def _error_body(message):
     headers = [
         ("Content-Type", "application/json"),
         ("Content-Length", str(len(body))),
-        ("Connection", "close"),
     ]
     return body, headers
 
 
+class _HttpServer(ThreadingMixIn, HTTPServer):
+    # Raise the TCP listen backlog from the default of 5 so that bursts of
+    # concurrent connections don't cause SYN drops and 1-second retransmit waits.
+    request_queue_size = 256
+    # Handler threads are daemon threads so they don't block process shutdown.
+    daemon_threads = True
+
+
 class _Handler(BaseHTTPRequestHandler):
+    # HTTP/1.1 enables keep-alive by default, eliminating per-request reconnect overhead.
+    protocol_version = "HTTP/1.1"
+
     def log_message(self, format, *args):  # suppress default stdout access log
         pass
 
@@ -129,9 +140,11 @@ class HttpJsonServerInterface(Interface):
 
     Path format: POST /targetname/packetname
     The path segments are uppercased and used to identify the telemetry packet.
-    Item names in the packet definition must match the incoming JSON key names.
-    Telemetry definitions for packets received by this interface must declare
-    ACCESSOR JsonAccessor so that all COSMOS microservices parse the buffer correctly.
+    JSON keys must be UPPERCASE to match COSMOS item names. COSMOS upcases all
+    item names (APPEND_ITEM power_on → key "POWER_ON"), so senders must use the
+    same uppercase keys (e.g. {"POWER_ON": 1}) for JsonAccessor to parse them.
+    JsonAccessor is set automatically on received packets — no ACCESSOR declaration
+    needed in telemetry definitions.
 
     Supported options:
       LISTEN_ADDRESS <ip>  — bind address (default 0.0.0.0)
@@ -165,17 +178,21 @@ class HttpJsonServerInterface(Interface):
     def connect(self):
         self._request_queue = queue.Queue(maxsize=self.max_queue_depth)
 
-        self.server = ThreadingHTTPServer((self.listen_address, self.port), _Handler)
+        self.server = _HttpServer((self.listen_address, self.port), _Handler)
         self.server.request_queue = self._request_queue
         self.server.api_key = self.api_key
         self.server.allowed_content_types = self.allowed_content_types
 
         # Build the valid-packet lookup so the handler can reject unknown paths before 200 OK.
+        # Also set JsonAccessor on every defined packet so the CVT singleton already has the
+        # right accessor — this ensures telemetry.update() and decom cloning both work without
+        # requiring ACCESSOR declarations in the telemetry definitions.
         valid_packets = set()
         for target_name in self.target_names:
             try:
-                for packet_name in System.telemetry.packets(target_name):
+                for packet_name, pkt in System.telemetry.packets(target_name).items():
                     valid_packets.add((target_name.upper(), packet_name.upper()))
+                    pkt.accessor = JsonAccessor(pkt)
             except Exception:
                 Logger.error(
                     f"HttpJsonServerInterface: failed to enumerate packets for {target_name}\n{traceback.format_exc()}"
@@ -218,6 +235,7 @@ class HttpJsonServerInterface(Interface):
 
     def convert_data_to_packet(self, data, extra=None):
         packet = Packet(None, None, "BIG_ENDIAN", None, data)
+        packet.accessor = JsonAccessor(packet)
         if extra:
             target_name = extra.pop("HTTP_REQUEST_TARGET_NAME", None)
             packet_name = extra.pop("HTTP_REQUEST_PACKET_NAME", None)

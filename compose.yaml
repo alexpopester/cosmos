@@ -227,6 +227,7 @@ services:
       - "openc3-operator-tmp-v:/tmp"
       - "openc3-gems-v:/gems:ro"
       - "./plugins:/plugins:z"
+      - "./openc3/python/openc3/accessors/json_accessor.py:/openc3/python/openc3/accessors/json_accessor.py:ro,z"
       - "./cacert.pem:/devel/cacert.pem:z"
       # Add access to the entire C drive on Windows
       # - "/c:/c"

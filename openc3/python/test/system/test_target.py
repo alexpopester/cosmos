@@ -162,6 +162,48 @@ class TestTarget(unittest.TestCase):
             Target(self.target_name, self.temp_dir)
         self.assertIn("Unknown keyword", str(context.exception))
 
+    def test_default_accessor_is_none_by_default(self):
+        """Test that default_accessor is None when not specified"""
+        target = Target(self.target_name, self.temp_dir)
+        self.assertIsNone(target.default_accessor)
+        self.assertEqual(target.default_accessor_args, [])
+
+    def test_processes_default_accessor_keyword(self):
+        """Test DEFAULT_ACCESSOR keyword stores class name"""
+        self.create_target_txt("DEFAULT_ACCESSOR JsonAccessor\n")
+        target = Target(self.target_name, self.temp_dir)
+        self.assertEqual(target.default_accessor, "JsonAccessor")
+        self.assertEqual(target.default_accessor_args, [])
+
+    def test_processes_default_accessor_with_args(self):
+        """Test DEFAULT_ACCESSOR keyword stores class name and args"""
+        self.create_target_txt("DEFAULT_ACCESSOR HttpAccessor JsonAccessor extra\n")
+        target = Target(self.target_name, self.temp_dir)
+        self.assertEqual(target.default_accessor, "HttpAccessor")
+        self.assertEqual(target.default_accessor_args, ["JsonAccessor", "extra"])
+
+    def test_default_accessor_requires_at_least_one_parameter(self):
+        """Test that DEFAULT_ACCESSOR with no args raises an error"""
+        self.create_target_txt("DEFAULT_ACCESSOR\n")
+        with self.assertRaises(Exception) as context:
+            Target(self.target_name, self.temp_dir)
+        self.assertIn("Not enough parameters", str(context.exception))
+
+    def test_as_json_includes_default_accessor(self):
+        """Test that as_json includes default_accessor and default_accessor_args"""
+        self.create_target_txt("DEFAULT_ACCESSOR JsonAccessor arg1\n")
+        target = Target(self.target_name, self.temp_dir)
+        json_data = target.as_json()
+        self.assertEqual(json_data["default_accessor"], "JsonAccessor")
+        self.assertEqual(json_data["default_accessor_args"], ["arg1"])
+
+    def test_as_json_includes_none_default_accessor_when_not_set(self):
+        """Test that as_json includes null default_accessor when not configured"""
+        target = Target(self.target_name, self.temp_dir)
+        json_data = target.as_json()
+        self.assertIsNone(json_data["default_accessor"])
+        self.assertEqual(json_data["default_accessor_args"], [])
+
     def test_add_all_cmd_tlm_discovers_txt_files(self):
         """Test that add_all_cmd_tlm finds all .txt files"""
         self.create_cmd_tlm_files(["cmd1.txt", "tlm1.txt", "cmd2.txt"])

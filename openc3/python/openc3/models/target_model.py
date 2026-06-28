@@ -491,6 +491,8 @@ class TargetModel(Model):
         disable_erb=None,
         shard=0,
         db_shard=0,
+        default_accessor=None,
+        default_accessor_args=None,
         scope: str = OPENC3_SCOPE,
     ):
         if target_microservices is None:

@@ -102,7 +102,7 @@ class PacketConfig:
     # self.param filename [String] The name of the configuration file
     # self.param process_target_name [String] The target name. Pass None when parsing
     #   an xtce file to automatically determine the target name.
-    def process_file(self, filename, process_target_name):
+    def process_file(self, filename, process_target_name, default_accessor_class=None, default_accessor_args=None):
         # Handle .xtce files
         file_ext = os.path.splitext(filename)[1].lower()
         if file_ext == ".xtce":
@@ -121,6 +121,8 @@ class PacketConfig:
         self.converted_bit_size = None
         self.proc_text = ""
         self.building_generic_conversion = False
+        self._default_accessor_class = default_accessor_class
+        self._default_accessor_args = default_accessor_args if default_accessor_args is not None else []
 
         if process_target_name:
             process_target_name = process_target_name.upper()
@@ -164,6 +166,7 @@ class PacketConfig:
                             parser, process_target_name, self.commands, self.warnings
                         )
                         self.current_cmd_or_tlm = PacketConfig.COMMAND_STRING
+                        self._apply_default_accessor(parser)
 
                     case "TELEMETRY":
                         self.finish_packet()
@@ -175,6 +178,7 @@ class PacketConfig:
                             self.warnings,
                         )
                         self.current_cmd_or_tlm = PacketConfig.TELEMETRY_STRING
+                        self._apply_default_accessor(parser)
 
                     # Select an existing packet for editing
                     case "SELECT_COMMAND" | "SELECT_TELEMETRY":
@@ -593,6 +597,32 @@ class PacketConfig:
         self.current_packet = None
         self.current_item = None
         self.current_limits_group = None
+        self._default_accessor_class = None
+        self._default_accessor_args = []
+
+    def _apply_default_accessor(self, parser):
+        if not self._default_accessor_class:
+            return
+        klass = None
+        try:
+            klass = get_class_from_module(
+                filename_to_module(self._default_accessor_class),
+                filename_to_class_name(self._default_accessor_class),
+            )
+        except ModuleNotFoundError:
+            try:
+                filename = class_name_to_filename(self._default_accessor_class)
+                klass = get_class_from_module(f"openc3.accessors.{filename}", self._default_accessor_class)
+            except ModuleNotFoundError as error:
+                raise parser.error(
+                    f"ModuleNotFoundError loading default accessor '{self._default_accessor_class}'.\n{traceback.format_exc()}"
+                ) from error
+        if not klass:
+            raise parser.error(f"Failed to load class for DEFAULT_ACCESSOR '{self._default_accessor_class}'")
+        if self._default_accessor_args:
+            self.current_packet.accessor = klass(self.current_packet, *self._default_accessor_args)
+        else:
+            self.current_packet.accessor = klass(self.current_packet)
 
     def process_current_packet(self, parser, keyword, params):
         if not self.current_packet:

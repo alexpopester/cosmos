@@ -14,6 +14,7 @@ import queue
 
 import requests
 
+from openc3.accessors.json_accessor import JsonAccessor
 from openc3.config.config_parser import ConfigParser
 from openc3.interfaces.interface import Interface
 from openc3.packets.packet import Packet
@@ -127,50 +128,78 @@ class HttpJsonClientInterface(Interface):
     def convert_packet_to_data(self, packet):
         """
         Converts a packet to a flat JSON string and builds HTTP metadata extra.
-
-        Args:
-            packet: The packet to be converted.
-
-        Returns:
-            tuple: (json_string, extra) where json_string is the JSON-encoded
-                   packet fields and extra contains HTTP_METHOD, HTTP_HEADERS,
-                   and HTTP_URI.
+        HTTP_* items in the packet override interface-level defaults; all other
+        items are serialized to the JSON body.
         """
-        # Build flat dict from all packet fields, skipping COSMOS internal reserved items
         fields = {}
+        http_path = None
+        http_method = None
+        http_packet = None
+        http_error_packet = None
+        http_queries = {}
+        http_headers = {}
+
         for item in packet.sorted_items:
-            if item.name not in Packet.RESERVED_ITEM_NAMES:
+            if item.name in Packet.RESERVED_ITEM_NAMES:
+                continue
+            if item.name == "HTTP_PATH":
+                http_path = packet.read(item.name)
+            elif item.name == "HTTP_METHOD":
+                http_method = packet.read(item.name)
+            elif item.name == "HTTP_PACKET":
+                http_packet = packet.read(item.name)
+            elif item.name == "HTTP_ERROR_PACKET":
+                http_error_packet = packet.read(item.name)
+            elif item.name.startswith("HTTP_QUERY_"):
+                http_queries[item.name[11:].lower()] = packet.read(item.name)
+            elif item.name.startswith("HTTP_HEADER_"):
+                http_headers[item.name[12:].lower()] = packet.read(item.name)
+            else:
                 fields[item.name] = packet.read(item.name)
+
         json_string = json.dumps(fields)
 
-        # Build extra with HTTP metadata from interface-level config
+        merged_headers = dict(self.headers)
+        merged_headers.update(http_headers)
+
         extra = {}
-        extra["HTTP_METHOD"] = self.http_method
-        extra["HTTP_HEADERS"] = dict(self.headers)
-        extra["HTTP_URI"] = f"{self.url}{self.path}"
+        extra["HTTP_METHOD"] = http_method or self.http_method
+        extra["HTTP_HEADERS"] = merged_headers
+        if http_queries:
+            extra["HTTP_QUERIES"] = http_queries
+        extra["HTTP_URI"] = f"{self.url}{http_path or self.path}"
+
+        # Per-command response routing — stored in extra so convert_data_to_packet can use it
+        if http_packet:
+            extra["HTTP_PACKET"] = http_packet.upper()
+            if http_error_packet:
+                extra["HTTP_ERROR_PACKET"] = http_error_packet.upper()
+            extra["HTTP_REQUEST_TARGET_NAME"] = packet.target_name
 
         return json_string, extra
 
     def convert_data_to_packet(self, data, extra=None):
         """
         Converts response data into a Packet object.
-
-        Routes to RESPONSE_PACKET or ERROR_PACKET based on the HTTP status code.
-
-        Args:
-            data (str): Raw JSON response data.
-            extra (dict, optional): Contains HTTP_STATUS and other metadata.
-
-        Returns:
-            Packet: OpenC3 Packet with buffer set to the raw response data.
+        Sets JsonAccessor automatically so telemetry definitions don't require it.
+        Per-command routing (HTTP_PACKET in extra) takes priority over interface-level config.
         """
         if isinstance(data, str):
             data = data.encode("utf-8")
         packet = Packet(None, None, "BIG_ENDIAN", None, data)
+        packet.accessor = JsonAccessor(packet)
 
-        # Route based on HTTP status code and stored packet config
         status = int(extra["HTTP_STATUS"]) if extra and "HTTP_STATUS" in extra else 0
-        if status >= 300 and self.error_packet_name is not None:
+
+        if extra and extra.get("HTTP_PACKET"):
+            target_name = extra.get("HTTP_REQUEST_TARGET_NAME")
+            if status >= 300 and extra.get("HTTP_ERROR_PACKET"):
+                packet.target_name = target_name
+                packet.packet_name = extra["HTTP_ERROR_PACKET"]
+            else:
+                packet.target_name = target_name
+                packet.packet_name = extra["HTTP_PACKET"]
+        elif status >= 300 and self.error_packet_name is not None:
             packet.target_name = self.error_target_name
             packet.packet_name = self.error_packet_name
         else:

@@ -15,6 +15,7 @@ VARIABLE httpjsondemo_api_key_secret HTTPJSONDEMO_API_KEY
 VARIABLE httpjsondemo_max_queue_depth 1000
 
 TARGET HTTPJSONDEMO <%= httpjsondemo_target_name %>
+  DEFAULT_ACCESSOR JsonAccessor
   # Decom tlm and cmd data in the time-series database is kept forever by default.
   # Uncomment to enforce a 30 day retention time. See https://docs.openc3.com/docs/configuration/plugins
   # CMD_DECOM_RETAIN_TIME 30d

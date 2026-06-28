@@ -39,6 +39,8 @@ class Target:
         self.dir: str | None = None
         self.id: str | None = None
         self.filename: str | None = None
+        self.default_accessor: str | None = None
+        self.default_accessor_args: list = []
         self.name = target_name.upper()
 
         self.get_target_dir(path, gem_path)
@@ -84,6 +86,12 @@ class Target:
                         raise parser.error(f"{filename} not found")
                     self.cmd_tlm_files.append(filename)
 
+                case "DEFAULT_ACCESSOR":
+                    usage = f"{keyword} <CLASS NAME> <Optional args>..."
+                    parser.verify_num_parameters(1, None, usage)
+                    self.default_accessor = parameters[0]
+                    self.default_accessor_args = parameters[1:]
+
                 case "CMD_UNIQUE_ID_MODE" | "TLM_UNIQUE_ID_MODE":
                     # Deprecated - Now autodetected
                     pass
@@ -100,6 +108,8 @@ class Target:
             "ignored_items": self.ignored_items,
             "cmd_tlm_files": self.cmd_tlm_files,
             "id": self.id,
+            "default_accessor": self.default_accessor,
+            "default_accessor_args": self.default_accessor_args,
         }
         return config
 

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/nix/store/gik3rh1vz2jlgnifb9dh6vc6sxwwz9jj-bash-5.3p9/bin/bash
 #
 # Migration script to transfer data from MINIO (COSMOS 6) to versitygw (COSMOS 7)
 #

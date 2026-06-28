@@ -159,6 +159,24 @@ TARGET:
           values: \d+
       example: |
         SHARD 0
+    DEFAULT_ACCESSOR:
+      summary: Default accessor class for all packets in this target
+      description: Overrides any DEFAULT_ACCESSOR set in target.txt. Applies the
+        named accessor class to every COMMAND and TELEMETRY packet in the target
+        without requiring an individual ACCESSOR keyword on each packet definition.
+        A per-packet ACCESSOR keyword still overrides this default for that packet
+        only.
+      example: DEFAULT_ACCESSOR JsonAccessor
+      parameters:
+        - name: Class Name
+          required: true
+          description: The accessor class name (e.g. JsonAccessor, XmlAccessor, CborAccessor).
+          values: .+
+        - name: Args
+          required: false
+          description: Optional constructor arguments forwarded to the accessor initializer.
+            Multiple args may be listed separated by spaces.
+          values: .+
     DB_SHARD:
       summary: Shard for target database database if sharding Redis/TSDB
       description: DB Shard. Only used if running multiple database shards typically in Kubernetes

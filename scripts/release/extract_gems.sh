@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/nix/store/gik3rh1vz2jlgnifb9dh6vc6sxwwz9jj-bash-5.3p9/bin/sh
 set -eux
 
 id=$(docker create $OPENC3_REGISTRY/openc3inc/openc3-base:$OPENC3_RELEASE_VERSION)
