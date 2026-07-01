@@ -1,0 +1,38 @@
+# encoding: ascii-8bit
+
+# Copyright 2026 OpenC3, Inc.
+# All Rights Reserved.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE.md for more details.
+#
+# This file may also be used under the terms of a commercial license
+# if purchased from OpenC3, Inc.
+
+spec = Gem::Specification.new do |s|
+  s.name = 'openc3-json-tlm-server'
+  s.summary = 'OpenC3 JSON Telemetry Server Interface'
+  s.description = <<-EOF
+    Provides JsonTelemetryServerInterface — accepts POST /<target>/<packet> with a flat
+    JSON body and maps keys to packet items by name. No HTTP-specific fields required in
+    packet definitions.
+  EOF
+  s.authors = ['OpenC3, Inc.']
+  s.email = ['plugins@openc3.com']
+  s.homepage = 'https://github.com/OpenC3/cosmos'
+
+  s.platform = Gem::Platform::RUBY
+  s.required_ruby_version = '>= 3.0'
+
+  if ENV['VERSION']
+    s.version = ENV['VERSION'].dup
+  else
+    time = Time.now.strftime("%Y%m%d%H%M%S")
+    s.version = '0.0.0' + ".#{time}"
+  end
+  s.license = 'OpenC3'
+
+  s.files = Dir.glob("{targets,lib,python,scripts}/**/*") + %w(Rakefile README.md plugin.txt)
+end

@@ -59,3 +59,4 @@ __pycache__
 
 playwright/tests/enterprise
 .vscode
+.direnv/

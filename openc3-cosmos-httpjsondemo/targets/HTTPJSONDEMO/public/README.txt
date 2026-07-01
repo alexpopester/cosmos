@@ -1,1 +1,0 @@
-Put image files in this directory for use in Telemetry Viewer Canvas Image widgets such as CANVASIMAGE and CANVASIMAGEVALUE.

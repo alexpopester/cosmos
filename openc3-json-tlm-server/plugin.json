@@ -1,0 +1,8 @@
+{
+  "variables": {
+    "port": "8765",
+    "listen_address": "0.0.0.0",
+    "interface_name": "JSON_TLM_INT",
+    "json_tlm_target": "JSON_TLM_TEST"
+  }
+}

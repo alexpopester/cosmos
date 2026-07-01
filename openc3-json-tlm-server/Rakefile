@@ -1,0 +1,10 @@
+# encoding: ascii-8bit
+
+require 'rake'
+require 'rubygems/package_task'
+
+spec = Gem::Specification.load('openc3-json-tlm-server.gemspec')
+Gem::PackageTask.new(spec) do |t|
+  t.need_zip = false
+  t.need_tar = false
+end

@@ -1,0 +1,9 @@
+# encoding: ascii-8bit
+
+source 'https://rubygems.org'
+
+openc3_path = ENV['OPENC3_DEVEL'] || File.expand_path('../openc3', __dir__)
+gem 'openc3', path: openc3_path
+
+gem 'rspec', '~> 3.0'
+gem 'mock_redis', '~> 0.47'

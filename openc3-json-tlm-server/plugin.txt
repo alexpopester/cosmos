@@ -1,0 +1,18 @@
+VARIABLE port 8765
+  VARIABLE_DESCRIPTION "Port for the JSON telemetry server"
+
+VARIABLE listen_address 0.0.0.0
+  VARIABLE_DESCRIPTION "IP address to bind the interface to"
+
+VARIABLE interface_name JSON_TLM_INT
+  VARIABLE_DESCRIPTION "Name for the JSON telemetry server interface"
+
+VARIABLE json_tlm_target JSON_TLM_TEST
+  VARIABLE_DESCRIPTION "Name for the test target"
+
+TARGET JSON_TLM_TEST <%= json_tlm_target %>
+
+INTERFACE <%= interface_name %> json_telemetry_server_interface.rb <%= port %>
+  # SECRET_OPTION API_KEY <secret_name>   # optional: require Bearer token auth
+  OPTION LISTEN_ADDRESS <%= listen_address %>
+  MAP_TARGET <%= json_tlm_target %>
