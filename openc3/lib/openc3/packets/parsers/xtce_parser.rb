@@ -17,6 +17,8 @@
 
 require 'nokogiri'
 require 'ostruct'
+require 'json'
+require 'tempfile'
 
 module OpenC3
   class XtceParser
@@ -106,6 +108,7 @@ module OpenC3
       if @current_packet
         @warnings += @current_packet.check_bit_offsets
         set_packet_endianness()
+        reconstruct_derived_items(@current_packet)
         if @current_cmd_or_tlm == PacketConfig::COMMAND
           PacketParser.check_item_data_types(@current_packet)
           @commands[@current_packet.target_name][@current_packet.packet_name] = @current_packet
@@ -113,6 +116,45 @@ module OpenC3
           @telemetry[@current_packet.target_name][@current_packet.packet_name] = @current_packet
         end
         @current_packet = nil
+      end
+    end
+
+    # Rebuild the DERIVED items carried in the packet's COSMOS_DERIVED fragment and
+    # add them to the packet. The fragment is COSMOS config, so it is re-parsed through
+    # a throwaway PacketConfig (reusing COSMOS's own parser), and the resulting derived
+    # items - those COSMOS did not auto-create - are copied in. A derived item occupies
+    # no bits, so adding it does not disturb the packet layout. A fragment that fails to
+    # parse (for example a conversion whose file is unavailable here) is skipped with a
+    # warning rather than aborting the whole import.
+    def reconstruct_derived_items(packet)
+      config_text = @derived_configs[packet]
+      return unless config_text
+
+      endianness = packet.default_endianness == :LITTLE_ENDIAN ? 'LITTLE_ENDIAN' : 'BIG_ENDIAN'
+      tempfile = Tempfile.new(['xtce_derived', '.txt'])
+      begin
+        tempfile.write("TELEMETRY #{packet.target_name} #{packet.packet_name} #{endianness} \"derived\"\n")
+        tempfile.write(config_text)
+        tempfile.close
+        # PacketConfig is referenced at runtime, not required: packet_config.rb requires
+        # this file, so a require here would be circular.
+        temp_config = PacketConfig.new
+        temp_config.process_file(tempfile.path, packet.target_name)
+        rebuilt = temp_config.telemetry[packet.target_name][packet.packet_name]
+        rebuilt.sorted_items.each do |item|
+          next if item.data_type != :DERIVED
+          # Skip the derived items COSMOS adds to every packet on its own
+          next if Packet::RESERVED_ITEM_NAMES.include?(item.name)
+
+          packet.define(item.clone)
+        end
+      rescue => e
+        msg = "Failed to reconstruct XTCE derived items for #{packet.target_name} #{packet.packet_name}: #{e.message}"
+        Logger.instance.warn(msg)
+        @warnings << msg
+      ensure
+        tempfile.close unless tempfile.closed?
+        tempfile.unlink
       end
     end
 
@@ -146,6 +188,7 @@ module OpenC3
       @parameters = {}
       @arguments = {}
       @containers = {}
+      @derived_configs = {}
     end
 
     def create_new_type(element)
@@ -165,6 +208,16 @@ module OpenC3
 
     # Namespace COSMOS writes its own item names into when the XTCE name had to differ
     COSMOS_ALIAS_NAMESPACE = 'COSMOS'
+
+    # AncillaryData carrier names COSMOS writes to make a round trip lossless. Must
+    # match the constants of the same names in xtce_converter.rb.
+    COSMOS_VARIABLE_SIZE = 'COSMOS_VARIABLE_SIZE' # string size 0 ("rest of packet")
+    COSMOS_LIMITS = 'COSMOS_LIMITS'               # full limits (all sets, green, etc.)
+    COSMOS_STATES = 'COSMOS_STATES'               # states EnumerationList can't carry
+    COSMOS_STATE_META = 'COSMOS_STATE_META'       # state colors / hazardous / disabled
+    COSMOS_DERIVED = 'COSMOS_DERIVED'             # config fragment for DERIVED items
+    COSMOS_CONVERSION = 'COSMOS_CONVERSION'       # read/write conversion XTCE can't express
+    COSMOS_FORMAT_STRING = 'COSMOS_FORMAT_STRING' # printf-style display format
 
     def xtce_process_element(element)
       if XTCE_IGNORED_ELEMENTS.include?(element.name)
@@ -187,8 +240,31 @@ module OpenC3
         'EntryList', 'DefaultCalibrator', 'DefaultAlarm', 'RestrictionCriteria',
         'ComparisonList', 'MetaCommandSet', 'ArgumentTypeSet', 'ArgumentList',
         'ArgumentAssignmentList', 'LocationInContainerInBits', 'ReferenceTime',
-        'AncillaryDataSet', 'AncillaryData'
+        'AncillaryDataSet'
         # Do Nothing
+
+      when 'AncillaryData'
+        # COSMOS specific metadata carriers. Unknown names are ignored so foreign
+        # AncillaryData does not disturb the parse.
+        case element['name']
+        when 'ALLOW_SHORT'
+          @current_packet.short_buffer_allowed = true if @current_packet
+        when COSMOS_DERIVED
+          # Reconstructed in finish_packet once the packet's real items are in place
+          @derived_configs[@current_packet] = element.text if @current_packet
+        when COSMOS_VARIABLE_SIZE
+          @current_type.variable_size = true if @current_type
+        when COSMOS_LIMITS
+          @current_type.limits_carrier = JSON.parse(element.text) if @current_type
+        when COSMOS_STATES
+          @current_type.states_carrier = JSON.parse(element.text) if @current_type
+        when COSMOS_STATE_META
+          @current_type.state_meta_carrier = JSON.parse(element.text) if @current_type
+        when COSMOS_CONVERSION
+          @current_type.conversion_config = element.text if @current_type
+        when COSMOS_FORMAT_STRING
+          @current_type.format_string = element.text if @current_type
+        end
 
       when 'ErrorDetectCorrect'
         # TODO: Setup an algorithm to calculate the CRC
@@ -543,7 +619,9 @@ module OpenC3
       reference_location, bit_offset = xtce_handle_location_in_container_in_bits(element)
       object, type, data_type, array_type = get_object_types(element)
       item_name = cosmos_item_name(object)
-      bit_size = Integer(type.sizeInBits)
+      # A COSMOS variable length string carries a placeholder size in the encoding;
+      # the carrier restores the original 0 ("consume the rest of the packet").
+      bit_size = type.variable_size ? 0 : Integer(type.sizeInBits)
       if array_type
         array_bit_size = process_array_type(element, bit_size)
       else
@@ -569,10 +647,56 @@ module OpenC3
 
       item.description = type.shortDescription if type.shortDescription
       item.states = type.states if type.states
+      # The carrier holds the exact states (string values, ANY) when present and
+      # takes precedence over anything rebuilt from an EnumerationList.
+      item.states = type.states_carrier if type.states_carrier
+      apply_state_meta(item, type)
+      item.format_string = type.format_string if type.format_string
       set_units(item, type)
       set_conversion(item, type, data_type)
+      # Carried conversions (anything but PolynomialConversion) are reconstructed after
+      # set_conversion so a native polynomial on one direction and a carried conversion
+      # on the other coexist rather than clobber each other.
+      reconstruct_conversions(item, type)
       set_min_max_default(item, type, data_type)
       set_limits(item, type)
+    end
+
+    # Rebuild a non-derived item's carried read / write conversion. The carrier holds a
+    # COSMOS config fragment (GENERIC_*_CONVERSION, SEG_POLY_*, READ/WRITE_CONVERSION),
+    # which is re-parsed through a throwaway single-item packet - reusing COSMOS's own
+    # conversion parsing - and the resulting conversion objects are copied onto the real
+    # item. A fragment that fails to parse (for example a custom conversion class whose
+    # file is unavailable here) is skipped with a warning rather than aborting the import.
+    def reconstruct_conversions(item, type)
+      config_text = type.conversion_config
+      return unless config_text
+
+      bit_size = type.variable_size ? 0 : Integer(type.sizeInBits)
+      tempfile = Tempfile.new(['xtce_conv', '.txt'])
+      begin
+        tempfile.write("TELEMETRY #{@current_target_name} XTCE_CONV_RECONSTRUCT BIG_ENDIAN \"d\"\n")
+        tempfile.write("  ITEM VALUE 0 #{bit_size} #{item.data_type} \"d\"\n")
+        tempfile.write(config_text)
+        tempfile.close
+        # PacketConfig is referenced at runtime, not required: packet_config.rb requires
+        # this file, so a require here would be circular.
+        temp_config = PacketConfig.new
+        temp_config.process_file(tempfile.path, @current_target_name)
+        rebuilt = temp_config.telemetry[@current_target_name]['XTCE_CONV_RECONSTRUCT'].get_item('VALUE')
+        # A command argument's conversion lives in write_conversion, a telemetry item's
+        # in read_conversion; the carrier may hold either or both, so copy whatever the
+        # fragment produced without overwriting a native conversion with nil.
+        item.read_conversion = rebuilt.read_conversion if rebuilt.read_conversion
+        item.write_conversion = rebuilt.write_conversion if rebuilt.write_conversion
+      rescue => e
+        msg = "Failed to reconstruct XTCE conversion for #{item.name}: #{e.message}"
+        Logger.instance.warn(msg)
+        @warnings << msg
+      ensure
+        tempfile.close unless tempfile.closed?
+        tempfile.unlink
+      end
     end
 
     def get_object_types(element)
@@ -686,6 +810,17 @@ module OpenC3
       end
     end
 
+    # Restore the per-state COSMOS annotations carried alongside the states: telemetry
+    # state colors (back to symbols) and command hazardous / disabled-message flags.
+    def apply_state_meta(item, type)
+      return unless type.state_meta_carrier
+
+      meta = type.state_meta_carrier
+      item.state_colors = meta['colors'].transform_values(&:to_sym) if meta['colors']
+      item.hazardous = meta['hazardous'] if meta['hazardous']
+      item.messages_disabled = meta['messages_disabled'] if meta['messages_disabled']
+    end
+
     def set_conversion(item, type, data_type)
       if type.conversion && type.conversion.class == PolynomialConversion
         if @current_cmd_or_tlm == PacketConfig::COMMAND
@@ -787,7 +922,15 @@ module OpenC3
     def set_limits(item, type)
       return unless @current_cmd_or_tlm == PacketConfig::TELEMETRY
 
-      if type.limits
+      if type.limits_carrier
+        # Full fidelity path: every set, green/blue values, persistence and enabled
+        # state, restored from the COSMOS carrier.
+        values = type.limits_carrier['values'].transform_keys(&:to_sym)
+        item.limits.values = values
+        item.limits.enabled = type.limits_carrier['enabled'] ? true : false
+        persistence = type.limits_carrier['persistence']
+        item.limits.persistence_setting = Integer(persistence) if persistence
+      elsif type.limits
         item.limits.enabled = true
         values = {}
         values[:DEFAULT] = type.limits

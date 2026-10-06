@@ -18,11 +18,44 @@
 require 'nokogiri'
 require 'openc3/packets/parsers/xtce_parser'
 require 'fileutils'
+require 'json'
 
 DYNAMIC_STRING_LEN = 2048
 INVALID_CHARS = '[]./'
 REPLACEMENT_CHAR = '_'
 ALIAS_NAMESPACE = 'COSMOS'
+
+# AncillaryData carriers holding COSMOS detail XTCE can't natively express, so an
+# export / import round trip is lossless. Foreign tools ignore AncillaryData.
+# Must match the constants of the same names in xtce_parser.rb.
+#
+# COSMOS_VARIABLE_SIZE - a string whose COSMOS size is 0 ("consume the rest of the
+#   packet"). XTCE has no bare "rest of packet" string size, so the encoding carries
+#   the DYNAMIC_STRING_LEN placeholder for foreign tools and this marker restores 0.
+# COSMOS_LIMITS - the complete limits definition (every set, green/blue values,
+#   persistence and enabled state). XTCE StaticAlarmRanges only expresses the DEFAULT
+#   red/yellow pair, which is still emitted for foreign tools.
+# COSMOS_STATES - the complete states hash for cases the EnumerationList can't carry:
+#   string valued states and the special ANY catch-all.
+# COSMOS_STATE_META - per-state COSMOS annotations XTCE has no place for: telemetry
+#   state colors and command hazardous / disabled-message flags.
+# COSMOS_DERIVED - the COSMOS config fragment for a packet's DERIVED items (computed
+#   values with arbitrary conversions). XTCE can't express the conversion, so the
+#   fragment is carried on the container and re-parsed on import. Foreign tools see
+#   no entry for these items (they occupy no bits), which is correct for them.
+# COSMOS_CONVERSION - the COSMOS config fragment for a non-derived item's read / write
+#   conversion that XTCE can't express natively. Only PolynomialConversion maps to an
+#   XTCE PolynomialCalibrator; every other conversion (generic code, segmented
+#   polynomial, custom class) is carried verbatim and re-parsed on import.
+# COSMOS_FORMAT_STRING - the item's printf-style display format (FORMAT_STRING), which
+#   XTCE has no native field for.
+COSMOS_VARIABLE_SIZE = 'COSMOS_VARIABLE_SIZE'
+COSMOS_LIMITS = 'COSMOS_LIMITS'
+COSMOS_STATES = 'COSMOS_STATES'
+COSMOS_STATE_META = 'COSMOS_STATE_META'
+COSMOS_DERIVED = 'COSMOS_DERIVED'
+COSMOS_CONVERSION = 'COSMOS_CONVERSION'
+COSMOS_FORMAT_STRING = 'COSMOS_FORMAT_STRING'
 
 # IntegerRangeType declares minInclusive / maxInclusive as xs:long, so an integer range
 # outside these bounds (a full 64 bit UINT, for example) cannot be expressed as a
@@ -93,18 +126,15 @@ module OpenC3
       else
         puts "Multiple targets found. Creating Unified XTCE representation."
         FileUtils.mkdir_p(combined_file_directory)
-        file_basename = "combined"
-        xml_files.each do |file_path|
-          file_basename += "_#{File.basename(file_path, ".*")}"
-        end
-        full_file_name = File.join(combined_file_directory, file_basename.downcase + '.xtce')
+        # A single combined file lives in this directory, so a fixed name is
+        # unambiguous. Deriving the name from every target basename (which a prior
+        # version did, twice over) grows it without bound and breaks the filesystem's
+        # name length limit once there are many targets.
+        full_file_name = File.join(combined_file_directory, 'combined.xtce')
         begin
           File.delete(full_file_name)
         rescue
           # Doesn't exist
-        end
-        xml_files.each do |file_path|
-          file_basename += File.basename(file_path, ".*")
         end
         root_builder = Nokogiri::XML::Builder.new(:encoding => 'UTF-8') do |xml|
           xml['xtce'].SpaceSystem("xmlns:xtce" => "http://www.omg.org/spec/XTCE/20180204",
@@ -186,6 +216,15 @@ module OpenC3
         File.open(filename, 'w') do |file|
           file.puts builder.to_xml
         end
+
+        # Validate what we just wrote against the vendored XTCE 1.2 schema. The export
+        # is warn-and-degrade, so a schema violation is logged rather than raised - but
+        # it must not pass silently, or an invalid file ships unnoticed.
+        errors = XtceConverter.schema_errors(filename)
+        unless errors.empty?
+          Logger.instance.warn("Generated XTCE for #{target_name} has #{errors.length} schema " \
+                               "validation error(s):\n#{errors.join("\n")}")
+        end
       end
     end
 
@@ -233,17 +272,40 @@ module OpenC3
       xml['xtce'].comment "TODO \n#{algorithm_xml.to_xml(save_with: Nokogiri::XML::Node::SaveOptions::NO_DECLARATION | Nokogiri::XML::Node::SaveOptions::FORMAT)}\n"
     end
 
+    # The COSMOS config fragment for a packet's DERIVED items, or nil when there are
+    # none. XTCE can't express a derived value's conversion, so its COSMOS definition
+    # is carried verbatim (to_config is COSMOS's own serializer) and re-parsed on
+    # import. COSMOS native derived items (PACKET_TIMESECONDS, etc.) are recreated by
+    # COSMOS automatically, so they are excluded.
+    def derived_items_config(packet)
+      fragments = []
+      packet.sorted_items.each do |item|
+        next if item.data_type != :DERIVED
+        next if COSMOS_NATIVE_DERIVED_ITEMS.include?(item.name)
+
+        fragments << item.to_config(:TELEMETRY, packet.default_endianness)
+      end
+      return nil if fragments.empty?
+
+      fragments.join
+    end
+
     def create_telemetry(xml, telemetry, target_name)
       # Gather and make unique all the packet items
       return unless telemetry[target_name]
 
       unique_items = get_unique(telemetry[target_name])
-      has_packet_time = unique_items.include?(@packet_time_string)
+      # A TimeAssociation may only reference a real emitted parameter. The time item is
+      # usually DERIVED, which is carried in the COSMOS_DERIVED fragment rather than
+      # emitted as a Parameter, so associating to it would dangle - only associate when
+      # the time item exists and is a real (non-DERIVED) parameter.
+      time_item = unique_items[@packet_time_string]
+      has_packet_time = !time_item.nil? && time_item.data_type != :DERIVED
 
       xml['xtce'].TelemetryMetaData do
         # The schema requires at least one child in each set, so emit neither when the
-        # target's packets hold nothing but DERIVED items. DERIVED items produce a TODO
-        # comment at most, never a ParameterType, so they don't count here.
+        # target's packets hold nothing but DERIVED items. DERIVED items are carried in
+        # a COSMOS_DERIVED fragment, never a ParameterType, so they don't count here.
         if unique_items.any? { |_item_name, item| item.data_type != :DERIVED }
           xml['xtce'].ParameterTypeSet do
             unique_items.each do |item_name, item|
@@ -285,9 +347,11 @@ module OpenC3
                     xml['xtce'].Alias(:nameSpace => ALIAS_NAMESPACE, :alias => packet_name)
                   end
                 end
-                if packet.short_buffer_allowed
+                derived_config = derived_items_config(packet)
+                if packet.short_buffer_allowed || derived_config
                   xml['xtce'].AncillaryDataSet do
-                    xml['xtce'].AncillaryData("true", :name => "ALLOW_SHORT")
+                    xml['xtce'].AncillaryData("true", :name => "ALLOW_SHORT") if packet.short_buffer_allowed
+                    xml['xtce'].AncillaryData(derived_config, :name => COSMOS_DERIVED) if derived_config
                   end
                 end
                 if has_id_items
@@ -579,9 +643,9 @@ module OpenC3
       when :BLOCK
         to_xtce_string(item, param_or_arg, xml, 'Binary', prefix: prefix)
       when :DERIVED
-        if !COSMOS_NATIVE_DERIVED_ITEMS.include?(item.name)
-          to_xtce_derived(item, param_or_arg, xml, prefix: prefix)
-        end
+        # DERIVED items occupy no bits and their conversion can't be expressed in
+        # XTCE, so no type is emitted. Their full COSMOS definition rides along in
+        # the container's COSMOS_DERIVED carrier (see derived_items_config).
       end
 
       # Handle arrays
@@ -610,6 +674,82 @@ module OpenC3
           end # DimensionList
         end # Array<param_or_arg>Type
       end
+    end
+
+    # Emit the COSMOS round-trip carriers for an item as a single AncillaryDataSet.
+    # It must be the first child of the type: the schema orders a type's content as
+    # LongDescription, AliasSet, AncillaryDataSet, then UnitSet and the encoding.
+    # Only detail that would otherwise be lost is carried, so the common case (a
+    # plain integer, or an integer enumeration) emits nothing here.
+    def emit_ancillary(item, xml, string_or_binary = nil)
+      carriers = []
+      if string_or_binary == 'String' && item.bit_size == 0
+        carriers << [COSMOS_VARIABLE_SIZE, 'true']
+      end
+      if item.limits && item.limits.values
+        carriers << [COSMOS_LIMITS, limits_carrier_json(item)]
+      end
+      if item.states && states_carrier_needed?(item)
+        carriers << [COSMOS_STATES, JSON.generate(item.states)]
+      end
+      state_meta = state_meta_carrier(item)
+      carriers << [COSMOS_STATE_META, JSON.generate(state_meta)] unless state_meta.empty?
+      conversion_config = conversion_carrier_config(item)
+      carriers << [COSMOS_CONVERSION, conversion_config] if conversion_config
+      carriers << [COSMOS_FORMAT_STRING, item.format_string] if item.format_string
+      return if carriers.empty?
+
+      xml['xtce'].AncillaryDataSet do
+        carriers.each do |name, value|
+          xml['xtce'].AncillaryData(value, :name => name)
+        end
+      end
+    end
+
+    # The COSMOS config fragment for an item's read / write conversion, or nil when
+    # there is nothing to carry. PolynomialConversion maps to a native XTCE
+    # PolynomialCalibrator (emitted by to_xtce_conversion) and is not carried, so a
+    # polynomial read conversion paired with, say, a generic write conversion carries
+    # only the write half here. to_config is COSMOS's own serializer, so the fragment
+    # re-parses exactly on import.
+    def conversion_carrier_config(item)
+      fragments = []
+      rc = item.read_conversion
+      fragments << rc.to_config(:READ) if rc && rc.class != PolynomialConversion
+      wc = item.write_conversion
+      fragments << wc.to_config(:WRITE) if wc && wc.class != PolynomialConversion
+      return nil if fragments.empty?
+
+      fragments.join
+    end
+
+    # The EnumerationList can only carry integer-valued states with no catch-all, so
+    # a carrier is needed for string valued states and for the special ANY state.
+    def states_carrier_needed?(item)
+      return true if item.data_type == :STRING || item.data_type == :BLOCK
+
+      item.states.values.any? { |value| value == 'ANY' }
+    end
+
+    # Per-state COSMOS annotations XTCE has nowhere to put: telemetry state colors
+    # and command hazardous / disabled-message flags. Only non-empty sections are
+    # included so the common state has no carrier.
+    def state_meta_carrier(item)
+      meta = {}
+      meta['colors'] = item.state_colors.transform_values(&:to_s) if item.state_colors && !item.state_colors.empty?
+      meta['hazardous'] = item.hazardous if item.hazardous && !item.hazardous.empty?
+      meta['messages_disabled'] = item.messages_disabled if item.messages_disabled && !item.messages_disabled.empty?
+      meta
+    end
+
+    # Full limits as JSON: every set (not just DEFAULT), all values (including the
+    # optional green / blue operational pair), persistence and enabled state.
+    def limits_carrier_json(item)
+      JSON.generate(
+        'enabled' => item.limits.enabled ? true : false,
+        'persistence' => item.limits.persistence_setting,
+        'values' => item.limits.values.transform_keys(&:to_s)
+      )
     end
 
     def to_xtce_limits(item, xml)
@@ -653,6 +793,7 @@ module OpenC3
           attrs.delete(:initialValue)
         end
         xml['xtce'].public_send('Enumerated' + param_or_arg + 'Type', attrs) do
+          emit_ancillary(item, xml)
           to_xtce_units(item, xml)
           if item.endianness == :LITTLE_ENDIAN and item.bit_size > 8
             xml['xtce'].IntegerDataEncoding(:sizeInBits => item.bit_size, :encoding => encoding, :byteOrder => "leastSignificantByteFirst")
@@ -676,6 +817,7 @@ module OpenC3
           attrs[:signed] = signed
         end
         xml['xtce'].public_send(type_string, attrs) do
+          emit_ancillary(item, xml)
           to_xtce_units(item, xml)
           if (item.read_conversion and item.read_conversion.class == PolynomialConversion) or (item.write_conversion and item.write_conversion.class == PolynomialConversion)
             if item.endianness == :LITTLE_ENDIAN and item.bit_size >= 8
@@ -707,6 +849,7 @@ module OpenC3
       attrs[:initialValue] = item.default if item.default and !item.array_size
       attrs[:shortDescription] = item.description if item.description
       xml['xtce'].public_send('Float' + param_or_arg + 'Type', attrs) do
+        emit_ancillary(item, xml)
         to_xtce_units(item, xml)
         if (item.read_conversion and item.read_conversion.class == PolynomialConversion) or (item.write_conversion and item.write_conversion.class == PolynomialConversion)
           if item.endianness == :LITTLE_ENDIAN and item.bit_size >= 8
@@ -765,6 +908,7 @@ module OpenC3
       attrs[:initialValue] = initial_value if initial_value
       attrs[:shortDescription] = item.description if item.description
       xml['xtce'].public_send(string_or_binary + param_or_arg + 'Type', attrs) do
+        emit_ancillary(item, xml, string_or_binary)
         # Strings and Blocks don't get a byteOrder
         to_xtce_units(item, xml)
         if string_or_binary == 'String'
@@ -787,21 +931,6 @@ module OpenC3
             end
           end
         end
-      end
-    end
-
-    def to_xtce_derived(item, param_or_arg, xml, prefix: "")
-      if item.name == @packet_time_string
-        xml << "\n<!--TODO: \n" \
-               "\t<xtce:AbsoluteTime#{param_or_arg}Type name=\"#{item.name.tr(INVALID_CHARS, REPLACEMENT_CHAR)}_Type\">\n" \
-               "\t\t<TODO/>\n" \
-               "\t</xtce:AbsoluteTime#{param_or_arg}Type>"
-               "-->\n"
-      else
-        description_string = item.description ? "shortDescription=\"#{item.description}\"" : ""
-        xml << "\n<!--TODO: \n" \
-               "\t<xtce:TODO#{param_or_arg}Type name=\"#{item.name.tr(INVALID_CHARS, REPLACEMENT_CHAR)}_Type\" #{description_string} />\n" \
-               "-->\n"
       end
     end
 
@@ -831,20 +960,9 @@ module OpenC3
         attrs[:initialValue] = initial_value
       end
       if item.data_type == :DERIVED
-        if COSMOS_NATIVE_DERIVED_ITEMS.include?(item.name)
-          return
-        end
-        parameter_comment = "\n<!-- TODO: \n" \
-                 "\t<xtce:#{param_or_arg} name=\"#{item.name.tr(INVALID_CHARS, REPLACEMENT_CHAR)}\" #{param_or_arg.downcase}TypeRef=\"#{item.name.tr(INVALID_CHARS, REPLACEMENT_CHAR)}_Type\">\n" \
-                 "\t\t<xtce:ParameterProperties dataSource=\"derived\"/>\n"
-
-        if needs_alias
-          parameter_comment += "\t\t<xtce:AliasSet>\n" \
-                 "\t\t\t<xtce:Alias nameSpace=\"COSMOS\" alias=\"#{item.name.tr(INVALID_CHARS, REPLACEMENT_CHAR)}\"/>\n" \
-                 "\t\t</xtce:AliasSet>\n"
-        end
-        parameter_comment += "\t</xtce:#{param_or_arg}>\n-->\n"
-        xml << parameter_comment
+        # No Parameter is emitted for a DERIVED item: it occupies no bits and its
+        # COSMOS definition is carried in the container's COSMOS_DERIVED fragment.
+        return
       else
         xml['xtce'].public_send(param_or_arg, attrs) do
           if needs_alias

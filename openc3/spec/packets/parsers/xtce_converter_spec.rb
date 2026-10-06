@@ -165,6 +165,9 @@ module OpenC3
       tf.puts "        <xtce:IntegerDataEncoding sizeInBits=\"8\" encoding=\"unsigned\"/>"
       tf.puts "      </xtce:IntegerParameterType>"
       tf.puts "      <xtce:StringParameterType name=\"DYNAMIC_Type\" characterWidth=\"8\" shortDescription=\"DYNAMIC Description\">"
+      tf.puts "        <xtce:AncillaryDataSet>"
+      tf.puts "          <xtce:AncillaryData name=\"COSMOS_VARIABLE_SIZE\">true</xtce:AncillaryData>"
+      tf.puts "        </xtce:AncillaryDataSet>"
       tf.puts "        <xtce:UnitSet/>"
       tf.puts "        <xtce:StringDataEncoding encoding=\"UTF-8\">"
       tf.puts "          <xtce:SizeInBits>"
@@ -302,6 +305,9 @@ module OpenC3
       tf.puts "        </xtce:FloatDataEncoding>"
       tf.puts "      </xtce:FloatParameterType>"
       tf.puts "      <xtce:FloatParameterType name=\"DOUBLE_Type\" sizeInBits=\"64\" shortDescription=\"Double\">"
+      tf.puts "        <xtce:AncillaryDataSet>"
+      tf.puts "          <xtce:AncillaryData name=\"COSMOS_LIMITS\">{&quot;enabled&quot;:true,&quot;persistence&quot;:1,&quot;values&quot;:{&quot;DEFAULT&quot;:[-80.0,-70.0,60.0,80.0]}}</xtce:AncillaryData>"
+      tf.puts "        </xtce:AncillaryDataSet>"
       tf.puts "        <xtce:UnitSet/>"
       tf.puts "        <xtce:FloatDataEncoding sizeInBits=\"64\" encoding=\"IEEE754_1985\"/>"
       tf.puts "        <xtce:DefaultAlarm>"
@@ -585,119 +591,6 @@ module OpenC3
       tf.puts "      </xtce:MetaCommand>"
       tf.puts "    </xtce:MetaCommandSet>"
       tf.puts "  </xtce:CommandMetaData>"
-      tf.puts "</xtce:SpaceSystem>"
-      tf.close
-      tf
-    end
-
-    def algorithm_xtce
-      tf = Tempfile.new(["unittest", ".xtce"])
-
-      tf.puts "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-      tf.puts "<xtce:SpaceSystem xmlns:xtce=\"http://www.omg.org/spec/XTCE/20180204\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" name=\"TGT1\" xsi:schemaLocation=\"http://www.omg.org/spec/XTCE/20180204 https://www.omg.org/spec/XTCE/20180204/SpaceSystem.xsd\">"
-      tf.puts "  <xtce:TelemetryMetaData>"
-      tf.puts "    <xtce:ParameterTypeSet>"
-      tf.puts "<!--TODO: "
-      tf.puts "	<xtce:TODOParameterType name=\"ITEM1_DERIVED_Type\" shortDescription=\"DERIVED Item\" />"
-      tf.puts "-->"
-      tf.puts ""
-      tf.puts "<!--TODO: "
-      tf.puts "	<xtce:TODOParameterType name=\"ITEM2_DERIVED_Type\" shortDescription=\"DERIVED Item\" />"
-      tf.puts "-->"
-      tf.puts "<xtce:IntegerParameterType name=\"ID_Type\" shortDescription=\"Integer Item\" signed=\"true\"><xtce:UnitSet/><xtce:IntegerDataEncoding sizeInBits=\"16\" encoding=\"twosComplement\" byteOrder=\"leastSignificantByteFirst\"/></xtce:IntegerParameterType></xtce:ParameterTypeSet>"
-      tf.puts "    <xtce:ParameterSet>"
-      tf.puts "<!-- TODO: "
-      tf.puts "	<xtce:Parameter name=\"ITEM1_DERIVED\" parameterTypeRef=\"ITEM1_DERIVED_Type\">"
-      tf.puts "\t\t<xtce:ParameterProperties dataSource=\"derived\"/>"
-      tf.puts "		<xtce:AliasSet>"
-      tf.puts "			<xtce:Alias nameSpace=\"COSMOS\" alias=\"ITEM1_DERIVED\"/>"
-      tf.puts "		</xtce:AliasSet>"
-      tf.puts "	</xtce:Parameter>"
-      tf.puts "-->"
-      tf.puts ""
-      tf.puts "<!-- TODO: "
-      tf.puts "	<xtce:Parameter name=\"ITEM2_DERIVED\" parameterTypeRef=\"ITEM2_DERIVED_Type\">"
-      tf.puts "\t\t<xtce:ParameterProperties dataSource=\"derived\"/>"
-      tf.puts "		<xtce:AliasSet>"
-      tf.puts "			<xtce:Alias nameSpace=\"COSMOS\" alias=\"ITEM2_DERIVED\"/>"
-      tf.puts "		</xtce:AliasSet>"
-      tf.puts "	</xtce:Parameter>"
-      tf.puts "-->"
-      tf.puts "<xtce:Parameter name=\"ID\" parameterTypeRef=\"ID_Type\"/></xtce:ParameterSet>"
-      tf.puts "    <xtce:ContainerSet>"
-      tf.puts "      <xtce:SequenceContainer name=\"PKT2\" shortDescription=\"Packet\">"
-      tf.puts "        <xtce:EntryList>"
-      tf.puts "          <xtce:ParameterRefEntry parameterRef=\"ID\"/>"
-      tf.puts "        </xtce:EntryList>"
-      tf.puts "      </xtce:SequenceContainer>"
-      tf.puts "      <xtce:SequenceContainer name=\"PKT1\" shortDescription=\"Packet\">"
-      tf.puts "        <xtce:EntryList>"
-      tf.puts "          <xtce:ParameterRefEntry parameterRef=\"ID\"/>"
-      tf.puts "        </xtce:EntryList>"
-      tf.puts "      </xtce:SequenceContainer>"
-      tf.puts "    </xtce:ContainerSet>"
-      tf.puts "  </xtce:TelemetryMetaData>"
-      tf.puts "  <!--TODO "
-      tf.puts "<AlgorithmSet>"
-      tf.puts "  <CustomAlgorithm name=\"PKT2_ITEM2_DERIVED_Conversion2\">"
-      tf.puts "    <ExternalAlgorithmSet>"
-      tf.puts "      <ExternalAlgorithm implementationName=\"TODO\" algorithmLocation=\"TODO\"/>"
-      tf.puts "    </ExternalAlgorithmSet>"
-      tf.puts "    <InputSet>"
-      tf.puts "      <InputParameterInstanceRef parameterRef=\"TODO\" instance=\"0\" useCalibratedValue=\"TODO\"/>"
-      tf.puts "    </InputSet>"
-      tf.puts "    <OutputSet>"
-      tf.puts "      <OutputParameterRef parameterRef=\"ITEM2_DERIVED\"/>"
-      tf.puts "    </OutputSet>"
-      tf.puts "    <TriggerSet name=\"triggerSet\">"
-      tf.puts "      <OnParameterUpdateTrigger parameterRef=\"TODO\"/>"
-      tf.puts "    </TriggerSet>"
-      tf.puts "  </CustomAlgorithm>"
-      tf.puts "  <CustomAlgorithm name=\"PKT1_ITEM1_DERIVED_Conversion2\">"
-      tf.puts "    <ExternalAlgorithmSet>"
-      tf.puts "      <ExternalAlgorithm implementationName=\"TODO\" algorithmLocation=\"TODO\"/>"
-      tf.puts "    </ExternalAlgorithmSet>"
-      tf.puts "    <InputSet>"
-      tf.puts "      <InputParameterInstanceRef parameterRef=\"TODO\" instance=\"0\" useCalibratedValue=\"TODO\"/>"
-      tf.puts "    </InputSet>"
-      tf.puts "    <OutputSet>"
-      tf.puts "      <OutputParameterRef parameterRef=\"ITEM1_DERIVED\"/>"
-      tf.puts "    </OutputSet>"
-      tf.puts "    <TriggerSet name=\"triggerSet\">"
-      tf.puts "      <OnParameterUpdateTrigger parameterRef=\"TODO\"/>"
-      tf.puts "    </TriggerSet>"
-      tf.puts "  </CustomAlgorithm>"
-      tf.puts "</AlgorithmSet>"
-      tf.puts ""
-      tf.puts "-->"
-      tf.puts "</xtce:SpaceSystem>"
-      tf.close
-      tf
-    end
-
-    def special_packet_time_xtce
-      tf = Tempfile.new(["unittest", ".xtce"])
-
-      tf.puts "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-      tf.puts "<xtce:SpaceSystem xmlns:xtce=\"http://www.omg.org/spec/XTCE/20180204\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" name=\"TGT1\" xsi:schemaLocation=\"http://www.omg.org/spec/XTCE/20180204 https://www.omg.org/spec/XTCE/20180204/SpaceSystem.xsd\">"
-      tf.puts "  <xtce:TelemetryMetaData>"
-      tf.puts "    <xtce:ParameterTypeSet>"
-      tf.puts "<xtce:IntegerParameterType name=\"ID_Type\" shortDescription=\"Integer Item\" signed=\"true\"><xtce:UnitSet/><xtce:IntegerDataEncoding sizeInBits=\"16\" encoding=\"twosComplement\" byteOrder=\"leastSignificantByteFirst\"/></xtce:IntegerParameterType></xtce:ParameterTypeSet>"
-      tf.puts "    <xtce:ParameterSet>"
-      tf.puts "<!-- TODO: "
-      tf.puts "	<xtce:Parameter name=\"PACKET_TIME\" parameterTypeRef=\"PACKET_TIME_Type\">"
-      tf.puts "		<xtce:ParameterProperties dataSource=\"derived\"/>"
-      tf.puts "	</xtce:Parameter>"
-      tf.puts "-->"
-      tf.puts "<xtce:Parameter name=\"ID\" parameterTypeRef=\"ID_Type\"><xtce:ParameterProperties><xtce:TimeAssociation parameterRef=\"PACKET_TIME\"/></xtce:ParameterProperties></xtce:Parameter></xtce:ParameterSet>"
-      tf.puts "    <xtce:ContainerSet>"
-      tf.puts "      <xtce:SequenceContainer name=\"PKT1\" shortDescription=\"Packet\">"
-      tf.puts "        <xtce:EntryList>"
-      tf.puts "          <xtce:ParameterRefEntry parameterRef=\"ID\"/>"
-      tf.puts "        </xtce:EntryList>"
-      tf.puts "      </xtce:SequenceContainer>"
-      tf.puts "    </xtce:ContainerSet>"
-      tf.puts "  </xtce:TelemetryMetaData>"
       tf.puts "</xtce:SpaceSystem>"
       tf.close
       tf
@@ -1611,14 +1504,27 @@ module OpenC3
         assert_xtce_schema_valid(xml_path)
         expect(File.exist?(xml_path)).to be true
         xtce_doc = Nokogiri::XML(File.open(xml_path))
-        expected_xtce_file = algorithm_xtce()
-        expected_result_xml = Nokogiri::XML(File.open(expected_xtce_file))
-        string_output = xtce_doc.canonicalize(nil, nil, true)
-        expected_string_output = expected_result_xml.canonicalize(nil, nil, true)
-        expect(string_output).to eq(expected_string_output)
+        ns = { 'xtce' => 'http://www.omg.org/spec/XTCE/20180204' }
+
+        # A DERIVED item occupies no bits and its conversion can't be expressed in XTCE,
+        # so it is not emitted as a Parameter / ParameterType. Each packet carries the
+        # COSMOS config for its DERIVED items in a COSMOS_DERIVED AncillaryData fragment
+        # so the definition survives an import. pkt1 has one, pkt2 has two.
+        carriers = xtce_doc.xpath("//xtce:AncillaryData[@name='COSMOS_DERIVED']", ns)
+        expect(carriers.length).to eq(2)
+        combined = carriers.map(&:text).join
+        expect(combined).to include("ITEM1.DERIVED")
+        expect(combined).to include("ITEM2.DERIVED")
+        # The carrier holds whatever Conversion#to_config emits. That serializes the
+        # conversion by its class file name (Conversion2 -> conversion_2.rb); note it
+        # does not round-trip constructor args ("ID") - a COSMOS core to_config limit,
+        # not an XTCE one.
+        expect(combined).to include("READ_CONVERSION conversion_2.rb")
+        # No TODO placeholder parameters/types are emitted for the derived items anymore
+        expect(xtce_doc.to_s).not_to include("TODOParameterType")
         tf.unlink
-        expected_xtce_file.unlink
         File.delete(filename) if File.exist?(filename)
+        FileUtils.rm_rf File.join(spec_install, "TGT1")
       end
 
       it "converts the PACKET_TIME special case" do
@@ -1656,14 +1562,20 @@ module OpenC3
         assert_xtce_schema_valid(xml_path)
         expect(File.exist?(xml_path)).to be true
         xtce_doc = Nokogiri::XML(File.open(xml_path))
-        expected_xtce_file = special_packet_time_xtce()
-        expected_result_xml = Nokogiri::XML(File.open(expected_xtce_file))
-        string_output = xtce_doc.canonicalize(nil, nil, true)
-        expected_string_output = expected_result_xml.canonicalize(nil, nil, true)
-        expect(string_output).to eq(expected_string_output)
+        ns = { 'xtce' => 'http://www.omg.org/spec/XTCE/20180204' }
+
+        # The time association item (PACKET_TIME) is DERIVED, so it is carried in the
+        # COSMOS_DERIVED fragment rather than emitted as a Parameter.
+        carriers = xtce_doc.xpath("//xtce:AncillaryData[@name='COSMOS_DERIVED']", ns)
+        expect(carriers.length).to eq(1)
+        expect(carriers.first.text).to include("PACKET_TIME")
+        # Because the time item is not emitted as a real parameter, no TimeAssociation
+        # is written - the previous behavior left a reference dangling at a parameter
+        # that existed only in a comment.
+        expect(xtce_doc.xpath("//xtce:TimeAssociation", ns)).to be_empty
         tf.unlink
-        expected_xtce_file.unlink
         File.delete(filename) if File.exist?(filename)
+        FileUtils.rm_rf File.join(spec_install, "TGT1")
       end
 
       it "converts items with read and write conversions" do
