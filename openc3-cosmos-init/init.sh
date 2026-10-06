@@ -1,6 +1,56 @@
 #!/bin/sh
 # set -x
 
+# Is an install-time flag on? These flags are enabled by presence, so any value
+# counts as on EXCEPT the ones that read as off: empty, 0 and false (any case).
+# Spelled out because "OPENC3_DEMO=false" turning the demo ON surprises everyone
+# who writes it. An unrecognized value stays on, matching the old behavior.
+# Only OPENC3_DEMO uses this so far - the OPENC3_NO_* flags below are still
+# presence-only, where "VAR=0" and "VAR=false" mean ON.
+# Use a subshell to keep value local without the non-POSIX local keyword.
+flag_enabled() (
+    value="$1"
+    case "$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')" in
+        '' | 0 | false) return 1 ;;
+        *) return 0 ;;
+    esac
+)
+
+# Seed the UV wheel cache from the Docker image into the runtime volume
+# so plugins can reuse system wheels without re-downloading (critical for air-gapped environments)
+if [ -d "/openc3/uv_cache" ]; then
+    echo "Seeding UV cache from /openc3/uv_cache into /gems/uv ..."
+    mkdir -p /gems/uv
+    # -r -u -f, and nothing else. Why each:
+    #   -u  copy only when the source is newer than the destination (or the
+    #       destination is missing), so a restart on a volume already seeded
+    #       walks the tree instead of rewriting ~200MB of wheels every time.
+    #       Safe here because uv's cache is content-addressed: a path present in
+    #       both trees holds identical bytes, and a changed wheel lands under a
+    #       new hashed path that -u still copies because it doesn't exist yet.
+    #       Verified against BusyBox v1.37 cp: newer source copies, older or
+    #       equal-mtime source is skipped.
+    #   -f  unlink and rewrite a destination that can't be opened for writing,
+    #       instead of failing the whole seed on it. Nothing in the cache this
+    #       image bakes today is write-protected, so -f is insurance for a
+    #       volume seeded by an older image or a uv release that writes
+    #       read-only cache entries.
+    # Do NOT add:
+    #   -n  BusyBox cp (Alpine) applies no-clobber at the DIRECTORY level:
+    #       `cp -rn src/. dest/` where dest already exists copies nothing and
+    #       still exits 0, so the seed silently becomes a no-op on every restart
+    #       after the first and plugin installs quietly fall back to the network
+    #       (GNU cp only skips existing files, so this bites Alpine only).
+    #   -a  implies -p, and this runs as the unprivileged openc3 user, so
+    #       preserving ownership fails on every file the seed didn't chown.
+    if cp -ruf /openc3/uv_cache/. /gems/uv/; then
+        # Size makes a failed/empty copy obvious in the logs instead of silent.
+        echo "UV cache seeded ($(du -sh /gems/uv 2>/dev/null | cut -f1))"
+    else
+        echo "WARNING: UV cache seed failed - plugin installs may hit the network" >&2
+    fi
+fi
+
 date
 if [ -d "/gems/gems" ]; then
     # Run gem pristine on all gems
@@ -95,7 +145,7 @@ if [ "${OPENC3_CLOUD}" = "local" ]; then
                 probe_conn "${bhost}" "${bport}"
             fi
         fi
-        if [ $(date +%s) -ge $deadline ]; then
+        if [ "$(date +%s)" -ge "$deadline" ]; then
             echo "${T} ERROR: timed out after ${OPENC3_INIT_WAIT_TIMEOUT}s waiting for buckets ${OPENC3_BUCKET_URL}; exiting to restart init"
             exit 1
         fi
@@ -119,7 +169,7 @@ while [ $RC -gt 0 ]; do
             probe_conn "${hostname}" "${OPENC3_REDIS_PORT}"
         fi
     fi
-    if [ $(date +%s) -ge $deadline ]; then
+    if [ "$(date +%s)" -ge "$deadline" ]; then
         echo "${T} ERROR: timed out after ${OPENC3_INIT_WAIT_TIMEOUT}s waiting for Redis ${hostname}:${OPENC3_REDIS_PORT}; exiting to restart init"
         exit 1
     fi
@@ -141,7 +191,7 @@ while [ $RC -gt 0 ]; do
             probe_conn "${hostname}" "${OPENC3_REDIS_EPHEMERAL_PORT}"
         fi
     fi
-    if [ $(date +%s) -ge $deadline ]; then
+    if [ "$(date +%s)" -ge "$deadline" ]; then
         echo "${T} ERROR: timed out after ${OPENC3_INIT_WAIT_TIMEOUT}s waiting for Redis Ephemeral ${hostname}:${OPENC3_REDIS_EPHEMERAL_PORT}; exiting to restart init"
         exit 1
     fi
@@ -162,6 +212,11 @@ if [ -z "${OPENC3_NO_MIGRATE}" ]; then
 fi
 
 ruby /openc3/bin/openc3cli initbuckets || exit 1
+# Seed settings (time_zone, time_format, ai_chat, ...) from OPENC3_SETTING_<NAME>
+# env vars. A setting is written when it doesn't exist or still holds the value
+# last seeded from the env, so a changed env var takes effect on restart but an
+# Admin Console edit is preserved. No-op when no OPENC3_SETTING_* var is set.
+ruby /openc3/bin/openc3cli initsettings || exit 1
 ruby /openc3/bin/openc3cli removeenterprise || exit 1
 ruby /openc3/bin/openc3cli load /openc3/plugins/gems/openc3-tool-base-*.gem || exit 1
 ruby /openc3/bin/openc3cli load /openc3/plugins/gems/openc3-cosmos-tool-iframe-*.gem || exit 1
@@ -176,7 +231,7 @@ if [ ! -z $OPENC3_LOCAL_MODE ]; then
     # Continue if local init fails - User will have to fix manually
     ruby /openc3/bin/openc3cli localinit || true
 fi
-if [ ! -z $OPENC3_DEMO ]; then
+if flag_enabled "$OPENC3_DEMO"; then
     ruby /openc3/bin/openc3cli load /openc3/plugins/gems/openc3-cosmos-demo-*.gem || exit 1
 fi
 if [ -z $OPENC3_NO_CMDTLMSERVER ]; then

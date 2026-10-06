@@ -26,8 +26,10 @@
         :targets="pluginTargets(plugin.name)"
         :is-modified="isModified(plugin.name)"
         :microservices="microservices"
+        :script-versions-enabled="scriptVersionsEnabled"
         @edit="() => editPlugin(plugin.name)"
         @upgrade="() => upgradePlugin(plugin.name)"
+        @migrate-to-uv="() => migrateToUv(plugin.name)"
         @delete="() => deletePrompt(plugin.name)"
       />
     </template>
@@ -59,8 +61,12 @@ export default {
       type: Array,
       required: true,
     },
+    scriptVersionsEnabled: {
+      type: Boolean,
+      default: false,
+    },
   },
-  emits: ['edit', 'delete', 'upgrade'],
+  emits: ['edit', 'delete', 'upgrade', 'migrate-to-uv'],
   data() {
     return {
       showPluginDetails: false,
@@ -122,13 +128,15 @@ export default {
     upgradePlugin(plugin) {
       this.$emit('upgrade', plugin)
     },
+    migrateToUv: function (plugin) {
+      this.$emit('migrate-to-uv', plugin)
+    },
     deletePrompt: function (plugin) {
       this.$emit('delete', plugin)
     },
-    fetchMicroservices: function () {
-      Api.get('/openc3-api/microservices/all').then((response) => {
-        this.microservices = response.data
-      })
+    fetchMicroservices: async function () {
+      const response = await Api.get('/openc3-api/microservices/all')
+      this.microservices = response.data
     },
   },
 }

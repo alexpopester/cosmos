@@ -74,11 +74,17 @@ git checkout vX.Y.Z # <- change to the specific version you want
 {/* prettier-ignore */}
 <p style={{"margin-bottom": 20 + 'px'}}><code>./openc3.sh util save docker.io openc3inc X.Y.Z # &lt;- update to save a specific version</code></p>
 {/* prettier-ignore */}
-<p style={{"margin-bottom": 20 + 'px'}}>This will download the COSMOS containers from the docker.io repo using the openc3inc namespace and version 5.16.2. The repo, namespace and version are all configurable. Tar files are created in the 'tmp' directory which you can transfer to your offline environment. Transfer the tar files to your offline environment's project 'tmp' dir and  import them with:</p>
+<p style={{"margin-bottom": 20 + 'px'}}>This will download the COSMOS containers from the docker.io repo using the openc3inc namespace and version X.Y.Z. The repo, namespace and version are all configurable. Tar files are created in the 'tmp' directory which you can transfer to your offline environment. Transfer the tar files to your offline environment's project 'tmp' dir and  import them with:</p>
 {/* prettier-ignore */}
 <p style={{"margin-bottom": 20 + 'px'}}><code>./openc3.sh util load X.Y.Z # &lt;- update to match the save version</code></p>
 {/* prettier-ignore */}
 <p style={{"margin-bottom": 20 + 'px'}}>Note the version specified in save needs to match the version in load.</p>
+
+#### Python Dependencies in Offline Environments
+
+COSMOS pre-seeds the UV wheel cache with all system Python dependencies during first startup. This means plugins that only require packages already available in the cache can install without any network access.
+
+To see which Python packages are available in the cache, check the **Cached** section under the **Admin > Packages** tab. If your plugin requires additional packages not in the cache, you can upload `.whl` files via the Admin > Packages tab before installing the plugin.
 :::
 
 ### Certificates

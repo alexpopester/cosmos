@@ -12,7 +12,6 @@
 # All Rights Reserved
 */
 
-// @ts-check
 import { test, expect } from './fixture'
 
 test.use({
@@ -114,9 +113,21 @@ test('warns for hazardous commands', async ({ page, utils }) => {
   await page.locator('[data-test="clear-history"]').click()
   await utils.selectTargetPacketItem('INST', 'CLEAR')
   await expect(page.locator('main')).toContainText(
-    'Clears counters on the INST instrument (HAZARDOUS)',
+    'Clears counters on the INST instrument',
+  )
+  // The hazardous description is shown below the selects (see issue 3472)
+  await expect(page.locator('main')).toContainText(
+    'Hazardous: Clearing counters may lose valuable information.',
   )
   await page.locator('[data-test="select-send"]').click()
+  // The hazardous confirmation dialog shows both the command description and
+  // the hazardous description (see issue 3472)
+  await expect(page.getByRole('dialog')).toContainText(
+    'Description: Clears counters on the INST instrument',
+  )
+  await expect(page.getByRole('dialog')).toContainText(
+    'Hazardous: Clearing counters may lose valuable information.',
+  )
   await page.getByRole('button', { name: 'Cancel' }).click()
   await expect(page.locator('main')).toContainText('Hazardous command not sent')
   await page.locator('[data-test="select-send"]').click()
@@ -168,9 +179,7 @@ test('warns for required parameters', async ({ page, utils }) => {
   // Break apart the checks so we have output flexibility in the future
   await expect(page.locator('.v-dialog')).toContainText('Error sending')
   await expect(page.locator('.v-dialog')).toContainText('INST COLLECT TYPE')
-  await expect(page.locator('.v-dialog')).toContainText(
-    'not one of NORMAL, SPECIAL',
-  )
+  await expect(page.locator('.v-dialog')).toContainText('not given')
   await page.locator('button:has-text("Ok")').click()
 })
 
@@ -380,7 +389,7 @@ test('executes commands from history', async ({ page, utils }) => {
   await page.locator('[data-test="clear-history"]').click()
   await utils.selectTargetPacketItem('INST', 'CLEAR')
   await expect(page.locator('main')).toContainText(
-    'Clears counters on the INST instrument (HAZARDOUS)',
+    'Clears counters on the INST instrument',
   )
   await page.locator('[data-test="select-send"]').click()
   await page.getByRole('dialog').getByRole('button', { name: 'Send' }).click()
@@ -508,7 +517,7 @@ test('hazardous commands from history', async ({ page, utils }) => {
   await page.locator('[data-test="clear-history"]').click()
   await utils.selectTargetPacketItem('INST', 'CLEAR')
   await expect(page.locator('main')).toContainText(
-    'Clears counters on the INST instrument (HAZARDOUS)',
+    'Clears counters on the INST instrument',
   )
   await page.locator('[data-test="select-send"]').click()
   await page.getByRole('dialog').getByRole('button', { name: 'Send' }).click()

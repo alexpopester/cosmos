@@ -63,7 +63,7 @@
               dense
               color="primary"
               class="mr-3"
-              :disabled="filename == ''"
+              :disabled="filename == '' || definitionFilename == ''"
               data-test="download-file-binary"
               @click="downloadBinary(null)"
             >
@@ -74,7 +74,7 @@
               dense
               color="primary"
               class="mr-3"
-              :disabled="filename == ''"
+              :disabled="filename == '' || definitionFilename == ''"
               data-test="download-file-definition"
               @click="downloadDefinition(null)"
             >
@@ -84,7 +84,7 @@
             <v-btn
               dense
               color="primary"
-              :disabled="filename == ''"
+              :disabled="filename == '' || definitionFilename == ''"
               data-test="download-file-report"
               @click="downloadReport(null)"
             >
@@ -182,7 +182,7 @@
                   dense
                   color="primary"
                   class="mr-3"
-                  :disabled="filename == ''"
+                  :disabled="filename == '' || definitionFilename == ''"
                   data-test="download-table-binary"
                   @click="downloadBinary(table.name)"
                 >
@@ -193,7 +193,7 @@
                   dense
                   color="primary"
                   class="mr-3"
-                  :disabled="filename == ''"
+                  :disabled="filename == '' || definitionFilename == ''"
                   data-test="download-table-definition"
                   @click="downloadDefinition(table.name)"
                 >
@@ -203,7 +203,7 @@
                 <v-btn
                   dense
                   color="primary"
-                  :disabled="filename == ''"
+                  :disabled="filename == '' || definitionFilename == ''"
                   data-test="download-table-report"
                   @click="downloadReport(table.name)"
                 >
@@ -446,8 +446,8 @@ export default {
         }
       } else {
         this.unlockFile() // first unlock what was just being edited
-        // Split off the ' *' which indicates a file is modified on the server
-        this.filename = file.name.split('*')[0]
+        // Strip the '*' which indicates a file is modified on the server
+        this.filename = file.name.replace(/\*$/, '')
         this.fileModified = ''
         this.lockedBy = locked
         this.getDefinition()
@@ -457,7 +457,6 @@ export default {
     setError(event) {
       this.errorTitle = 'Error'
       this.errorText = `Error: ${event}`
-      this.errorText = response.data.message
       this.showError = true
     },
     saveFile: function () {
@@ -470,7 +469,12 @@ export default {
       formData.append('tables', JSON.stringify(this.tables))
       Api.post(`/openc3-api/tables/${this.filename}`, {
         data: formData,
-        headers: { 'Content-Type': 'multipart/form-data' },
+        headers: {
+          'Content-Type': 'multipart/form-data',
+          // A 403 (admin-only area) is shown in the Save Error dialog below,
+          // so skip the global network error banner
+          'Ignore-Errors': '403',
+        },
       })
         .then((response) => {
           this.fileModified = ''
@@ -492,7 +496,7 @@ export default {
     saveAsFilename: function (filename) {
       Api.put(`/openc3-api/tables/${this.filename}/save-as/${filename}`).then(
         (response) => {
-          this.filename = filename
+          this.filename = filename.replace(/\*$/, '')
           this.getDefinition(this.definitionFilename)
         },
       )

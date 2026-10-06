@@ -207,7 +207,7 @@ PWDEBUG=1 pnpm test:parallel --headed     # Debug mode
 - **Ruff** - Python linter and formatter (fast Rust-based replacement for flake8/black)
 - **Vue.js 3 + Vuetify 3** - Frontend UI framework
 - **Vite** - Frontend build tool
-- **pnpm 10** - Frontend package management (monorepo workspace)
+- **pnpm 11** - Frontend package management (monorepo workspace)
 - **Node.js 24** - JavaScript runtime
 - **Docker Compose** - Container orchestration
 - **Valkey** - Caching, pub/sub, ephemeral state
@@ -274,20 +274,13 @@ Set `ENTERPRISE=1` environment variable for Enterprise features. Enterprise uses
 
 ## Commit Message Format
 
-Use Angular commit message format. Keep messages concise and focused.
-
-**Format:**
-```
-<type>(<scope>): <subject>
-
-<body>
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
-
-Co-Authored-By: Claude <noreply@anthropic.com>
-```
+[Conventional Commits v1.0.0](https://www.conventionalcommits.org/en/v1.0.0/).
+Run `/commit-message` to generate one from the staged changes -
+`.claude/commands/commit-message.md` is the authority on format, so the rules
+live in one place rather than being duplicated here.
 
 **Guidelines:**
+
 - Subject line: imperative mood, lowercase, no period, max 72 chars
 - Body: explain what and why (not how), keep concise (2-4 lines max)
 - Scope: component/module affected

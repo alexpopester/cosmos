@@ -434,7 +434,7 @@ module OpenC3
     describe "get_item" do
       it "complains if an item doesn't exist" do
         p = Packet.new("tgt", "pkt")
-        expect { p.get_item("test") }.to raise_error(RuntimeError, "Packet item 'TGT PKT TEST' does not exist")
+        expect { p.get_item("test") }.to raise_error(RuntimeError, "Item 'TGT PKT TEST' does not exist (Packet)")
       end
     end
 
@@ -1799,6 +1799,42 @@ module OpenC3
 
         expect(vals['TEST3__L']).to eql :RED
       end
+
+      it "omits limits states when include_limits_states is false" do
+        p = Packet.new("tgt", "pkt")
+        i1 = p.append_item("test1", 8, :UINT)
+        i1.limits.state = :GREEN
+        i2 = p.append_item("test2", 16, :UINT)
+        i2.read_conversion = GenericConversion.new("value * 2")
+        i2.limits.state = :RED_HIGH
+
+        buffer = "\x01\x00\x03"
+        p.buffer = buffer
+
+        # Default: limits states included
+        vals = p.decom
+        expect(vals['TEST1__L']).to eql :GREEN
+        expect(vals['TEST2__L']).to eql :RED_HIGH
+
+        # With include_limits_states: false, __L keys are omitted
+        vals = p.decom(include_limits_states: false)
+        expect(vals.key?('TEST1__L')).to be false
+        expect(vals.key?('TEST2__L')).to be false
+        # Other value types are still present
+        expect(vals['TEST1']).to eql 1
+        expect(vals['TEST2']).to eql 3
+        expect(vals['TEST2__C']).to eql 6
+      end
+
+      it "includes limits states by default" do
+        p = Packet.new("tgt", "pkt")
+        i1 = p.append_item("test1", 8, :UINT)
+        i1.limits.state = :YELLOW_LOW
+
+        p.buffer = "\x05"
+        vals = p.decom
+        expect(vals['TEST1__L']).to eql :YELLOW_LOW
+      end
     end
 
     describe "obfuscate" do
@@ -2132,6 +2168,54 @@ module OpenC3
         expect(packet.read("CBOR.ITEM3")).to be_within(0.01).of(3.14)
         expect(packet.read("CBOR.ITEM4")).to eql "Example"
         expect(packet.read("CBOR.ITEM5")).to eql []
+      end
+    end
+
+    describe "short_buffer_allowed" do
+      before(:each) do
+        @packet = Packet.new("TGT", "PKT")
+        @packet.append_item("ID", 16, :UINT)
+        item = @packet.append_item("VAL", 16, :UINT)
+        item.read_conversion = GenericConversion.new("value * 2")
+        item.states = { "GOOD" => 1 }
+        item.units = "V"
+        item.format_string = "%0.1f"
+        item.limits.values = { :DEFAULT => [1, 2, 4, 5] }
+        item.limits.enabled = true
+        @packet.short_buffer_allowed = true
+        @packet.buffer = "\x00\x01"
+      end
+
+      it "returns nil for all value types of an item outside the buffer" do
+        expect(@packet.read("ID")).to eq(1)
+        # Conversions, states, format strings and units must not be applied to nil
+        expect(@packet.read("VAL", :RAW)).to be_nil
+        expect(@packet.read("VAL", :CONVERTED)).to be_nil
+        expect(@packet.read("VAL", :FORMATTED)).to be_nil
+        expect(@packet.read("VAL", :WITH_UNITS)).to be_nil
+      end
+
+      it "reads all items with limits states without raising" do
+        expect(@packet.read_all(:CONVERTED)).to eq([["ID", 1], ["VAL", nil]])
+        expect(@packet.read_all_with_limits_states(:CONVERTED)).to eq([["ID", 1, nil], ["VAL", nil, nil]])
+      end
+
+      it "checks limits without raising and leaves the item state nil" do
+        @packet.check_limits
+        expect(@packet.get_item("VAL").limits.state).to be_nil
+      end
+
+      it "does not identify a packet whose id item is outside the buffer" do
+        packet = Packet.new("TGT", "PKT")
+        packet.append_item("ID1", 16, :UINT)
+        item = packet.append_item("ID2", 16, :UINT)
+        item.id_value = 5
+        packet.update_id_items(item)
+        packet.short_buffer_allowed = true
+
+        expect(packet.identify?("\x00\x01")).to be false
+        expect(packet.identify?("\x00\x01\x00\x05")).to be true
+        expect(packet.identify?("\x00\x01\x00\x06")).to be false
       end
     end
   end

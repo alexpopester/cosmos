@@ -616,7 +616,7 @@ module OpenC3
     def get_item(name)
       return super(name)
     rescue ArgumentError
-      raise "Packet item '#{@target_name} #{@packet_name} #{name.upcase}' does not exist"
+      raise "Item '#{@target_name} #{@packet_name} #{name.upcase}' does not exist (Packet)"
     end
 
     # Read an item in the packet
@@ -637,6 +637,10 @@ module OpenC3
       else
         value = super(item, :RAW, buffer)
       end
+      # An item beyond the end of a short buffer reads as nil (ALLOW_SHORT).
+      # Conversions, states and format strings can't be applied to a nil value.
+      return nil if value.nil? && @short_buffer_allowed && item.data_type != :DERIVED
+
       derived_raw = false
       if item.data_type == :DERIVED && value_type == :RAW
         value_type = :CONVERTED
@@ -1285,7 +1289,7 @@ module OpenC3
       config
     end
 
-    def decom
+    def decom(include_limits_states: true)
       # Read all the RAW at once because this could be optimized by the accessor
       json_hash = read_items(@sorted_items)
 
@@ -1301,7 +1305,9 @@ module OpenC3
           if item.format_string or item.units
             json_hash["#{item.name}__F"] = read_item(item, :FORMATTED, @buffer, given_raw)
           end
-          limits_state = item.limits.state
+          if include_limits_states
+            limits_state = item.limits.state
+          end
           if limits_state
             json_hash["#{item.name}__L"] = limits_state
           end

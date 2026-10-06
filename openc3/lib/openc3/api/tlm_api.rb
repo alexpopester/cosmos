@@ -117,13 +117,14 @@ module OpenC3
     # @param packet_name [String] Packet name of the packet
     # @param item_hash [Hash] Hash of item_name and value for each item you want to change from the current value table
     # @param type [Symbol] Telemetry type, :RAW, :CONVERTED (default), :FORMATTED
-    def inject_tlm(target_name, packet_name, item_hash = nil, type: :CONVERTED, stored: false, manual: false, scope: $openc3_scope, token: $openc3_token)
+    # @param received_time [Integer, nil] Optional received time as nanoseconds since Unix epoch
+    def inject_tlm(target_name, packet_name, item_hash = nil, type: :CONVERTED, stored: false, received_time: nil, manual: false, scope: $openc3_scope, token: $openc3_token)
       authorize(permission: 'tlm_set', target_name: target_name, packet_name: packet_name, manual: manual, scope: scope, token: token)
       type = type.to_s.intern
       target_name = target_name.upcase
       packet_name = packet_name.upcase
       unless CvtModel::VALUE_TYPES.include?(type)
-        raise "Unknown type '#{type}' for #{target_name} #{packet_name}"
+        raise "Unknown type '#{type}' for #{target_name} #{packet_name} (inject_tlm)"
       end
 
       if item_hash
@@ -155,9 +156,9 @@ module OpenC3
 
       # Use an interface microservice if it exists, other use the decom microservice
       if interface_name
-        InterfaceTopic.inject_tlm(interface_name, target_name, packet_name, item_hash, type: type, stored: stored, scope: scope)
+        InterfaceTopic.inject_tlm(interface_name, target_name, packet_name, item_hash, type: type, stored: stored, received_time: received_time, scope: scope)
       else
-        DecomInterfaceTopic.inject_tlm(target_name, packet_name, item_hash, type: type, stored: stored, scope: scope)
+        DecomInterfaceTopic.inject_tlm(target_name, packet_name, item_hash, type: type, stored: stored, received_time: received_time, scope: scope)
       end
     end
 
@@ -328,19 +329,23 @@ module OpenC3
       end
       packets = []
       cvt_items = []
-      items.each_with_index do |item, index|
+      items.each do |item|
+        # get_tlm_available returns nil for items which don't exist and its result is
+        # passed directly here, so nil is a placeholder which returns a nil value
         if item.nil?
-          # null items mean that it doesn't exist
-          cvt_items[index] = nil
-        else
-          item_upcase = item.to_s.upcase
-          target_name, packet_name, item_name, value_type, limits = item_upcase.split('__')
-          raise ArgumentError, "items must be formatted as TGT__PKT__ITEM__TYPE" if target_name.nil? || packet_name.nil? || item_name.nil? || value_type.nil?
-          if packet_name == 'LATEST' # Lookup packet_name in case of LATEST
-            packet_name = CvtModel.determine_latest_packet_for_item(target_name, item_name, cache_timeout: cache_timeout, scope: scope)
-          end
+          cvt_items << [nil, nil, nil, nil, nil]
+          next
         end
-        cvt_items[index] = [target_name, packet_name, item_name, value_type, limits]
+        # get_tlm_available tacks on __LIMITS to indicate a limits value is available
+        # so accept both TGT__PKT__ITEM__TYPE and TGT__PKT__ITEM__TYPE__LIMITS
+        parts = item.to_s.upcase.split('__')
+        raise ArgumentError, "items must be formatted as TGT__PKT__ITEM__TYPE" if parts.length < 4 || parts.length > 5
+        target_name, packet_name, item_name, value_type, limits = parts
+        if packet_name == 'LATEST' # Lookup packet_name in case of LATEST
+          packet_name = CvtModel.determine_latest_packet_for_item(target_name, item_name, cache_timeout: cache_timeout, scope: scope)
+        end
+        # NOTE: limits is required by the historical (start_time) QuestDB lookup
+        cvt_items << [target_name, packet_name, item_name, value_type, limits]
         packets << [target_name, packet_name]
       end
       packets.uniq!

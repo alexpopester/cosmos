@@ -12,7 +12,6 @@
 # All Rights Reserved
 */
 
-// @ts-check
 import { Page } from '@playwright/test'
 import { Utilities } from '../../utilities'
 import { test, expect } from './../fixture'
@@ -106,7 +105,7 @@ async function runAndCheckResults(
 async function suiteTemplate(page, utils, type) {
   await page.locator('[data-test=script-runner-file]').click()
   await page.getByText('New Suite').hover()
-  await page.getByText(type).click()
+  await page.getByText(type, { exact: true }).click()
   await utils.sleep(1000)
   // Verify the drop downs are populated (gated on process_suite, see above)
   await expect(page.getByText('Suite:TestSuiteSuite:')).toBeEnabled({

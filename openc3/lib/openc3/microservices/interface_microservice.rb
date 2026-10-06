@@ -195,7 +195,7 @@ module OpenC3
                 msg_hash = critical_model.cmd_hash
                 release_critical = true
               else
-                next "Critical command #{msg_hash['release_critical']} not found"
+                next "Critical command '#{msg_hash['release_critical']}' not found (interface command processing)"
               end
             end
             if msg_hash.key?('target_control')
@@ -221,7 +221,12 @@ module OpenC3
               next 'SUCCESS'
             end
             if msg_hash.key?('interface_details')
-              next @interface.details.as_json.to_json(allow_nan: true)
+              begin
+                next @interface.details.as_json.to_json(allow_nan: true)
+              rescue => e
+                @logger.error "#{@interface.name}: interface_details: #{e.formatted}"
+                next e.message
+              end
             end
           end
 
@@ -272,6 +277,11 @@ module OpenC3
               else
                 next nil # Don't ack disabled targets
               end
+            rescue RangeError => e
+              # Command parameter out of range is a user error, not a bug,
+              # so only log the message and not the full stack trace
+              @logger.error "#{@interface.name}: #{e.message}"
+              next e.message
             rescue => e
               @logger.error "#{@interface.name}: #{msg_hash}"
               @logger.error "#{@interface.name}: #{e.formatted}"
@@ -281,6 +291,9 @@ module OpenC3
             command.extra ||= {}
             command.extra['cmd_string'] = msg_hash['cmd_string']
             command.extra['username'] = msg_hash['username']
+            command.extra['interface_name'] = @interface.name
+            # Original author of a queued command (set when released from a queue)
+            command.extra['queue_username'] = msg_hash['queue_username'] if msg_hash['queue_username']
             # Add approver info if this was a critical command that was approved
             if critical_model
               command.extra['approver'] = critical_model.approver
@@ -500,7 +513,12 @@ module OpenC3
             next 'SUCCESS'
           end
           if msg_hash.key?('router_details')
-            next @router.details.as_json.to_json(allow_nan: true)
+            begin
+              next @router.details.as_json.to_json(allow_nan: true)
+            rescue => e
+              @logger.error "#{@router.name}: router_details: #{e.formatted}"
+              next e.message
+            end
           end
           next 'SUCCESS'
         end
@@ -602,7 +620,26 @@ module OpenC3
     # Called to connect the interface/router. It takes optional parameters to
     # rebuilt the interface/router. Once we set the state to 'ATTEMPTING' the
     # run method handles the actual connection.
+    # Connecting an interface/router which is already CONNECTED is a no-op.
+    # Without this the existing (working) connection would be torn down and
+    # rebuilt which can take up to the read_timeout to detect. Callers who want
+    # to force a reconnect should disconnect first or pass new parameters.
     def attempting(*params)
+      if params.empty? and @interface.state == 'CONNECTED' and @interface.connected?
+        @logger.info "#{@interface.name}: Connect ignored, already connected"
+        return @interface
+      end
+
+      attempt_connection(*params)
+    end
+
+    # Sets the state to 'ATTEMPTING', first rebuilding the interface/router if
+    # parameters are given, so the run method performs the actual connection.
+    # Unlike attempting() this always transitions. The reconnect path in
+    # disconnect() requires that, since @interface.disconnect may have raised or
+    # left connected? true, which would make attempting() ignore the request and
+    # leave the interface stuck in 'CONNECTED' with no way back to a connection.
+    def attempt_connection(*params)
       unless params.empty?
         @interface.disconnect()
         # Build New Interface, this can fail if passed bad parameters
@@ -706,16 +743,19 @@ module OpenC3
         # Try to do clean disconnect because we're going down
         disconnect(false)
       end
-      if @interface_or_router == 'INTERFACE'
-        InterfaceStatusModel.set(@interface.as_json(), queued: true, scope: @scope)
-      else
-        RouterStatusModel.set(@interface.as_json(), queued: true, scope: @scope)
+      unless @cancel_thread
+        if @interface_or_router == 'INTERFACE'
+          InterfaceStatusModel.set(@interface.as_json(), queued: true, scope: @scope)
+        else
+          RouterStatusModel.set(@interface.as_json(), queued: true, scope: @scope)
+        end
       end
       @logger.info "#{@interface.name}: Stopped packet reading"
     end
 
     def handle_packet(packet)
-      InterfaceStatusModel.set(@interface.as_json(), queued: true, scope: @scope)
+      # Skip status update if stop() has been called to avoid re-creating the status model
+      InterfaceStatusModel.set(@interface.as_json(), queued: true, scope: @scope) unless @cancel_thread
       packet.received_time = Time.now.sys unless packet.received_time
 
       if packet.stored
@@ -817,6 +857,13 @@ module OpenC3
 
     def connect
       @logger.info "#{@interface.name}: Connect #{@interface.connection_string}"
+      # Interface connect implementations typically overwrite their stream / socket
+      # so cleanly close any existing connection rather than leaking it
+      begin
+        @interface.disconnect if @interface.connected?
+      rescue => e
+        @logger.error "Disconnect: #{@interface.name}: #{e.formatted}"
+      end
       begin
         @interface.connect
         @interface.post_connect
@@ -838,35 +885,49 @@ module OpenC3
     end
 
     def disconnect(allow_reconnect = true)
-      return if @interface.state == 'DISCONNECTED' && !@interface.connected?
+      reconnect = false
 
-      # Synchronize the calls to @interface.disconnect since it takes an unknown
-      # amount of time. If two calls to disconnect stack up, the if statement
-      # should avoid multiple calls to disconnect.
+      # Two threads reach here for a single connection loss: the cmd handler
+      # thread servicing a disconnect directive, and the run thread coming back
+      # out of read (or out of the connection maintenance sleep). The redundant
+      # check below and the state change that records the disconnect must be in
+      # the same critical section, otherwise the second thread reads the state
+      # before the first has updated it and disconnects the interface twice.
       @mutex.synchronize do
+        # A disconnect has already been performed so there is nothing left to do
+        return if @interface.state == 'DISCONNECTED' && !@interface.connected?
+
+        # Call disconnect without consulting connected? so any resources the
+        # interface is still holding are cleaned up. It takes an unknown amount
+        # of time which is the other reason for the mutex.
         begin
-          @interface.disconnect if @interface.connected?
+          @interface.disconnect
         rescue => e
           @logger.error "Disconnect: #{@interface.name}: #{e.formatted}"
         end
+
+        # If the interface is set to auto_reconnect then delay so the thread
+        # can come back around and allow the interface a chance to reconnect.
+        # Skip reconnect if stop() has been called to avoid re-creating the status model
+        reconnect = allow_reconnect && @interface.auto_reconnect && @interface.state != 'DISCONNECTED' && !@cancel_thread
+        if reconnect
+          attempt_connection()
+        else
+          @interface.state = 'DISCONNECTED'
+          unless @cancel_thread
+            if @interface_or_router == 'INTERFACE'
+              InterfaceStatusModel.set(@interface.as_json(), queued: true, scope: @scope)
+            else
+              RouterStatusModel.set(@interface.as_json(), queued: true, scope: @scope)
+            end
+          end
+        end
       end
 
-      # If the interface is set to auto_reconnect then delay so the thread
-      # can come back around and allow the interface a chance to reconnect.
-      if allow_reconnect and @interface.auto_reconnect and @interface.state != 'DISCONNECTED'
-        attempting()
-        if !@cancel_thread
-          # @logger.debug "reconnect delay: #{@interface.reconnect_delay}"
-          @interface_thread_sleeper.sleep(@interface.reconnect_delay)
-        end
-      else
-        @interface.state = 'DISCONNECTED'
-        if @interface_or_router == 'INTERFACE'
-          InterfaceStatusModel.set(@interface.as_json(), queued: true, scope: @scope)
-        else
-          RouterStatusModel.set(@interface.as_json(), queued: true, scope: @scope)
-        end
-      end
+      # Sleep outside the mutex so stop() and connect() are not blocked for the
+      # whole reconnect delay
+      # @logger.debug "reconnect delay: #{@interface.reconnect_delay}"
+      @interface_thread_sleeper.sleep(@interface.reconnect_delay) if reconnect && !@cancel_thread
     end
 
     # Disconnect from the interface and stop the thread

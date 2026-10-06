@@ -278,16 +278,17 @@
           <v-card-text>
             <div class="pa-3">
               <v-row>
-                <v-text-field
+                <v-number-input
                   v-model="refreshInterval"
-                  min="1"
-                  max="3600"
-                  step="1"
-                  type="number"
+                  control-variant="stacked"
+                  :min="1"
+                  :max="3600"
+                  :step="1"
                   label="Refresh Interval (s)"
                   :rules="[rules.required, rules.min]"
                   data-test="refresh-interval"
-              /></v-row>
+                />
+              </v-row>
               <v-row class="mt-5">
                 <v-spacer />
                 <v-btn
@@ -453,7 +454,7 @@ export default {
   },
   watch: {
     // This is the upload function that is activated when the file gets set
-    file: async function () {
+    file: function () {
       if (this.file === null) return
       this.uploadFilePath = `${this.path}${this.file.name}`
       this.uploadPathDialog = true
@@ -633,7 +634,7 @@ export default {
           }
         })
 
-        .catch((response) => {
+        .catch(() => {
           this.$notify.caution({
             title: `Unable to download file ${this.path}${filename} from bucket ${this.root}`,
           })
@@ -686,7 +687,7 @@ export default {
       )
       // This pushes the file into storage by using the fields in the presignedRequest
       // See storage_controller.rb get_upload_presigned_request()
-      const response = await axios({
+      await axios({
         ...presignedRequest,
         data: this.file,
       })

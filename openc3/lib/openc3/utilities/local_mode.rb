@@ -99,7 +99,7 @@ module OpenC3
 
       Dir.each_child(path) do |filename|
         full_path = "#{path}/#{filename}"
-        if not File.directory?(full_path)
+        unless File.directory?(full_path)
           if File.extname(filename) == '.gem'
             gems << full_path
           elsif filename == 'plugin_instance.json'
@@ -283,7 +283,7 @@ module OpenC3
       return if DEFAULT_PLUGINS.include?(gem_name)
       puts "Updating local plugin files: #{full_folder_path}"
       FileUtils.mkdir_p(full_folder_path)
-      gems, _ = scan_plugin_dir(full_folder_path)
+      gems = scan_plugin_dir(full_folder_path).first
       gems.each do |gem|
         File.delete(gem)
       end
@@ -377,9 +377,9 @@ module OpenC3
       end
     end
 
-    def self.put_target_file(path, io_or_string, scope:)
-      full_folder_path = "#{OPENC3_LOCAL_MODE_PATH}/#{path}"
-      return unless File.expand_path(full_folder_path).start_with?(OPENC3_LOCAL_MODE_PATH)
+    def self.put_target_file(path, io_or_string, scope:) # NOSONAR - scope: is part of the caller-facing signature
+      full_folder_path = key_path(path)
+      return unless full_folder_path and path.start_with?("#{scope}/")
       FileUtils.mkdir_p(File.dirname(full_folder_path))
       File.open(full_folder_path, 'wb') do |file|
         if String === io_or_string
@@ -392,8 +392,8 @@ module OpenC3
     end
 
     def self.open_local_file(path, scope:)
-      full_path = "#{OPENC3_LOCAL_MODE_PATH}/#{scope}/targets_modified/#{path}"
-      if File.expand_path(full_path).start_with?(OPENC3_LOCAL_MODE_PATH)
+      full_path = scope_path(scope, "targets_modified/#{path}")
+      if full_path and safe_key?(path)
         return File.open(full_path, 'rb')
       end
       nil
@@ -452,8 +452,8 @@ module OpenC3
     def self.save_tool_config(scope, tool, name, data)
       return unless ENV['OPENC3_LOCAL_MODE'] and Dir.exist?(OPENC3_LOCAL_MODE_PATH)
       json = JSON.parse(data, allow_nan: true, create_additions: true)
-      config_path = "#{OPENC3_LOCAL_MODE_PATH}/#{scope}/tool_config/#{tool}/#{name}.json"
-      return unless File.expand_path(config_path).start_with?(OPENC3_LOCAL_MODE_PATH)
+      config_path = scope_path(scope, "tool_config/#{tool}/#{name}.json")
+      return unless config_path and safe_key?("#{tool}/#{name}")
       FileUtils.mkdir_p(File.dirname(config_path))
       File.open(config_path, 'w') do |file|
         file.write(JSON.pretty_generate(json, allow_nan: true))
@@ -462,53 +462,118 @@ module OpenC3
 
     def self.delete_tool_config(scope, tool, name)
       return unless ENV['OPENC3_LOCAL_MODE'] and Dir.exist?(OPENC3_LOCAL_MODE_PATH)
-      config_path = "#{OPENC3_LOCAL_MODE_PATH}/#{scope}/tool_config/#{tool}/#{name}.json"
-      return unless File.expand_path(config_path).start_with?(OPENC3_LOCAL_MODE_PATH)
+      config_path = scope_path(scope, "tool_config/#{tool}/#{name}.json")
+      return unless config_path and safe_key?("#{tool}/#{name}")
       FileUtils.rm_f(config_path)
     end
 
     def self.sync_settings()
+      # The files are authoritative here, unlike the OPENC3_SETTING_* env var
+      # seeding done by `openc3cli initsettings`. An Admin Console edit is
+      # mirrored straight back into the file by set_setting, so the file is
+      # already the edited value and applying it reverts nothing. Skipping a
+      # setting that already exists would instead mean a file was never applied
+      # at all: localinit runs after the first plugin load creates the scope,
+      # and that seeds source_url, rubygems_url, pypi_url, news_feed and
+      # system_health, so those five always exist by the time this runs.
+      #
+      # Because initsettings runs before localinit, a local mode file wins over
+      # OPENC3_SETTING_<NAME> for the same setting.
+      #
+      # A file that won't coerce is reported and skipped rather than raising,
+      # for the same reason `initsettings` doesn't abort: one bad settings file
+      # shouldn't stop the rest of localinit.
+      problems = []
       scopes = ScopeModel.names()
       scopes.each do |scope|
         Dir["#{OPENC3_LOCAL_MODE_PATH}/#{scope}/settings/*.json"].each do |config|
           name = File.basename(config, ".json")
+          # save_setting writes a boolean as the JSON text "true"/"false", so
+          # convert it back rather than storing the file contents verbatim -
+          # the string "false" is truthy in the frontend. Settings that hold
+          # JSON text (classification_banner, astro) stay strings, which is
+          # what their components JSON.parse.
+          begin
+            data = SettingModel.coerce(name, File.read(config))
+          rescue StandardError => error
+            problems << "#{config}: #{error.message}"
+            next
+          end
           puts "Syncing setting #{name}"
-          # Anything can be stored in settings so read and set directly
-          data = File.read(config)
           SettingModel.set({ name: name, data: data }, scope: scope)
         end
       end
+      problems.each { |problem| puts "ERROR: #{problem}" }
     end
 
     def self.save_setting(scope, name, data)
       return unless ENV['OPENC3_LOCAL_MODE'] and Dir.exist?(OPENC3_LOCAL_MODE_PATH)
-      config_path = "#{OPENC3_LOCAL_MODE_PATH}/#{scope}/settings/#{name}.json"
-      return unless File.expand_path(config_path).start_with?(OPENC3_LOCAL_MODE_PATH)
+      config_path = scope_path(scope, "settings/#{name}.json")
+      return unless config_path and safe_key?(name)
       FileUtils.mkdir_p(File.dirname(config_path))
-      # Anything can be stored as a setting so write it out directly
+      # Anything can be stored as a setting. Strings are written directly since
+      # they're already the serialized form. Anything else is written as JSON so
+      # sync_settings can read it back rather than a Ruby inspect string.
+      data = JSON.generate(data.as_json(:allow_nan => true)) unless String === data
       File.write(config_path, data)
     end
 
     # Helper methods
 
+    # True if the key has no '.' / '..' segments, no empty segments, no leading
+    # slash and no backslash. Such a key always resolves under its first
+    # segment (the scope), both on disk and in the bucket (the bucket
+    # normalizes '..' segments, so a traversal key reaches other scopes there too).
+    def self.safe_key?(key)
+      return false unless String === key
+      return false if key.empty? or key.start_with?('/') or key.include?('\\') or key.include?("\0")
+      key.split('/', -1).none? { |segment| segment.empty? or segment == '.' or segment == '..' }
+    end
+
+    # True if path resolves to root or somewhere beneath it. Compares against
+    # root plus a separator so a sibling such as /plugins_old never matches.
+    def self.path_within?(path, root)
+      expanded = File.expand_path(path)
+      root = File.expand_path(root)
+      expanded == root or expanded.start_with?(root + File::SEPARATOR)
+    end
+
+    # Local file path for a scope relative path, or nil if the path would
+    # leave the scope directory
+    def self.scope_path(scope, relative_path)
+      return nil unless safe_key?(scope) and !scope.include?('/')
+      scope_root = "#{OPENC3_LOCAL_MODE_PATH}/#{scope}"
+      full_path = "#{scope_root}/#{relative_path}"
+      return nil unless path_within?(full_path, scope_root)
+      full_path
+    end
+
+    # Local file path for a bucket key, or nil if the key is not a safe key
+    def self.key_path(key)
+      return nil unless safe_key?(key)
+      full_path = "#{OPENC3_LOCAL_MODE_PATH}/#{key}"
+      return nil unless path_within?(full_path, OPENC3_LOCAL_MODE_PATH)
+      full_path
+    end
+
     def self.sync_remote_to_local(bucket, key)
-      local_path = "#{OPENC3_LOCAL_MODE_PATH}/#{key}"
-      return unless File.expand_path(local_path).start_with?(OPENC3_LOCAL_MODE_PATH)
+      local_path = key_path(key)
+      return unless local_path
       FileUtils.mkdir_p(File.dirname(local_path))
       bucket.get_object(bucket: ENV['OPENC3_CONFIG_BUCKET'], key: key, path: local_path)
     end
 
     def self.sync_local_to_remote(bucket, key)
-      local_path = "#{OPENC3_LOCAL_MODE_PATH}/#{key}"
-      return unless File.expand_path(local_path).start_with?(OPENC3_LOCAL_MODE_PATH)
+      local_path = key_path(key)
+      return unless local_path
       File.open(local_path, 'rb') do |read_file|
         bucket.put_object(bucket: ENV['OPENC3_CONFIG_BUCKET'], key: key, body: read_file)
       end
     end
 
     def self.delete_local(key)
-      local_path = "#{OPENC3_LOCAL_MODE_PATH}/#{key}"
-      return unless File.expand_path(local_path).start_with?(OPENC3_LOCAL_MODE_PATH)
+      local_path = key_path(key)
+      return unless local_path
       File.delete(local_path) if File.exist?(local_path)
       nil
     end
@@ -579,7 +644,7 @@ module OpenC3
           # Both files exist - Handled earlier
         else
           # Local is missing remote file
-          if not ENV['OPENC3_LOCAL_MODE_SECONDARY'] and ENV['OPENC3_LOCAL_MODE_SYNC_REMOVE']
+          if not ENV.fetch('OPENC3_LOCAL_MODE_SECONDARY', nil) and ENV.fetch('OPENC3_LOCAL_MODE_SYNC_REMOVE', nil)
             delete_remote(bucket, key)
           else
             # Go ahead and copy down to get in sync

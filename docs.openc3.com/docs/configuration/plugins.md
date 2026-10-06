@@ -58,7 +58,16 @@ COSMOS uploads the plugin gem file to an internal gem server and extracts the ge
 
 ### Phase 2: Deploy
 
-Once variables are set, COSMOS registers the plugin model in Redis, installs the Ruby gem, and if the plugin contains a `pyproject.toml` or `requirements.txt`, installs Python dependencies as well. It then parses `plugin.txt` again with [ERB](/docs/configuration/format#erb) variable substitution applied and deploys each component declared in the file: targets, interfaces, routers, microservices, tools, widgets, and script engines.
+Once variables are set, COSMOS registers the plugin model in Redis and installs the Ruby gem. If the plugin contains Python dependencies (`pyproject.toml` or `requirements.txt`), COSMOS creates an isolated [UV](https://docs.astral.sh/uv/) virtual environment for the plugin at `/gems/plugin_venvs/<plugin>/.venv` and installs the dependencies into it. This gives each plugin full dependency isolation — different plugins can require different versions of the same package without conflicts.
+
+COSMOS supports two formats for declaring Python dependencies:
+
+- **`pyproject.toml`** (recommended) — When paired with a `uv.lock` file, enables reproducible installs via `uv sync --frozen`. COSMOS uses `uv sync` for `pyproject.toml`-based plugins.
+- **`requirements.txt`** — COSMOS uses `uv pip install -r requirements.txt` for requirements-based plugins.
+
+System Python packages (those shipped in the COSMOS Docker image) are pre-seeded into the UV download cache, so plugins that depend on those packages reuse them without re-downloading. If the UV install fails for any reason, COSMOS falls back to a shared pip install and logs a warning.
+
+After installing dependencies, COSMOS parses `plugin.txt` again with [ERB](/docs/configuration/format#erb) variable substitution applied and deploys each component declared in the file: targets, interfaces, routers, microservices, tools, widgets, and script engines.
 
 ### Target Deployment
 
@@ -174,9 +183,12 @@ The following keywords must follow a INTERFACE keyword.
 ### MAP_TARGET
 **Maps a target name to an interface**
 
+See [Mapping Targets to Interfaces](/docs/configuration/interfaces#mapping-targets-to-interfaces) for more information.
+
 | Parameter | Description | Required |
 |-----------|-------------|----------|
 | Target Name | Target name to map to this interface | True |
+| Enabled State | Initial enabled state of the target on this interface. Defaults to ENABLED.<br/><br/>Valid Values: <span class="values">ENABLED, DISABLED</span> | False |
 
 <Tabs groupId="script-language">
 <TabItem value="python" label="Python">
@@ -196,9 +208,12 @@ INTERFACE DATA_INT tcpip_client_interface.rb host.docker.internal 8080 8081 10.0
 ### MAP_CMD_TARGET
 <span class="badge badge--secondary since-right">Since 5.2.0</span>**Maps a target name to an interface for commands only**
 
+See [Mapping Targets to Interfaces](/docs/configuration/interfaces#mapping-targets-to-interfaces) for more information.
+
 | Parameter | Description | Required |
 |-----------|-------------|----------|
 | Target Name | Command target name to map to this interface | True |
+| Enabled State | Initial enabled state of the command target on this interface. Defaults to ENABLED.<br/><br/>Valid Values: <span class="values">ENABLED, DISABLED</span> | False |
 
 <Tabs groupId="script-language">
 <TabItem value="python" label="Python">
@@ -218,9 +233,12 @@ INTERFACE CMD_INT tcpip_client_interface.rb host.docker.internal 8080 8081 10.0 
 ### MAP_TLM_TARGET
 <span class="badge badge--secondary since-right">Since 5.2.0</span>**Maps a target name to an interface for telemetry only**
 
+See [Mapping Targets to Interfaces](/docs/configuration/interfaces#mapping-targets-to-interfaces) for more information.
+
 | Parameter | Description | Required |
 |-----------|-------------|----------|
 | Target Name | Telemetry target name to map to this interface | True |
+| Enabled State | Initial enabled state of the telemetry target on this interface. Defaults to ENABLED.<br/><br/>Valid Values: <span class="values">ENABLED, DISABLED</span> | False |
 
 <Tabs groupId="script-language">
 <TabItem value="python" label="Python">
@@ -331,13 +349,13 @@ ROUTER SERIAL_ROUTER tcpip_server_interface.rb 2950 2950 10.0 nil BURST
 ### SECRET
 <span class="badge badge--secondary since-right">Since 5.3.0</span>**Define a secret needed by this interface**
 
-Defines a secret for this interface and optionally assigns its value to an option. For more information see [Admin Secrets](/docs/tools/admin#secrets).
+Defines a secret for this interface and optionally assigns its value to an option. For more information see the [Secrets guide](/docs/guides/secrets) and [Admin Secrets](/docs/tools/admin#secrets).
 
 | Parameter | Description | Required |
 |-----------|-------------|----------|
 | Type | ENV or FILE.  ENV will mount the secret into an environment variable. FILE mounts the secret into a file. | True |
 | Secret Name | The name of the secret to retrieve from the Admin / Secrets tab. For more information see [Admin Secrets](/docs/tools/admin#secrets). | True |
-| Environment Variable or File Path | Environment variable name or file path to store secret. Note that if you use the Option Name to set an option to the secret value, this value doesn't really matter as long as it is unique. | True |
+| Environment Variable or File Path | Environment variable name or file path to store secret. FILE paths must be under /tmp (or the directory set by the OPENC3_SECRET_FILE_DIR environment variable); paths outside of it are rejected. Note that if you use the Option Name to set an option to the secret value, this value doesn't really matter as long as it is unique. | True |
 | Option Name | Interface option to pass the secret value. This is the primary way to pass secrets to interfaces. | False |
 | Secret Store Name | Name of the secret store for stores with multipart keys | False |
 
@@ -448,6 +466,80 @@ Example Usage:
 SHARD 0
 ```
 
+### BRIDGE
+<span class="badge badge--secondary since-right">Since 7.4.0</span>**Name of the bridge to run this interface on**
+
+Run this interface on a bridge host rather than within COSMOS. Note only python is supported.
+
+| Parameter | Description | Required |
+|-----------|-------------|----------|
+| Bridge Name | Bridge Name - Typically DEFAULT | True |
+
+Example Usage:
+```cosmos
+BRIDGE DEFAULT
+```
+
+### BRIDGE_PROTOCOL
+<span class="badge badge--secondary since-right">Since 7.4.0</span>**Bridge Protocols modify the bridge interface by processing the data**
+
+Protocols can be either READ, WRITE, or READ_WRITE. READ protocols act on the data received by the interface while write acts on the data before it is sent out. READ_WRITE applies the protocol to both reading and writing.<br/><br/> For information on creating your own custom protocol please see [Protocols](../configuration/protocols.md)
+
+| Parameter | Description | Required |
+|-----------|-------------|----------|
+| Type | Whether to apply the protocol on incoming data, outgoing data, or both<br/><br/>Valid Values: <span class="values">READ, WRITE, READ_WRITE</span> | True |
+| Protocol Filename or Classname | Ruby or Python filename or class name which implements the protocol | True |
+| Protocol specific parameters | Additional parameters used by the protocol | False |
+
+<Tabs groupId="script-language">
+<TabItem value="python" label="Python">
+```cosmos
+INTERFACE DATA_INT openc3/interfaces/tcpip_client_interface.py host.docker.internal 8080 8081 10.0 nil BURST
+  MAP_TARGET DATA
+  BRIDGE_PROTOCOL READ openc3/interfaces/protocols/ignore_packet_protocol.py INST IMAGE # Drop all INST IMAGE packets
+```
+</TabItem>
+</Tabs>
+
+### BRIDGE_OPTION
+<span class="badge badge--secondary since-right">Since 7.4.0</span>**Set a parameter on a bridged interface**
+
+When a bridge option is set the bridge interface class calls the set_option method. Custom interfaces can override set_option to handle any additional options they want.
+
+| Parameter | Description | Required |
+|-----------|-------------|----------|
+| Name | The option to set. OpenC3 defines several options on the core provided interfaces. The SerialInterface defines FLOW_CONTROL which can be NONE (default) or RTSCTS and DATA_BITS which changes the data bits of the serial interface. The TcpipServerInterface and HttpServerInterface define LISTEN_ADDRESS which is the IP address to accept connections on (default 0.0.0.0). | True |
+| Parameters | Parameters to pass to the option | False |
+
+Example Usage:
+```cosmos
+INTERFACE SERIAL_INT serial_interface.rb COM1 COM1 115200 NONE 1 10.0 nil
+  BRIDGE DEFAULT
+  BRIDGE_OPTION FLOW_CONTROL RTSCTS
+  BRIDGE_OPTION DATA_BITS 8
+```
+
+### BRIDGE_SECRET
+<span class="badge badge--secondary since-right">Since 7.4.0</span>**Define a bridge secret needed by this bridge interface**
+
+Defines a bridge secret for this bridge interface and optionally assigns its value to an option. For more information see [Admin Secrets](/docs/tools/admin#secrets).
+
+| Parameter | Description | Required |
+|-----------|-------------|----------|
+| Type | ENV or FILE.  ENV will mount the secret into an environment variable. FILE mounts the secret into a file. | True |
+| Secret Name | The name of the secret to retrieve from the Admin / Secrets tab. For more information see [Admin Secrets](/docs/tools/admin#secrets). | True |
+| Environment Variable or File Path | Environment variable name or file path to store secret. FILE paths must be under /tmp (or the directory set by the OPENC3_SECRET_FILE_DIR environment variable); paths outside of it are rejected. Note that if you use the Option Name to set an option to the secret value, this value doesn't really matter as long as it is unique. | True |
+| Option Name | Interface option to pass the secret value. This is the primary way to pass secrets to interfaces. | False |
+| Secret Store Name | Name of the secret store for stores with multipart keys | False |
+
+Example Usage:
+```cosmos
+INTERFACE SERIAL_INT serial_interface.rb COM1 COM1 115200 NONE 1 10.0 nil
+  BRIDGE DEFAULT
+  BRIDGE_SECRET ENV USERNAME ENV_USERNAME USERNAME
+  BRIDGE_SECRET FILE KEY "/tmp/DATA/cert" KEY
+```
+
 ## ROUTER
 **Create router to receive commands and output telemetry packets from one or more interfaces**
 
@@ -535,7 +627,7 @@ The following keywords must follow a TARGET keyword.
 ### CMD_DECOM_RETAIN_TIME
 <span class="badge badge--secondary since-right">Since 7.0.0</span>**How long to keep command decommutation records in the TSDB.**
 
-Sets the retention time directly on QuestDB tables for automatic data expiration. QuestDB will automatically remove data older than this retention time.
+Sets the retention time directly on QuestDB tables for automatic data expiration. QuestDB will automatically remove data older than this retention time. Tables are partitioned by day and QuestDB only drops whole partitions, so the effective granularity is one day. Hour values are rounded up to whole days ("1h" becomes 1 day, "25h" becomes 2 days) so data is never dropped early, and data is not removed until the entire day partition is older than the retention time (expect up to a day of extra data). Expiration is evaluated when new data is written to the table, so an idle table is not expired. Changing this value and reinstalling the plugin updates existing tables.
 
 | Parameter | Description | Required |
 |-----------|-------------|----------|
@@ -544,11 +636,18 @@ Sets the retention time directly on QuestDB tables for automatic data expiration
 ### TLM_DECOM_RETAIN_TIME
 <span class="badge badge--secondary since-right">Since 7.0.0</span>**How long to keep telemetry decommutation records in the TSDB.**
 
-Sets the retention time directly on QuestDB tables for automatic data expiration. QuestDB will automatically remove data older than this retention time.
+Sets the retention time directly on QuestDB tables for automatic data expiration. QuestDB will automatically remove data older than this retention time. Tables are partitioned by day and QuestDB only drops whole partitions, so the effective granularity is one day. Hour values are rounded up to whole days ("1h" becomes 1 day, "25h" becomes 2 days) so data is never dropped early, and data is not removed until the entire day partition is older than the retention time (expect up to a day of extra data). Expiration is evaluated when new data is written to the table, so an idle table is not expired. Changing this value and reinstalling the plugin updates existing tables.
 
 | Parameter | Description | Required |
 |-----------|-------------|----------|
 | Time | Retention time value with unit (e.g., "24h" for 24 hours, "30d" for 30 days, "1y" for 1 year). Supported units are h (hours), d (days), w (weeks), M (months), y (years). Default = nil = Forever | True |
+
+### DECOM_FLUSH_PERIOD
+**Period in seconds between flushing rows to the TSDB. Higher values use less CPU.**
+
+| Parameter | Description | Required |
+|-----------|-------------|----------|
+| Period | Number of seconds between flushing rows to the TSDB (default = 5.0) | True |
 
 ### LOG_RETAIN_TIME
 **How long to keep all regular telemetry logs in seconds.**
@@ -615,6 +714,20 @@ DB Shard. Only used if running multiple database shards typically in Kubernetes
 Example Usage:
 ```cosmos
 DB_SHARD 0
+```
+
+### STORED_LIMITS_MODE
+<span class="badge badge--secondary since-right">Since 7.2.1</span>**Controls how limits are evaluated for stored (non-real-time) telemetry packets**
+
+Sets the limits handling policy for packets where the stored flag is true (e.g., packets from file interfaces or historical data replay). PROCESS processes limits normally including logging and reactions. LOG evaluates limits and logs state changes but does not trigger limits reactions or update the current limits state used by the API. DISABLE skips limits processing entirely for stored packets.
+
+| Parameter | Description | Required |
+|-----------|-------------|----------|
+| Mode | PROCESS (default), LOG, or DISABLE | True |
+
+Example Usage:
+```cosmos
+STORED_LIMITS_MODE DISABLE
 ```
 
 ## MICROSERVICE
@@ -759,13 +872,13 @@ Container to execute and run the microservice in. Only used in COSMOS Enterprise
 ### SECRET
 <span class="badge badge--secondary since-right">Since 5.3.0</span>**Define a secret needed by this microservice**
 
-Defines a secret for this microservice. For more information see [Admin Secrets](/docs/tools/admin#secrets).
+Defines a secret for this microservice. For more information see the [Secrets guide](/docs/guides/secrets) and [Admin Secrets](/docs/tools/admin#secrets). Note that unlike the INTERFACE SECRET, the microservice SECRET does not take an Option Name parameter, because the secret value is injected directly into the microservice process as an environment variable (Type ENV) or written to a file (Type FILE).
 
 | Parameter | Description | Required |
 |-----------|-------------|----------|
 | Type | ENV or FILE.  ENV will mount the secret into an environment variable. FILE mounts the secret into a file. | True |
 | Secret Name | The name of the secret to retrieve from the Admin / Secrets tab. For more information see [Admin Secrets](/docs/tools/admin#secrets). | True |
-| Environment Variable or File Path | Environment variable name or file path to store secret | True |
+| Environment Variable or File Path | Environment variable name or file path to store secret. FILE paths must be under /tmp (or the directory set by the OPENC3_SECRET_FILE_DIR environment variable); paths outside of it are rejected. | True |
 | Secret Store Name | Name of the secret store for stores with multipart keys | False |
 
 Example Usage:
@@ -838,7 +951,9 @@ STOPPED
 ## TOOL
 **Define a tool**
 
-Defines a tool that the plugin adds to the OpenC3 system. Tools are web based applications that make use of the Single-SPA javascript library that allows them to by dynamically added to the running system as independent frontend microservices.
+Defines a tool that the plugin adds to the OpenC3 system. Tools are web based applications that make use of the Single-SPA javascript library that allows them to be dynamically added to the running system as independent frontend microservices.
+Tools are global to the entire COSMOS installation. Regardless of the scope a plugin is installed into, its tools are always installed into the DEFAULT scope and are available in every scope.
+
 
 | Parameter | Description | Required |
 |-----------|-------------|----------|

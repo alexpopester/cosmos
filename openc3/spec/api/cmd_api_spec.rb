@@ -138,6 +138,15 @@ module OpenC3
           expect { @api.send(method, "INST", "COLLECT", "TYPE", "DURATION") }.to raise_error(/Invalid number of arguments/)
         end
 
+        it "records the original queuing user (author) via queue_username" do
+          command = @api.send(method, "INST", "ABORT", queue_username: 'original_author')
+          # queue_username (author, shown as "Queued By") is recorded separately
+          # from username (executor, shown as "Executed By")
+          expect(command['queue_username']).to eql 'original_author'
+          # username is the executing user/process, not the author
+          expect(command['username']).to_not eql 'original_author'
+        end
+
         it "warns about required parameters" do
           expect { @api.send(method, "INST COLLECT with DURATION 5") }.to raise_error(/Required/)
         end
@@ -365,7 +374,7 @@ module OpenC3
 
     describe "send_raw" do
       it "raises on unknown interfaces" do
-        expect { @api.send_raw("BLAH_INT", "\x00\x01\x02\x03") }.to raise_error("Interface 'BLAH_INT' does not exist")
+        expect { @api.send_raw("BLAH_INT", "\x00\x01\x02\x03") }.to raise_error("Interface 'BLAH_INT' does not exist (get_interface)")
       end
 
       it "sends raw data to an interface" do
@@ -573,12 +582,12 @@ module OpenC3
 
     describe "get_cmd_cnt" do
       it "complains about non-existent targets" do
-        expect { @api.get_cmd_cnt("BLAH", "ABORT") }.to raise_error("Packet 'BLAH ABORT' does not exist")
-        expect { @api.get_cmd_cnt("BLAH ABORT") }.to raise_error("Packet 'BLAH ABORT' does not exist")
+        expect { @api.get_cmd_cnt("BLAH", "ABORT") }.to raise_error("Packet definition 'BLAH ABORT' does not exist")
+        expect { @api.get_cmd_cnt("BLAH ABORT") }.to raise_error("Packet definition 'BLAH ABORT' does not exist")
       end
 
       it "complains about non-existent packets" do
-        expect { @api.get_cmd_cnt("INST", "BLAH") }.to raise_error("Packet 'INST BLAH' does not exist")
+        expect { @api.get_cmd_cnt("INST", "BLAH") }.to raise_error("Packet definition 'INST BLAH' does not exist")
       end
 
       it "returns the transmit count" do

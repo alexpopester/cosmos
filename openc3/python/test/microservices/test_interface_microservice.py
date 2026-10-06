@@ -152,9 +152,43 @@ class TestInterfaceMicroservice(unittest.TestCase):
                 scope="DEFAULT",
             )
 
+    def start_microservice(self, im):
+        """Start im.run() in a thread and register cleanups that run even if a
+        later assertion fails. Without this a failed assertion skips the inline
+        shutdown and leaks a live microservice thread into every following test
+        in the session, which has crashed the interpreter in CI."""
+        thread = threading.Thread(target=im.run)
+        thread.start()
+        # Cleanups run LIFO: shutdown signals stop, then join waits.
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(im.shutdown)
+        return thread
+
+    def wait_for_state(self, state, timeout=5):
+        """Poll the interface status until it reaches state. A fixed sleep is not
+        enough on a loaded CI runner where connecting can take much longer than
+        it does locally."""
+        end_time = time.time() + timeout
+        while True:
+            all_interfaces = InterfaceStatusModel.all(scope="DEFAULT")
+            if all_interfaces["INST_INT"]["state"] == state or time.time() > end_time:
+                return all_interfaces
+            time.sleep(0.01)
+
+    def wait_for_output(self, stdout, text, timeout=5):
+        """Poll captured output until text appears, then assert on it so the
+        failure message still shows everything that was captured."""
+        end_time = time.time() + timeout
+        while text not in stdout.getvalue() and time.time() < end_time:
+            time.sleep(0.01)
+        self.assertIn(text, stdout.getvalue())
+
     def test_creates_an_interface_updates_status_and_starts_cmd_thread(self):
-        init_threads = threading.active_count()
         im = InterfaceMicroservice("DEFAULT__INTERFACE__INST_INT")
+        # Registered before the assertions so a failure cannot leak the handler
+        # and metrics threads into the rest of the session. shutdown() is
+        # idempotent, so the explicit call below is still fine.
+        self.addCleanup(im.shutdown)
         self.assertEqual(im.config["name"], "DEFAULT__INTERFACE__INST_INT")
         self.assertEqual(im.interface.name, "INST_INT")
         self.assertEqual(im.interface.state, "ATTEMPTING")
@@ -165,13 +199,16 @@ class TestInterfaceMicroservice(unittest.TestCase):
         self.assertEqual(data["INST_INT"]["name"], "INST_INT")
         self.assertEqual(data["INST_INT"]["state"], "ATTEMPTING")
 
-        # Each interface microservice starts 3 threads: microservice_status_thread in microservice.rb
-        # and the InterfaceCmdHandlerThread in interface_microservice.rb
-        # and a metrics thread
-        self.assertEqual(threading.active_count() - init_threads, 3)
+        # The command handler thread is created and running. We check the handler
+        # thread directly rather than the global thread count because the metrics
+        # thread is a process-wide singleton, so the delta depends on test ordering
+        # across the full suite.
+        self.assertIsNotNone(im.handler_thread)
+        self.assertTrue(im.handler_thread.thread.is_alive())
+
         im.shutdown()
-        time.sleep(0.1)  # Allow threads to exit
-        self.assertEqual(threading.active_count(), init_threads)
+        im.handler_thread.thread.join(5)  # Wait for the handler to exit (no fixed sleep race)
+        self.assertFalse(im.handler_thread.thread.is_alive())
 
     # def test_preserves_existing_packet_counts(self):
     #     # Initialize the telemetry topic with a non-zero RECEIVED_COUNT
@@ -194,29 +231,15 @@ class TestInterfaceMicroservice(unittest.TestCase):
         im.interface.reconnect_delay = 0.1  # Override the reconnect delay to be quick
 
         for stdout in capture_io():
-            thread = threading.Thread(target=im.run)
-            thread.start()
-            time.sleep(0.1)
-            self.assertIn(
-                TestInterfaceMicroservice.CONNECTING_MSG,
-                stdout.getvalue(),
-            )
-            self.assertIn(
-                "Connection INST_INT failed due to RuntimeError('test-error')",
-                stdout.getvalue(),
-            )
+            self.start_microservice(im)
+            self.wait_for_output(stdout, TestInterfaceMicroservice.CONNECTING_MSG)
+            self.wait_for_output(stdout, "Connection INST_INT failed due to RuntimeError('test-error')")
 
             MyInterface.connect_raise = False
-            time.sleep(0.2)
-            all_interfaces = InterfaceStatusModel.all(scope="DEFAULT")
+            all_interfaces = self.wait_for_state("CONNECTED")
             self.assertEqual(all_interfaces["INST_INT"]["state"], "CONNECTED")
 
-            self.assertIn(
-                TestInterfaceMicroservice.CONN_SUCCESS_MSG,
-                stdout.getvalue(),
-            )
-            im.shutdown()
-            thread.join(timeout=5)
+            self.wait_for_output(stdout, TestInterfaceMicroservice.CONN_SUCCESS_MSG)
 
     def test_handles_exceptions_while_reading(self):
         MyInterface.read_interface_raise = True
@@ -225,19 +248,14 @@ class TestInterfaceMicroservice(unittest.TestCase):
         self.assertEqual(all_interfaces["INST_INT"]["state"], ("ATTEMPTING"))
         im.interface.reconnect_delay = 0.1  # Override the reconnect delay to be quick
         for stdout in capture_io():
-            thread = threading.Thread(target=im.run)
-            thread.start()
-            time.sleep(0.1)
-            self.assertIn(TestInterfaceMicroservice.CONNECTING_MSG, stdout.getvalue())
-            self.assertIn(TestInterfaceMicroservice.CONN_SUCCESS_MSG, stdout.getvalue())
-            self.assertIn("Connection Lost: RuntimeError('test-error')", stdout.getvalue())
+            self.start_microservice(im)
+            self.wait_for_output(stdout, TestInterfaceMicroservice.CONNECTING_MSG)
+            self.wait_for_output(stdout, TestInterfaceMicroservice.CONN_SUCCESS_MSG)
+            self.wait_for_output(stdout, "Connection Lost: RuntimeError('test-error')")
 
             MyInterface.read_interface_raise = False
-            time.sleep(0.5)  # Allow to reconnect
-            all_interfaces = InterfaceStatusModel.all(scope="DEFAULT")
+            all_interfaces = self.wait_for_state("CONNECTED")  # Allow to reconnect
             self.assertEqual(all_interfaces["INST_INT"]["state"], "CONNECTED")
-            im.shutdown()
-            thread.join(timeout=5)
 
     def test_connect_handles_parameters(self):
         im = InterfaceMicroservice("DEFAULT__INTERFACE__INST_INT")
@@ -248,27 +266,101 @@ class TestInterfaceMicroservice(unittest.TestCase):
         self.assertEqual(im.interface.port, 12345)
 
         for stdout in capture_io():
-            thread = threading.Thread(target=im.run)
-            thread.start()
-            time.sleep(0.1)
-            self.assertIn(TestInterfaceMicroservice.CONNECTING_MSG, stdout.getvalue())
-            self.assertIn(TestInterfaceMicroservice.CONN_SUCCESS_MSG, stdout.getvalue())
-            all_interfaces = InterfaceStatusModel.all(scope="DEFAULT")
+            self.start_microservice(im)
+            self.wait_for_output(stdout, TestInterfaceMicroservice.CONNECTING_MSG)
+            self.wait_for_output(stdout, TestInterfaceMicroservice.CONN_SUCCESS_MSG)
+            all_interfaces = self.wait_for_state("CONNECTED")
             self.assertEqual(all_interfaces["INST_INT"]["state"], "CONNECTED")
             self.assertEqual(im.interface.connect_count, 1)
 
         for stdout in capture_io():
             InterfaceTopic.connect_interface("INST_INT", "test-host", 54321, scope="DEFAULT")
-            time.sleep(0.2)
-            self.assertIn("Connection Lost", stdout.getvalue())
-            self.assertIn(TestInterfaceMicroservice.CONNECTING_MSG, stdout.getvalue())
-            self.assertIn(TestInterfaceMicroservice.CONN_SUCCESS_MSG, stdout.getvalue())
-            all_interfaces = InterfaceStatusModel.all(scope="DEFAULT")
-            self.assertIn(all_interfaces["INST_INT"]["state"], "CONNECTED")
+            self.wait_for_output(stdout, "Connection Lost")
+            self.wait_for_output(stdout, TestInterfaceMicroservice.CONNECTING_MSG)
+            self.wait_for_output(stdout, TestInterfaceMicroservice.CONN_SUCCESS_MSG)
+            all_interfaces = self.wait_for_state("CONNECTED")
+            self.assertEqual(all_interfaces["INST_INT"]["state"], "CONNECTED")
 
             self.assertEqual(im.interface.port, 54321)
-            im.shutdown()
-            thread.join(timeout=5)
+
+    def test_ignores_connect_interface_on_a_connected_interface(self):
+        im = InterfaceMicroservice("DEFAULT__INTERFACE__INST_INT")
+        im.interface.reconnect_delay = 0.1  # Override the reconnect delay to be quick
+
+        for stdout in capture_io():
+            self.start_microservice(im)
+            all_interfaces = self.wait_for_state("CONNECTED")
+            self.assertEqual(all_interfaces["INST_INT"]["state"], "CONNECTED")
+            self.assertEqual(im.interface.connect_count, 1)
+
+            InterfaceTopic.connect_interface("INST_INT", scope="DEFAULT")
+            self.wait_for_output(stdout, "Connect ignored, already connected")
+            time.sleep(0.1)
+            # The existing connection is left alone
+            self.assertNotIn("Connection Lost", stdout.getvalue())
+            self.assertEqual(im.interface.disconnect_count, 0)
+            self.assertEqual(im.interface.connect_count, 1)
+            all_interfaces = InterfaceStatusModel.all(scope="DEFAULT")
+            self.assertEqual(all_interfaces["INST_INT"]["state"], "CONNECTED")
+
+    def test_connects_if_the_state_is_connected_but_the_interface_is_not(self):
+        im = InterfaceMicroservice("DEFAULT__INTERFACE__INST_INT")
+        self.addCleanup(im.shutdown)
+        im.interface.state = "CONNECTED"
+        im.interface._connected = False
+        im.attempting()
+        self.assertEqual(im.interface.state, "ATTEMPTING")
+
+    def test_cleanly_disconnects_an_existing_connection_before_connecting(self):
+        im = InterfaceMicroservice("DEFAULT__INTERFACE__INST_INT")
+        self.addCleanup(im.shutdown)
+        im.interface.state = "ATTEMPTING"
+        im.interface._connected = True
+        im.connect()
+        # The old connection was closed rather than being abandoned
+        self.assertEqual(im.interface.disconnect_count, 1)
+        self.assertEqual(im.interface.state, "CONNECTED")
+
+    def test_disconnects_even_if_the_interface_reports_it_is_not_connected(self):
+        im = InterfaceMicroservice("DEFAULT__INTERFACE__INST_INT")
+        self.addCleanup(im.shutdown)
+        im.interface.state = "CONNECTED"
+        im.interface._connected = False
+        im.disconnect(False)
+        self.assertEqual(im.interface.disconnect_count, 1)
+        self.assertEqual(im.interface.state, "DISCONNECTED")
+
+    # The no-op check in attempting() must not block the reconnect path in
+    # disconnect() or a failed cleanup leaves the interface stuck in CONNECTED
+    def test_still_reconnects_if_the_interface_disconnect_raises(self):
+        im = InterfaceMicroservice("DEFAULT__INTERFACE__INST_INT")
+        self.addCleanup(im.shutdown)
+        im.interface.reconnect_delay = 0.01  # Override the reconnect delay to be quick
+        im.interface.state = "CONNECTED"
+        im.interface._connected = True
+
+        for stdout in capture_io():
+            with patch.object(im.interface, "disconnect", side_effect=RuntimeError("test-error")):
+                im.disconnect()
+            self.assertIn("Disconnect: INST_INT", stdout.getvalue())
+            self.assertNotIn("Connect ignored, already connected", stdout.getvalue())
+        self.assertEqual(im.interface.state, "ATTEMPTING")
+
+    def test_still_reconnects_if_the_interface_disconnect_leaves_it_connected(self):
+        im = InterfaceMicroservice("DEFAULT__INTERFACE__INST_INT")
+        self.addCleanup(im.shutdown)
+        im.interface.reconnect_delay = 0.01  # Override the reconnect delay to be quick
+        im.interface.state = "CONNECTED"
+        im.interface._connected = True
+
+        for stdout in capture_io():
+            # Disconnect does nothing so connected() still reports True afterwards
+            with patch.object(im.interface, "disconnect") as mock_disconnect:
+                im.disconnect()
+                mock_disconnect.assert_called_once()
+            self.assertNotIn("Connect ignored, already connected", stdout.getvalue())
+        self.assertTrue(im.interface.connected())
+        self.assertEqual(im.interface.state, "ATTEMPTING")
 
     # def test_handles_exceptions_in_monitor_thread(self):
     #     im = InterfaceMicroservice("DEFAULT__INTERFACE__INST_INT")
@@ -295,28 +387,23 @@ class TestInterfaceMicroservice(unittest.TestCase):
         im.interface.reconnect_delay = 0.1  # Override the reconnect delay to be quick
 
         for stdout in capture_io():
-            thread = threading.Thread(target=im.run)
-            thread.start()
-            time.sleep(0.1)
-            all_interfaces = InterfaceStatusModel.all(scope="DEFAULT")
+            self.start_microservice(im)
+            all_interfaces = self.wait_for_state("CONNECTED")
             self.assertEqual(all_interfaces["INST_INT"]["state"], "CONNECTED")
-            self.assertIn(TestInterfaceMicroservice.CONNECTING_MSG, stdout.getvalue())
-            self.assertIn(TestInterfaceMicroservice.CONN_SUCCESS_MSG, stdout.getvalue())
+            self.wait_for_output(stdout, TestInterfaceMicroservice.CONNECTING_MSG)
+            self.wait_for_output(stdout, TestInterfaceMicroservice.CONN_SUCCESS_MSG)
 
             InterfaceTopic.disconnect_interface("INST_INT")
-            time.sleep(0.1)  # Allow disconnect
-            all_interfaces = InterfaceStatusModel.all(scope="DEFAULT")
+            all_interfaces = self.wait_for_state("DISCONNECTED")  # Allow disconnect
             self.assertEqual(all_interfaces["INST_INT"]["state"], "DISCONNECTED")
-            self.assertIn("Disconnect requested", stdout.getvalue())
-            self.assertIn("Connection Lost", stdout.getvalue())
+            self.wait_for_output(stdout, "Disconnect requested")
+            self.wait_for_output(stdout, "Connection Lost")
 
             # Wait and verify still DISCONNECTED and not ATTEMPTING
             time.sleep(0.1)
             all_interfaces = InterfaceStatusModel.all(scope="DEFAULT")
             self.assertEqual(all_interfaces["INST_INT"]["state"], "DISCONNECTED")
             self.assertEqual(im.interface.disconnect_count, 1)
-            im.shutdown()
-            thread.join(timeout=5)
 
     # TODO: Not sure why this doesn't work ... the disconnect command never gets processed
     # def test_handles_a_interface_that_doesnt_allow_reads(self):
@@ -359,10 +446,8 @@ class TestInterfaceMicroservice(unittest.TestCase):
         all_interfaces = InterfaceStatusModel.all(scope="DEFAULT")
         self.assertEqual(all_interfaces["INST_INT"]["state"], "ATTEMPTING")
 
-        thread = threading.Thread(target=im.run)
-        thread.start()
-        time.sleep(0.1)
-        all_interfaces = InterfaceStatusModel.all(scope="DEFAULT")
+        self.start_microservice(im)
+        all_interfaces = self.wait_for_state("CONNECTED")
         self.assertEqual(all_interfaces["INST_INT"]["state"], "CONNECTED")
 
         Topic.update_topic_offsets(["DEFAULT__TELEMETRY__{INST}__HEALTH_STATUS"])
@@ -383,36 +468,27 @@ class TestInterfaceMicroservice(unittest.TestCase):
             packet.buffer = msg_hash[b"buffer"]
             self.assertEqual(packet.read("TEMP1", "RAW"), 10)
 
-        im.shutdown()
-        thread.join(timeout=5)
-
     def test_supports_interface_cmd(self):
         im = InterfaceMicroservice("DEFAULT__INTERFACE__INST_INT")
         all_interfaces = InterfaceStatusModel.all(scope="DEFAULT")
         self.assertEqual(all_interfaces["INST_INT"]["state"], "ATTEMPTING")
 
-        thread = threading.Thread(target=im.run)
-        thread.start()
-        time.sleep(0.1)
-        all_interfaces = InterfaceStatusModel.all(scope="DEFAULT")
+        self.start_microservice(im)
+        all_interfaces = self.wait_for_state("CONNECTED")
         self.assertEqual(all_interfaces["INST_INT"]["state"], "CONNECTED")
 
         InterfaceTopic.interface_cmd("INST_INT", "DO_THE_THING", "PARAM1", 2, scope="DEFAULT")
         time.sleep(0.1)
         self.assertEqual("DO_THE_THING", im.interface.interface_cmd_name)
         self.assertEqual(("PARAM1", 2), im.interface.interface_cmd_args)
-        im.shutdown()
-        thread.join(timeout=5)
 
     def test_supports_protocol_cmd(self):
         im = InterfaceMicroservice("DEFAULT__INTERFACE__INST_INT")
         all_interfaces = InterfaceStatusModel.all(scope="DEFAULT")
         self.assertEqual(all_interfaces["INST_INT"]["state"], "ATTEMPTING")
 
-        thread = threading.Thread(target=im.run)
-        thread.start()
-        time.sleep(0.1)
-        all_interfaces = InterfaceStatusModel.all(scope="DEFAULT")
+        self.start_microservice(im)
+        all_interfaces = self.wait_for_state("CONNECTED")
         self.assertEqual(all_interfaces["INST_INT"]["state"], "CONNECTED")
 
         InterfaceTopic.protocol_cmd(
@@ -429,8 +505,6 @@ class TestInterfaceMicroservice(unittest.TestCase):
         self.assertEqual(("PARAM2", 3), im.interface.protocol_cmd_args)
         self.assertEqual("READ", im.interface.protocol_read_write)
         self.assertEqual(3, im.interface.protocol_index)
-        im.shutdown()
-        thread.join(timeout=5)
 
     def test_supports_update_interval_option_to_enable_queued_writes(self):
         # Update the model to use UPDATE_INTERVAL option
@@ -450,6 +524,7 @@ class TestInterfaceMicroservice(unittest.TestCase):
         EphemeralStoreQueued.instance().set_update_interval(0)
 
         im = InterfaceMicroservice("DEFAULT__INTERFACE__INST_INT")
+        self.addCleanup(im.shutdown)
         self.assertEqual(im.queued, True)
         self.assertEqual(StoreQueued.instance().update_interval, 0.2)
         self.assertEqual(EphemeralStoreQueued.instance().update_interval, 0.2)
@@ -505,7 +580,9 @@ class TestInterfaceMicroservice(unittest.TestCase):
             self.assertIn("Stale tlmcnt Redis key detected for unknown packet INST OLD_PACKET", stdout.getvalue())
 
     def test_process_cmd_with_all_fields_and_missing_optional_fields(self):
-        """Test process_cmd succeeds with full msg_hash and with only required fields."""
+        """Test process_cmd succeeds with full msg_hash and with only required fields.
+        Also verifies queue_username (the original author, shown as "Queued By")
+        is carried through to the command extra."""
         im = InterfaceMicroservice("DEFAULT__INTERFACE__INST_INT")
         thread = threading.Thread(target=im.run)
         thread.start()
@@ -528,12 +605,19 @@ class TestInterfaceMicroservice(unittest.TestCase):
             b"hazardous_check": b"TRUE",
             b"cmd_string": b"cmd('INST ABORT')",
             b"username": b"test_user",
+            b"queue_username": b"DEFAULT__MULTI__INST",
             b"validate": b"TRUE",
             b"manual": b"FALSE",
             b"log_message": b"TRUE",
         }
-        result = handler.process_cmd(topic, msg_id, full_msg_hash, None)
+        with patch("openc3.microservices.interface_microservice.CommandDecomTopic.write_packet") as mock_write:
+            result = handler.process_cmd(topic, msg_id, full_msg_hash, None)
         self.assertEqual(result, "SUCCESS")
+        # queue_username must be copied into the command extra so Command History
+        # can show "Queued By" for queued commands
+        command = mock_write.call_args[0][0]
+        self.assertEqual(command.extra["username"], "test_user")
+        self.assertEqual(command.extra.get("queue_username"), "DEFAULT__MULTI__INST")
 
         # Minimal msg_hash — only required fields; optional fields use .get() defaults
         minimal_msg_hash = {
@@ -557,6 +641,208 @@ class TestInterfaceMicroservice(unittest.TestCase):
         result = handler.process_cmd(topic, msg_id, full_msg_hash, None)
         self.assertIsNone(result)
 
+    def test_process_cmd_supports_interface_directives(self):
+        """Directive messages on the CMD}INTERFACE topic: interface_details and
+        target_control (enable/disable and the error path)."""
+        im = InterfaceMicroservice("DEFAULT__INTERFACE__INST_INT")
+        self.addCleanup(im.shutdown)
+        handler = im.handler_thread
+        topic = "{DEFAULT__CMD}INTERFACE__INST_INT"
+        msg_id = f"{int(time.time() * 1000)}-0"
+
+        # interface_details returns the interface details as JSON
+        result = handler.process_cmd(topic, msg_id, {b"interface_details": b"1"}, None)
+        self.assertEqual(json.loads(result)["name"], "INST_INT")
+
+        # target_control disable turns off both cmd and tlm for the target
+        disable = json.dumps(
+            {"target_name": "INST", "cmd_only": False, "tlm_only": False, "action": "disable"}
+        ).encode()
+        self.assertEqual(handler.process_cmd(topic, msg_id, {b"target_control": disable}, None), "SUCCESS")
+        self.assertFalse(im.interface.cmd_target_enabled["INST"])
+        self.assertFalse(im.interface.tlm_target_enabled["INST"])
+
+        # target_control enable turns them back on
+        enable = json.dumps({"target_name": "INST", "cmd_only": False, "tlm_only": False, "action": "enable"}).encode()
+        self.assertEqual(handler.process_cmd(topic, msg_id, {b"target_control": enable}, None), "SUCCESS")
+        self.assertTrue(im.interface.cmd_target_enabled["INST"])
+        self.assertTrue(im.interface.tlm_target_enabled["INST"])
+
+        # target_control with invalid JSON returns the error message (not SUCCESS)
+        result = handler.process_cmd(topic, msg_id, {b"target_control": b"not json"}, None)
+        self.assertNotEqual(result, "SUCCESS")
+
+        # A raw write while not connected reports that
+        result = handler.process_cmd(topic, msg_id, {b"raw": b"\x00\x01"}, None)
+        self.assertEqual(result, "Interface not connected: INST_INT")
+
+        # interface_cmd / protocol_cmd / inject_tlm error paths return the error
+        self.assertNotEqual(handler.process_cmd(topic, msg_id, {b"interface_cmd": b"{}"}, None), "SUCCESS")
+        self.assertNotEqual(handler.process_cmd(topic, msg_id, {b"protocol_cmd": b"{}"}, None), "SUCCESS")
+        self.assertNotEqual(handler.process_cmd(topic, msg_id, {b"inject_tlm": b"not valid"}, None), "SUCCESS")
+
+    def test_process_cmd_interface_details_error_does_not_kill_the_thread(self):
+        """A custom interface whose details() raises must not take down the microservice.
+        The error is returned as the ack so the caller sees it instead of timing out."""
+        im = InterfaceMicroservice("DEFAULT__INTERFACE__INST_INT")
+        self.addCleanup(im.shutdown)
+        handler = im.handler_thread
+        topic = "{DEFAULT__CMD}INTERFACE__INST_INT"
+        msg_id = f"{int(time.time() * 1000)}-0"
+
+        # A common mistake in a custom interface is shadowing the num_clients method
+        # with an attribute, which makes as_json raise TypeError
+        im.interface.num_clients = 0
+        result = handler.process_cmd(topic, msg_id, {b"interface_details": b"1"}, None)
+        self.assertIn("not callable", result)
+
+        # A details() that returns something JSON cannot encode is also reported
+        del im.interface.num_clients  # restore the class method
+        im.interface.options["BAD"] = object()
+        result = handler.process_cmd(topic, msg_id, {b"interface_details": b"1"}, None)
+        self.assertIn("not JSON serializable", result)
+
+        # The handler still works for other directives afterwards
+        del im.interface.options["BAD"]
+        result = handler.process_cmd(topic, msg_id, {b"interface_details": b"1"}, None)
+        self.assertEqual(json.loads(result)["name"], "INST_INT")
+
+    def test_process_cmd_connected_interface_directives(self):
+        """Raw write and stream logging directives against a connected interface."""
+        im = InterfaceMicroservice("DEFAULT__INTERFACE__INST_INT")
+        thread = threading.Thread(target=im.run)
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(im.shutdown)
+        time.sleep(0.1)
+
+        handler = im.handler_thread
+        topic = "{DEFAULT__CMD}INTERFACE__INST_INT"
+        msg_id = f"{int(time.time() * 1000)}-0"
+
+        # Raw write to a connected interface results in an UNKNOWN packet
+        self.assertEqual(handler.process_cmd(topic, msg_id, {b"raw": b"\x00\x01\x02\x03"}, None), "SUCCESS")
+
+        # Enable then disable stream logging
+        self.assertEqual(handler.process_cmd(topic, msg_id, {b"log_stream": b"true"}, None), "SUCCESS")
+        self.assertEqual(handler.process_cmd(topic, msg_id, {b"log_stream": b"false"}, None), "SUCCESS")
+
+    def test_process_cmd_command_error_and_hazardous_branches(self):
+        """Hazardous check, invalid command, and not-connected branches — none
+        of which require the interface to be connected."""
+        im = InterfaceMicroservice("DEFAULT__INTERFACE__INST_INT")
+        self.addCleanup(im.shutdown)
+        handler = im.handler_thread
+        topic = "{DEFAULT__CMD}TARGET__INST"
+        msg_id = f"{int(time.time() * 1000)}-0"
+
+        # CLEAR is HAZARDOUS: with hazardous_check enabled it returns a HazardousError
+        result = handler.process_cmd(
+            topic,
+            msg_id,
+            {
+                b"target_name": b"INST",
+                b"cmd_name": b"CLEAR",
+                b"cmd_params": json.dumps({}).encode(),
+                b"hazardous_check": b"TRUE",
+                b"cmd_string": b"cmd('INST CLEAR')",
+            },
+            None,
+        )
+        self.assertTrue(result.startswith("HazardousError"))
+
+        # Neither cmd_params nor cmd_buffer present raises "Invalid command received"
+        result = handler.process_cmd(topic, msg_id, {b"target_name": b"INST", b"cmd_name": b"ABORT"}, None)
+        self.assertIn("Invalid command received", result)
+
+        # A valid command while the interface is not connected reports that
+        result = handler.process_cmd(
+            topic,
+            msg_id,
+            {
+                b"target_name": b"INST",
+                b"cmd_name": b"ABORT",
+                b"cmd_params": json.dumps({}).encode(),
+                b"hazardous_check": b"FALSE",
+            },
+            None,
+        )
+        self.assertEqual(result, "Interface not connected: INST_INT")
+
+    def test_process_cmd_identifies_a_cmd_buffer(self):
+        """A command sent as a raw cmd_buffer is identified and written to the
+        connected interface."""
+        im = InterfaceMicroservice("DEFAULT__INTERFACE__INST_INT")
+        thread = threading.Thread(target=im.run)
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(im.shutdown)
+        time.sleep(0.1)
+
+        handler = im.handler_thread
+        topic = "{DEFAULT__CMD}TARGET__INST"
+        msg_id = f"{int(time.time() * 1000)}-0"
+
+        abort = System.commands.build_cmd("INST", "ABORT")
+        result = handler.process_cmd(
+            topic,
+            msg_id,
+            {
+                b"target_name": b"INST",
+                b"cmd_name": b"ABORT",
+                b"cmd_buffer": abort.buffer,
+                b"cmd_string": b"cmd('INST ABORT')",
+                b"username": b"test_user",
+            },
+            None,
+        )
+        self.assertEqual(result, "SUCCESS")
+
+    def test_run_does_not_write_status_after_cancel_thread_set(self):
+        """When stop() sets cancel_thread, disconnect() and run() must not
+        write to the status model, avoiding re-creation after stop() deletes it."""
+        im = InterfaceMicroservice("DEFAULT__INTERFACE__INST_INT")
+        all_interfaces = InterfaceStatusModel.all(scope="DEFAULT")
+        self.assertEqual(all_interfaces["INST_INT"]["state"], "ATTEMPTING")
+
+        for _stdout in capture_io():
+            thread = self.start_microservice(im)
+            all_interfaces = self.wait_for_state("CONNECTED")
+            self.assertEqual(all_interfaces["INST_INT"]["state"], "CONNECTED")
+
+            # This test asserts on state after shutdown, so shut down inline as
+            # well. shutdown() is idempotent and the cleanup join is harmless.
+            im.shutdown()
+            thread.join(timeout=5)
+
+        # After shutdown the status model should be gone because:
+        # 1. stop() destroyed it
+        # 2. disconnect() skips status writes when cancel_thread is set
+        # 3. run() skips its final status write when cancel_thread is set
+        # Note: We check the direct (non-queued) store since queued writes
+        # from handle_packet before stop() may still be in the queue.
+        result = InterfaceStatusModel.get(name="INST_INT", scope="DEFAULT")
+        self.assertIsNone(result)
+
+    def test_handle_packet_does_not_write_status_after_cancel_thread_set(self):
+        """A packet already buffered can be returned from read() after stop()
+        sets cancel_thread and destroys the status model. handle_packet() must
+        not re-create the status model in that window (orphaned model bug)."""
+        im = InterfaceMicroservice("DEFAULT__INTERFACE__INST_INT")
+        self.addCleanup(im.shutdown)
+        im.interface.connect()
+        packet = im.interface.read()
+        self.assertIsNotNone(packet)
+
+        # Simulate stop() having run: cancel_thread set, status model destroyed
+        im.cancel_thread = True
+        with patch.object(InterfaceStatusModel, "set") as mock_set:
+            im.handle_packet(packet)
+            mock_set.assert_not_called()
+
+        im.shutdown()
+        time.sleep(0.1)  # Allow threads to exit
+
     def test_supports_optimize_throughput_option_for_backward_compatibility(self):
         # Update the model to use OPTIMIZE_THROUGHPUT option (legacy name)
         model = InterfaceModel(
@@ -575,6 +861,7 @@ class TestInterfaceMicroservice(unittest.TestCase):
         EphemeralStoreQueued.instance().set_update_interval(0)
 
         im = InterfaceMicroservice("DEFAULT__INTERFACE__INST_INT")
+        self.addCleanup(im.shutdown)
         self.assertEqual(im.queued, True)
         self.assertEqual(StoreQueued.instance().update_interval, 0.3)
         self.assertEqual(EphemeralStoreQueued.instance().update_interval, 0.3)

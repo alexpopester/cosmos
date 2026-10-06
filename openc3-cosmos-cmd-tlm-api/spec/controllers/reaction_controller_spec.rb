@@ -28,6 +28,16 @@ RSpec.describe ReactionController, type: :controller do
     model.create
     model = OpenC3::TriggerGroupModel.new(name: "TEST", scope: "TEST")
     model.create
+    setup_system()
+    # Seed INST into both scopes so item operands reference telemetry that actually
+    # exists. TriggerModel validates items against the trigger's own scope, and the
+    # "two reactions on different scopes" spec builds a trigger in TEST as well.
+    dir = File.join(__dir__, "..", "..", "..", "openc3", "spec", "install", "config", "targets")
+    ["DEFAULT", "TEST"].each do |scope|
+      target = OpenC3::TargetModel.new(folder_name: "INST", name: "INST", scope: scope)
+      target.create
+      target.update_store(OpenC3::System.new(["INST"], dir))
+    end
   end
 
   def generate_trigger(
@@ -137,6 +147,35 @@ RSpec.describe ReactionController, type: :controller do
       expect(created["actions"][1]["value"]).to eql("Alert")
       expect(created["actions"][1]["severity"]).to eql("FATAL")
     end
+
+    it "preserves the environment on a script action" do
+      generate_trigger
+      hash = generate_reaction_hash(
+        actions: [{"type" => "script", "value" => "INST/procedures/checks.rb",
+                   "environment" => [{"key" => "USER", "value" => "JASON"}]}]
+      )
+      post :create, params: hash.merge({"scope" => "DEFAULT"})
+      expect(response).to have_http_status(:created)
+      created = JSON.parse(response.body, allow_nan: true, create_additions: true)
+      expect(created["actions"][0]["environment"]).to eql([{"key" => "USER", "value" => "JASON"}])
+
+      get :show, params: {scope: "DEFAULT", name: created["name"]}
+      expect(response).to have_http_status(:ok)
+      shown = JSON.parse(response.body, allow_nan: true, create_additions: true)
+      expect(shown["actions"][0]["environment"]).to eql([{"key" => "USER", "value" => "JASON"}])
+    end
+
+    it "preserves the alert flag on a notify action" do
+      generate_trigger
+      hash = generate_reaction_hash(
+        actions: [{"type" => "notify", "value" => "Popup", "severity" => "INFO", "alert" => true}]
+      )
+      post :create, params: hash.merge({"scope" => "DEFAULT"})
+      expect(response).to have_http_status(:created)
+      created = JSON.parse(response.body, allow_nan: true, create_additions: true)
+      # Controller specs stringify params so just verify the field survives permit
+      expect(created["actions"][0]["alert"].to_s).to eql("true")
+    end
   end
 
   describe "PUT update preserves action fields" do
@@ -162,6 +201,27 @@ RSpec.describe ReactionController, type: :controller do
       expect(updated["actions"][0]["type"]).to eql("notify")
       expect(updated["actions"][0]["value"]).to eql("Updated alert")
       expect(updated["actions"][0]["severity"]).to eql("ERROR")
+    end
+
+    it "preserves the environment on a script action" do
+      generate_trigger
+      hash = generate_reaction_hash
+      post :create, params: hash.merge({"scope" => "DEFAULT"})
+      expect(response).to have_http_status(:created)
+      created = JSON.parse(response.body, allow_nan: true, create_additions: true)
+
+      put :update, params: {
+        scope: "DEFAULT",
+        name: created["name"],
+        snooze: 300,
+        triggers: [{"name" => "TRIG1", "group" => GROUP}],
+        trigger_level: "EDGE",
+        actions: [{"type" => "script", "value" => "INST/procedures/checks.rb",
+                   "environment" => [{"key" => "MODE", "value" => "TEST"}]}],
+      }
+      expect(response).to have_http_status(:ok)
+      updated = JSON.parse(response.body, allow_nan: true, create_additions: true)
+      expect(updated["actions"][0]["environment"]).to eql([{"key" => "MODE", "value" => "TEST"}])
     end
   end
 

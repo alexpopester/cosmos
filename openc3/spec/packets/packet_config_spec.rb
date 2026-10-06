@@ -53,6 +53,22 @@ module OpenC3
         tf.unlink
       end
 
+      it "does not render ERB at runtime (ERB only runs at plugin install)" do
+        # ERB is rendered once, at plugin install (TargetModel#deploy). At runtime
+        # config is parsed as data, never executed, so an ERB tag is treated literally
+        # rather than evaluated. This prevents the targets_modified overlay from
+        # injecting code via ERB.
+        tf = Tempfile.new('unittest')
+        tf.puts('TELEMETRY TGT PKT BIG_ENDIAN "Packet"')
+        tf.puts('  APPEND_ITEM ITEM 16 UINT "<%= 6 * 7 %>"')
+        tf.close
+        @pc.process_file(tf.path, 'TGT')
+        item = @pc.telemetry['TGT']['PKT'].get_item('ITEM')
+        expect(item.description).to eql '<%= 6 * 7 %>'
+        expect(item.description).to_not eql '42'
+        tf.unlink
+      end
+
       it "creates UNKNOWN cmd/tlm packets" do
         # Only one target called "UNKNOWN"
         expect(@pc.commands.keys).to eql ["UNKNOWN"]
@@ -811,24 +827,48 @@ module OpenC3
 
       context "with TEMPLATE_FILE" do
         it "sets the template via file" do
-          data_file = Tempfile.new('unittest')
-          data_file.write("File data")
-          data_file.close
           tf = Tempfile.new('unittest')
           filename = "datafile2.txt"
           File.open(File.dirname(tf.path) + '/' + filename, 'wb') do |file|
             file.write("relative file")
           end
+          subdir = File.join(File.dirname(tf.path), 'templates')
+          FileUtils.mkdir_p(subdir)
+          File.open(File.join(subdir, 'datafile3.txt'), 'wb') do |file|
+            file.write("subdir file")
+          end
           tf.puts 'TELEMETRY tgt1 pkt1 LITTLE_ENDIAN "Description"'
-          tf.puts "TEMPLATE_FILE #{data_file.path}"
+          tf.puts "TEMPLATE_FILE templates/datafile3.txt"
           tf.puts 'COMMAND tgt2 pkt1 LITTLE_ENDIAN "Description"'
           tf.puts "TEMPLATE_FILE #{filename}"
           tf.close
           @pc.process_file(tf.path, "SYSTEM")
-          expect(@pc.telemetry["TGT1"]["PKT1"].template).to eq "File data"
+          expect(@pc.telemetry["TGT1"]["PKT1"].template).to eq "subdir file"
           expect(@pc.commands["TGT2"]["PKT1"].template).to eq "relative file"
           File.delete(File.dirname(tf.path) + '/' + filename)
+          FileUtils.rm_rf(subdir)
+          tf.unlink
+        end
+
+        it "rejects absolute template paths" do
+          data_file = Tempfile.new('unittest')
+          data_file.write("File data")
+          data_file.close
+          tf = Tempfile.new('unittest')
+          tf.puts 'TELEMETRY tgt1 pkt1 LITTLE_ENDIAN "Description"'
+          tf.puts "TEMPLATE_FILE #{data_file.path}"
+          tf.close
+          expect { @pc.process_file(tf.path, "SYSTEM") }.to raise_error(ConfigParser::Error, /Absolute paths are not allowed/)
           data_file.unlink
+          tf.unlink
+        end
+
+        it "rejects template paths which traverse out of the config directory" do
+          tf = Tempfile.new('unittest')
+          tf.puts 'TELEMETRY tgt1 pkt1 LITTLE_ENDIAN "Description"'
+          tf.puts "TEMPLATE_FILE ../../../../etc/passwd"
+          tf.close
+          expect { @pc.process_file(tf.path, "SYSTEM") }.to raise_error(ConfigParser::Error, /Path traversal is not allowed/)
           tf.unlink
         end
       end

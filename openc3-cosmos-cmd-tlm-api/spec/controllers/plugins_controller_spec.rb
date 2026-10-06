@@ -87,6 +87,30 @@ RSpec.describe PluginsController, type: :controller do
     end
   end
 
+  describe "POST modified_diff" do
+    it "returns the list of modified files that differ from the plugin" do
+      allow(OpenC3::PluginModel).to receive(:modified_diff)
+        .with({"name" => "x"}, scope: "DEFAULT").and_return(["INST/screen.txt"])
+
+      post :modified_diff, params: {scope: "DEFAULT", plugin_hash: '{"name":"x"}'}
+      expect(response).to have_http_status(:ok)
+      json = JSON.parse(response.body)
+      expect(json["files"]).to eq(["INST/screen.txt"])
+    end
+
+    it "returns bad_request on invalid plugin_hash JSON" do
+      post :modified_diff, params: {scope: "DEFAULT", plugin_hash: "not json"}
+      expect(response).to have_http_status(:bad_request)
+      json = JSON.parse(response.body)
+      expect(json["status"]).to eq("error")
+    end
+
+    it "returns nothing without authorization" do
+      post :modified_diff, params: {plugin_hash: "{}"}
+      expect(response).to have_http_status(:unauthorized)
+    end
+  end
+
   describe "POST create" do
     before(:each) do
       @file = Tempfile.new(["test-plugin", ".gem"])
@@ -341,6 +365,34 @@ RSpec.describe PluginsController, type: :controller do
 
     it "returns nothing without authorization" do
       delete :destroy, params: {id: "TEST_PLUGIN"}
+      expect(response).to have_http_status(:unauthorized)
+    end
+  end
+
+  describe "POST migrate_to_uv" do
+    it "spawns a migratetouv process and returns its name" do
+      process = double("process", name: "process_1")
+      expect(OpenC3::ProcessManager.instance).to receive(:spawn).with(
+        ["ruby", "/openc3/bin/openc3cli", "migratetouv", "TEST_PLUGIN", "DEFAULT"],
+        "plugin_migrate_to_uv", "TEST_PLUGIN", anything, scope: "DEFAULT"
+      ).and_return(process)
+
+      post :migrate_to_uv, params: {id: "TEST_PLUGIN", scope: "DEFAULT"}
+      expect(response).to have_http_status(:ok)
+      expect(response.body).to include("process_1")
+    end
+
+    it "returns error when spawn raises" do
+      expect(OpenC3::ProcessManager.instance).to receive(:spawn).and_raise(RuntimeError.new("Spawn failed"))
+
+      post :migrate_to_uv, params: {id: "TEST_PLUGIN", scope: "DEFAULT"}
+      expect(response).to have_http_status(:internal_server_error)
+      json = JSON.parse(response.body)
+      expect(json["status"]).to eq("error")
+    end
+
+    it "returns nothing without authorization" do
+      post :migrate_to_uv, params: {id: "TEST_PLUGIN"}
       expect(response).to have_http_status(:unauthorized)
     end
   end

@@ -312,7 +312,7 @@ class Buffer(unittest.TestCase):
 
     def test_complains_if_an_item_doesnt_exist(self):
         p = Packet("tgt", "pkt")
-        with self.assertRaisesRegex(RuntimeError, "Packet item 'TGT PKT TEST' does not exist"):
+        with self.assertRaisesRegex(RuntimeError, r"Item 'TGT PKT TEST' does not exist \(Packet\)"):
             p.get_item("test")
 
 
@@ -1862,6 +1862,39 @@ class PacketDecom(unittest.TestCase):
 
         self.assertEqual(vals.get("TEST3__L"), "RED")
 
+    def test_decom_omits_limits_states_when_include_limits_states_is_false(self):
+        p = Packet("tgt", "pkt")
+        i1 = p.append_item("test1", 8, "UINT")
+        i1.limits.state = "GREEN"
+        i2 = p.append_item("test2", 16, "UINT")
+        i2.read_conversion = GenericConversion("value * 2")
+        i2.limits.state = "RED_HIGH"
+
+        p.buffer = b"\x01\x00\x03"
+
+        # Default: limits states included
+        vals = p.decom()
+        self.assertEqual(vals["TEST1__L"], "GREEN")
+        self.assertEqual(vals["TEST2__L"], "RED_HIGH")
+
+        # With include_limits_states=False, __L keys are omitted
+        vals = p.decom(include_limits_states=False)
+        self.assertNotIn("TEST1__L", vals)
+        self.assertNotIn("TEST2__L", vals)
+        # Other value types are still present
+        self.assertEqual(vals["TEST1"], 1)
+        self.assertEqual(vals["TEST2"], 3)
+        self.assertEqual(vals["TEST2__C"], 6)
+
+    def test_decom_includes_limits_states_by_default(self):
+        p = Packet("tgt", "pkt")
+        i1 = p.append_item("test1", 8, "UINT")
+        i1.limits.state = "YELLOW_LOW"
+
+        p.buffer = b"\x05"
+        vals = p.decom()
+        self.assertEqual(vals["TEST1__L"], "YELLOW_LOW")
+
 
 class PacketObfuscation(unittest.TestCase):
     def test_does_nothing_if_no_buffer_exists(self):
@@ -2221,3 +2254,49 @@ class PacketObfuscation(unittest.TestCase):
         self.assertAlmostEqual(packet.read("CBOR.ITEM3"), 3.14)
         self.assertEqual(packet.read("CBOR.ITEM4"), "Example")
         self.assertEqual(packet.read("CBOR.ITEM5"), [])
+
+
+class TestPacketShortBufferAllowed(unittest.TestCase):
+    def setUp(self):
+        self.packet = Packet("TGT", "PKT")
+        self.packet.append_item("ID", 16, "UINT")
+        item = self.packet.append_item("VAL", 16, "UINT")
+        item.read_conversion = GenericConversion("value * 2")
+        item.states = {"GOOD": 1}
+        item.units = "V"
+        item.format_string = "%0.1f"
+        item.limits.values = {"DEFAULT": [1, 2, 4, 5]}
+        item.limits.enabled = True
+        self.packet.short_buffer_allowed = True
+        self.packet.buffer = b"\x00\x01"
+
+    def test_returns_none_for_all_value_types_of_an_item_outside_the_buffer(self):
+        self.assertEqual(self.packet.read("ID"), 1)
+        # Conversions, states, format strings and units must not be applied to None
+        self.assertIsNone(self.packet.read("VAL", "RAW"))
+        self.assertIsNone(self.packet.read("VAL", "CONVERTED"))
+        self.assertIsNone(self.packet.read("VAL", "FORMATTED"))
+        self.assertIsNone(self.packet.read("VAL", "WITH_UNITS"))
+
+    def test_reads_all_items_with_limits_states_without_raising(self):
+        self.assertEqual(self.packet.read_all("CONVERTED"), [["ID", 1], ["VAL", None]])
+        self.assertEqual(
+            self.packet.read_all_with_limits_states("CONVERTED"),
+            [["ID", 1, None], ["VAL", None, None]],
+        )
+
+    def test_checks_limits_without_raising(self):
+        self.packet.check_limits()
+        self.assertIsNone(self.packet.get_item("VAL").limits.state)
+
+    def test_does_not_identify_a_packet_whose_id_item_is_outside_the_buffer(self):
+        packet = Packet("TGT", "PKT")
+        packet.append_item("ID1", 16, "UINT")
+        item = packet.append_item("ID2", 16, "UINT")
+        item.id_value = 5
+        packet.update_id_items(item)
+        packet.short_buffer_allowed = True
+
+        self.assertFalse(packet.identify(b"\x00\x01"))
+        self.assertTrue(packet.identify(b"\x00\x01\x00\x05"))
+        self.assertFalse(packet.identify(b"\x00\x01\x00\x06"))
