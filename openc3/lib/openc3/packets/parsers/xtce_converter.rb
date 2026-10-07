@@ -49,6 +49,20 @@ ALIAS_NAMESPACE = 'COSMOS'
 #   polynomial, custom class) is carried verbatim and re-parsed on import.
 # COSMOS_FORMAT_STRING - the item's printf-style display format (FORMAT_STRING), which
 #   XTCE has no native field for.
+# COSMOS_ITEM_META - the item's simple scalar metadata that XTCE has no home for, as a
+#   JSON object: the META hash, and the OBFUSCATE / REQUIRED / non-default OVERFLOW
+#   flags. Only the fields actually set are included, so a plain item emits nothing.
+# COSMOS_LIMITS_RESPONSE - the COSMOS config fragment for an item's LIMITS_RESPONSE (a
+#   response class fired on limit transitions). Like a conversion it is a class
+#   reference XTCE can't express, so the fragment is carried and re-parsed on import.
+# COSMOS_BOOL - marks an item as the COSMOS :BOOL data type. XTCE has a BooleanType but
+#   COSMOS parses it back as an integer, so the item is emitted as a plain unsigned
+#   integer (valid and meaningful to foreign tools) and this carrier restores :BOOL and
+#   the true/false default exactly on import.
+# COSMOS_DATA_TYPE - marks an item whose COSMOS data type XTCE can't represent at all:
+#   :ARRAY, :OBJECT, :ANY (opaque, accessor-backed). The item is emitted as an opaque
+#   Binary blob of its bit size for foreign tools, and this carrier restores the exact
+#   data type (and the default when it is JSON-serializable) on import.
 COSMOS_VARIABLE_SIZE = 'COSMOS_VARIABLE_SIZE'
 COSMOS_LIMITS = 'COSMOS_LIMITS'
 COSMOS_STATES = 'COSMOS_STATES'
@@ -56,6 +70,17 @@ COSMOS_STATE_META = 'COSMOS_STATE_META'
 COSMOS_DERIVED = 'COSMOS_DERIVED'
 COSMOS_CONVERSION = 'COSMOS_CONVERSION'
 COSMOS_FORMAT_STRING = 'COSMOS_FORMAT_STRING'
+COSMOS_ITEM_META = 'COSMOS_ITEM_META'
+COSMOS_LIMITS_RESPONSE = 'COSMOS_LIMITS_RESPONSE'
+COSMOS_BOOL = 'COSMOS_BOOL'
+COSMOS_DATA_TYPE = 'COSMOS_DATA_TYPE'
+# A numeric item's default that XTCE can't express as a numeric initialValue (e.g. a
+# UINT whose default is an IP string a write conversion maps). Carried and restored
+# verbatim (after the item's write conversion is reconstructed) on import.
+COSMOS_DEFAULT = 'COSMOS_DEFAULT'
+# COSMOS data types with no XTCE equivalent, emitted as an opaque Binary blob plus a
+# COSMOS_DATA_TYPE carrier that restores the exact type on import.
+OPAQUE_DATA_TYPES = [:ARRAY, :OBJECT, :ANY]
 
 # IntegerRangeType declares minInclusive / maxInclusive as xs:long, so an integer range
 # outside these bounds (a full 64 bit UINT, for example) cannot be expressed as a
@@ -95,6 +120,109 @@ module OpenC3
       # Nokogiri can only resolve from the IO's path
       @schema ||= File.open(SCHEMA_FILE) { |f| Nokogiri::XML::Schema(f) }
       @schema.validate(Nokogiri::XML(File.read(filename))).map(&:message)
+    end
+
+    # Compare two parsed definitions packet by packet and return their differences.
+    #
+    # The comparison uses COSMOS's own canonical serializer, Packet#to_config, which
+    # encodes size (each item's bit_offset / bit_size / array_size), layout, every item
+    # field (states, conversions, limits, units, format, meta) and the packet-level
+    # constructs. Two packets whose configs are identical are identical for everything
+    # COSMOS can express, so this is a far stronger check than comparing hand-picked
+    # fields. The only blind spots are fields to_config itself omits (KEY, OVERLAP and a
+    # conversion / response's constructor arguments - COSMOS-core gaps, not XTCE ones).
+    #
+    # @param reference [PacketConfig] The definition treated as the source of truth
+    # @param candidate [PacketConfig] The definition being checked against it
+    # @param targets [Array<String>, nil] When given, only packets of these targets are
+    #   compared. Useful when one side defines more targets than the other (e.g. a single
+    #   target .xtce checked against a whole multi-target plugin).
+    # @return [Hash<String=>Array<String>>] Differences keyed by "TLM|CMD TARGET PACKET".
+    #   Empty when the two define identical packets. Lines prefixed "-" are present only
+    #   in the reference, "+" only in the candidate.
+    def self.compare(reference, candidate, targets: nil)
+      targets = targets&.map(&:to_s)&.map(&:upcase)
+      result = {}
+      { 'TLM' => [:TELEMETRY, reference.telemetry, candidate.telemetry],
+        'CMD' => [:COMMAND, reference.commands, candidate.commands] }.each do |kind, (cmd_or_tlm, ref_h, cand_h)|
+        ref_pkts = flatten_packets(ref_h)
+        cand_pkts = flatten_packets(cand_h)
+        keys = (ref_pkts.keys | cand_pkts.keys)
+        keys = keys.select { |tp| targets.include?(tp.split(' ').first.upcase) } if targets
+        keys.sort.each do |target_packet|
+          label = "#{kind} #{target_packet}"
+          ref = ref_pkts[target_packet]
+          cand = cand_pkts[target_packet]
+          if ref.nil?
+            result[label] = ['packet present in candidate but not reference']
+          elsif cand.nil?
+            result[label] = ['packet present in reference but not candidate']
+          else
+            diffs = packet_differences(ref, cand, cmd_or_tlm)
+            result[label] = diffs unless diffs.empty?
+          end
+        end
+      end
+      result
+    end
+
+    # Flatten a cmd/tlm Hash<target=>Hash<packet=>Packet>> to Hash<"TARGET PACKET"=>Packet>
+    def self.flatten_packets(hash)
+      out = {}
+      hash&.each do |target, packets|
+        packets&.each { |packet_name, packet| out["#{target} #{packet_name}"] = packet }
+      end
+      out
+    end
+
+    # Human-readable differences between two packets (see .compare). Size is reported
+    # first, then items present in only one side, then a line-by-line config diff.
+    def self.packet_differences(reference, candidate, cmd_or_tlm)
+      diffs = []
+      if reference.defined_length_bits != candidate.defined_length_bits
+        diffs << "size (bits): reference=#{reference.defined_length_bits} candidate=#{candidate.defined_length_bits}"
+      end
+      ref_names = reference.sorted_items.map(&:name)
+      cand_names = candidate.sorted_items.map(&:name)
+      (ref_names - cand_names).each { |name| diffs << "item only in reference: #{name}" }
+      (cand_names - ref_names).each { |name| diffs << "item only in candidate: #{name}" }
+      ref_lines = safe_config_lines(reference, cmd_or_tlm)
+      cand_lines = safe_config_lines(candidate, cmd_or_tlm)
+      if ref_lines && cand_lines
+        (ref_lines - cand_lines).each { |line| diffs << "- #{line.strip}" }
+        (cand_lines - ref_lines).each { |line| diffs << "+ #{line.strip}" }
+      else
+        # The canonical config diff is unavailable because Packet#to_config raised - a
+        # COSMOS-core limitation, not a real difference (e.g. a command BOOL parameter
+        # with no range crashes calculate_range). Fall back to a structural per-item diff
+        # so the packet is still compared instead of aborting the whole run.
+        diffs.concat(structural_item_differences(reference, candidate, ref_names & cand_names))
+      end
+      diffs
+    end
+
+    # Packet#to_config split into non-empty lines, or nil if it raises (see the fallback
+    # in packet_differences).
+    def self.safe_config_lines(packet, cmd_or_tlm)
+      packet.to_config(cmd_or_tlm).lines.map(&:rstrip).reject(&:empty?)
+    rescue StandardError
+      nil
+    end
+
+    # Structural comparison of items shared by two packets, used when to_config can't be
+    # produced. Covers the layout/identity fields most likely to drift.
+    def self.structural_item_differences(reference, candidate, names)
+      diffs = []
+      names.each do |name|
+        ref = reference.get_item(name)
+        cand = candidate.get_item(name)
+        [:data_type, :bit_size, :bit_offset, :array_size, :states, :units, :description].each do |attr|
+          rv = ref.public_send(attr)
+          cv = cand.public_send(attr)
+          diffs << "#{name}.#{attr}: reference=#{rv.inspect} candidate=#{cv.inspect}" if rv != cv
+        end
+      end
+      diffs
     end
 
     # Output a previously parsed definition file into the XTCE format
@@ -210,7 +338,6 @@ module OpenC3
               unique_tlm_params = {}
             end
             create_commands(xml, commands, target_name, unique_tlm_params)
-            create_algorithms(xml, telemetry, target_name)
           end # SpaceSystem
         end # builder
         File.open(filename, 'w') do |file|
@@ -228,50 +355,6 @@ module OpenC3
       end
     end
 
-    def create_algorithms(xml, telemetry, target_name)
-      return unless telemetry[target_name]
-      derived = {}
-      telemetry[target_name].each do |packet_name, packet|
-        packet.sorted_items.each do |item|
-          next if item.data_type != :DERIVED
-          next if COSMOS_NATIVE_DERIVED_ITEMS.include?(item.name)
-          next if item.name == @packet_time_string
-          derived[packet_name] = item
-        end
-      end
-      return unless derived.length > 0
-      algorithm_xml = Nokogiri::XML::Builder.new do |alg_xml|
-        alg_xml.AlgorithmSet do
-          derived.each do |packet_name, item|
-            rc = item.read_conversion
-            # PythonProxy overrides .class to return a String, so handle both cases
-            conv_name = if rc
-              rc_class = rc.class
-              rc_class.is_a?(String) ? rc_class : rc_class.name
-            else
-              "NoConversion"
-            end
-            alg_xml.CustomAlgorithm("name" => "#{packet_name.tr(INVALID_CHARS, REPLACEMENT_CHAR)}_" \
-                                    "#{item.name.tr(INVALID_CHARS, REPLACEMENT_CHAR)}_#{conv_name}") do
-              alg_xml.ExternalAlgorithmSet do
-                alg_xml.ExternalAlgorithm("implementationName" => "TODO", "algorithmLocation" => "TODO")
-              end
-              alg_xml.InputSet do
-                alg_xml.InputParameterInstanceRef( :parameterRef => "TODO", :instance => "0", :useCalibratedValue => "TODO")
-              end
-              alg_xml.OutputSet do
-                alg_xml.OutputParameterRef( :parameterRef => "#{item.name.tr(INVALID_CHARS, REPLACEMENT_CHAR)}")
-              end
-              alg_xml.TriggerSet( :name => "triggerSet") do
-                alg_xml.OnParameterUpdateTrigger( :parameterRef => "TODO")
-              end
-            end
-          end
-        end
-      end
-      xml['xtce'].comment "TODO \n#{algorithm_xml.to_xml(save_with: Nokogiri::XML::Node::SaveOptions::NO_DECLARATION | Nokogiri::XML::Node::SaveOptions::FORMAT)}\n"
-    end
-
     # The COSMOS config fragment for a packet's DERIVED items, or nil when there are
     # none. XTCE can't express a derived value's conversion, so its COSMOS definition
     # is carried verbatim (to_config is COSMOS's own serializer) and re-parsed on
@@ -282,12 +365,23 @@ module OpenC3
       packet.sorted_items.each do |item|
         next if item.data_type != :DERIVED
         next if COSMOS_NATIVE_DERIVED_ITEMS.include?(item.name)
+        # item.to_config serializes the item's conversion via its to_config. A PythonProxy
+        # conversion (python-language target) has none, so the item can't be carried and is
+        # skipped rather than aborting the whole target's export. Python round trip is out
+        # of scope (see handoff); a Ruby-authored derived item is unaffected.
+        next unless serializable_item?(item)
 
         fragments << item.to_config(:TELEMETRY, packet.default_endianness)
       end
       return nil if fragments.empty?
 
       fragments.join
+    end
+
+    # Whether item.to_config can serialize this item - true unless it carries a conversion
+    # XTCE export can't represent as COSMOS config (a PythonProxy, which has no to_config).
+    def serializable_item?(item)
+      [item.read_conversion, item.write_conversion].compact.all? { |conv| conv.is_a?(Conversion) }
     end
 
     def create_telemetry(xml, telemetry, target_name)
@@ -481,13 +575,39 @@ module OpenC3
         if inverted_enum_states.include?(item.default)
           initial_value = inverted_enum_states[item.default]
         end
-      elsif item.default && !item.array_size
+      elsif item.default && !item.array_size && numeric_default_representable?(item)
+        # A non-numeric default (IP string, etc.) rides the COSMOS_DEFAULT carrier instead
+        # of being written as an invalid numeric XTCE initialValue.
         initial_value = item.default
       end
       if initial_value == "1970-01-01T00:00:00Z"
       initial_value = 0
       end
       initial_value
+    end
+
+    # True when the item's default can be written as this numeric type's XTCE initialValue.
+    # A UINT/INT/FLOAT whose default is a non-numeric string (mapped by a write conversion,
+    # as with an IP address) cannot, so it is omitted from the native initialValue and
+    # carried in COSMOS_DEFAULT instead. Non-numeric item types are unaffected (true).
+    def numeric_default_representable?(item)
+      case item.data_type
+      when :INT, :UINT
+        begin; Integer(item.default); true; rescue StandardError; false; end
+      when :FLOAT
+        begin; Float(item.default); true; rescue StandardError; false; end
+      else
+        true
+      end
+    end
+
+    # Whether the item's default must ride the COSMOS_DEFAULT carrier: a numeric item with
+    # a present, non-array, non-state default that XTCE can't express as a numeric
+    # initialValue (restored verbatim on import, after its write conversion is back).
+    def carried_default?(item)
+      return false if item.default.nil? || item.array_size || item.states
+
+      [:INT, :UINT, :FLOAT].include?(item.data_type) && !numeric_default_representable?(item)
     end
 
     # Ending index of an array item's single dimension. XTCE indices are inclusive, so
@@ -642,6 +762,10 @@ module OpenC3
         to_xtce_string(item, param_or_arg, xml, 'String', prefix: prefix)
       when :BLOCK
         to_xtce_string(item, param_or_arg, xml, 'Binary', prefix: prefix)
+      when :BOOL
+        to_xtce_bool(item, param_or_arg, xml, prefix: prefix)
+      when :ARRAY, :OBJECT, :ANY
+        to_xtce_opaque(item, param_or_arg, xml, prefix: prefix)
       when :DERIVED
         # DERIVED items occupy no bits and their conversion can't be expressed in
         # XTCE, so no type is emitted. Their full COSMOS definition rides along in
@@ -689,6 +813,11 @@ module OpenC3
       if item.limits && item.limits.values
         carriers << [COSMOS_LIMITS, limits_carrier_json(item)]
       end
+      # Skip a PythonProxy response (python-language target): not an OpenC3::LimitsResponse
+      # and has no to_config, so it can't be carried (Python round trip is out of scope).
+      if item.limits && item.limits.response.is_a?(LimitsResponse)
+        carriers << [COSMOS_LIMITS_RESPONSE, item.limits.response.to_config]
+      end
       if item.states && states_carrier_needed?(item)
         carriers << [COSMOS_STATES, JSON.generate(item.states)]
       end
@@ -697,6 +826,20 @@ module OpenC3
       conversion_config = conversion_carrier_config(item)
       carriers << [COSMOS_CONVERSION, conversion_config] if conversion_config
       carriers << [COSMOS_FORMAT_STRING, item.format_string] if item.format_string
+      item_meta = item_meta_carrier(item)
+      carriers << [COSMOS_ITEM_META, JSON.generate(item_meta)] unless item_meta.empty?
+      # Marks the item as :BOOL (emitted as an integer for foreign tools) and carries the
+      # true/false default so it round-trips exactly. The key is present only when a
+      # default is set; the carrier is emitted for every :BOOL item regardless.
+      if item.data_type == :BOOL
+        bool = {}
+        bool['default'] = item.default unless item.default.nil?
+        carriers << [COSMOS_BOOL, JSON.generate(bool)]
+      end
+      if OPAQUE_DATA_TYPES.include?(item.data_type)
+        carriers << [COSMOS_DATA_TYPE, opaque_carrier_json(item)]
+      end
+      carriers << [COSMOS_DEFAULT, JSON.generate('default' => item.default)] if carried_default?(item)
       return if carriers.empty?
 
       xml['xtce'].AncillaryDataSet do
@@ -714,13 +857,20 @@ module OpenC3
     # re-parses exactly on import.
     def conversion_carrier_config(item)
       fragments = []
-      rc = item.read_conversion
-      fragments << rc.to_config(:READ) if rc && rc.class != PolynomialConversion
-      wc = item.write_conversion
-      fragments << wc.to_config(:WRITE) if wc && wc.class != PolynomialConversion
+      fragments << item.read_conversion.to_config(:READ) if carryable_conversion?(item.read_conversion)
+      fragments << item.write_conversion.to_config(:WRITE) if carryable_conversion?(item.write_conversion)
       return nil if fragments.empty?
 
       fragments.join
+    end
+
+    # Whether a conversion can be carried as a COSMOS config fragment. PolynomialConversion
+    # maps to a native XTCE calibrator and is emitted there, not carried. A PythonProxy
+    # (python-language target) is not an OpenC3::Conversion and has no to_config, so it
+    # cannot be serialized this way - it is skipped rather than crashing the export
+    # (Python round trip is out of scope; see the handoff).
+    def carryable_conversion?(conversion)
+      conversion.is_a?(Conversion) && conversion.class != PolynomialConversion
     end
 
     # The EnumerationList can only carry integer-valued states with no catch-all, so
@@ -739,6 +889,34 @@ module OpenC3
       meta['colors'] = item.state_colors.transform_values(&:to_s) if item.state_colors && !item.state_colors.empty?
       meta['hazardous'] = item.hazardous if item.hazardous && !item.hazardous.empty?
       meta['messages_disabled'] = item.messages_disabled if item.messages_disabled && !item.messages_disabled.empty?
+      meta
+    end
+
+    # The exact COSMOS data type for an opaque item, as JSON, plus its default when the
+    # default is JSON-serializable (an :ARRAY is [], an :OBJECT is {}; an :ANY may hold
+    # something that is not, in which case the default is dropped rather than failing).
+    def opaque_carrier_json(item)
+      data = { 'data_type' => item.data_type.to_s }
+      unless item.default.nil?
+        begin
+          JSON.generate(item.default)
+          data['default'] = item.default
+        rescue StandardError
+          # Non-serializable default (rare :ANY value): drop it rather than crash.
+        end
+      end
+      JSON.generate(data)
+    end
+
+    # Simple scalar item metadata XTCE has no home for: the META hash and the
+    # OBFUSCATE / REQUIRED / non-default OVERFLOW flags. Only fields actually set are
+    # included so a plain item produces an empty hash (and thus no carrier).
+    def item_meta_carrier(item)
+      meta = {}
+      meta['meta'] = item.meta if item.meta && !item.meta.empty?
+      meta['obfuscate'] = true if item.obfuscate
+      meta['required'] = true if item.required
+      meta['overflow'] = item.overflow.to_s if item.overflow && item.overflow != :ERROR
       meta
     end
 
@@ -767,9 +945,50 @@ module OpenC3
       end
     end
 
+    # A COSMOS :BOOL item. XTCE's BooleanType round-trips through COSMOS as an integer,
+    # so emit a plain unsigned integer (valid, and foreign tools read true=1 / false=0)
+    # and let the COSMOS_BOOL carrier (added in emit_ancillary) restore :BOOL and the
+    # boolean default on import.
+    def to_xtce_bool(item, param_or_arg, xml, prefix: "")
+      attrs = { :name => (prefix + item.name.tr(INVALID_CHARS, REPLACEMENT_CHAR) + '_Type') }
+      attrs[:shortDescription] = item.description if item.description
+      attrs[:signed] = 'false'
+      attrs[:initialValue] = (item.default ? 1 : 0) if !item.default.nil? && !item.array_size
+      xml['xtce'].public_send('Integer' + param_or_arg + 'Type', attrs) do
+        emit_ancillary(item, xml)
+        to_xtce_units(item, xml)
+        if item.endianness == :LITTLE_ENDIAN and item.bit_size > 8
+          xml['xtce'].IntegerDataEncoding(:sizeInBits => item.bit_size, :encoding => 'unsigned', :byteOrder => "leastSignificantByteFirst")
+        else
+          xml['xtce'].IntegerDataEncoding(:sizeInBits => item.bit_size, :encoding => 'unsigned')
+        end
+      end
+    end
+
+    # A COSMOS :ARRAY / :OBJECT / :ANY item. These are accessor-backed and have no XTCE
+    # equivalent, so emit an opaque Binary blob of the item's bit size (valid, and foreign
+    # tools at least see the field's size and position) and let the COSMOS_DATA_TYPE
+    # carrier (added in emit_ancillary) restore the exact data type and default on import.
+    def to_xtce_opaque(item, param_or_arg, xml, prefix: "")
+      attrs = { :name => (prefix + item.name.tr(INVALID_CHARS, REPLACEMENT_CHAR) + '_Type') }
+      attrs[:shortDescription] = item.description if item.description
+      xml['xtce'].public_send('Binary' + param_or_arg + 'Type', attrs) do
+        emit_ancillary(item, xml)
+        to_xtce_units(item, xml)
+        xml['xtce'].BinaryDataEncoding do
+          xml['xtce'].SizeInBits do
+            xml['xtce'].FixedValue(item.bit_size.to_s)
+          end
+        end
+      end
+    end
+
     def to_xtce_int(item, param_or_arg, xml, prefix: "")
       attrs = { :name => (prefix + item.name.tr(INVALID_CHARS, REPLACEMENT_CHAR) + '_Type') }
-      attrs[:initialValue] = item.default if item.default and !item.array_size
+      # A non-numeric default (e.g. a UINT whose default is an IP string mapped by a write
+      # conversion) can't be an integer XTCE initialValue, so omit it here; it rides the
+      # COSMOS_DEFAULT carrier (see emit_ancillary) and is restored verbatim on import.
+      attrs[:initialValue] = item.default if item.default and !item.array_size and numeric_default_representable?(item)
       attrs[:shortDescription] = item.description if item.description
       if attrs[:initialValue] == "1970-01-01T00:00:00Z"
         attrs[:initialValue] = "0"
@@ -846,7 +1065,8 @@ module OpenC3
 
     def to_xtce_float(item, param_or_arg, xml, prefix: "")
       attrs = { :name => (prefix + item.name.tr(INVALID_CHARS, REPLACEMENT_CHAR) + '_Type'), :sizeInBits => item.bit_size }
-      attrs[:initialValue] = item.default if item.default and !item.array_size
+      # Omit a non-numeric default here; it rides the COSMOS_DEFAULT carrier (see to_xtce_int).
+      attrs[:initialValue] = item.default if item.default and !item.array_size and numeric_default_representable?(item)
       attrs[:shortDescription] = item.description if item.description
       xml['xtce'].public_send('Float' + param_or_arg + 'Type', attrs) do
         emit_ancillary(item, xml)
@@ -954,10 +1174,14 @@ module OpenC3
           get_numerical_item_initial_value(item)
         when :STRING, :BLOCK
           get_string_or_block_initial_value(item, item.data_type)
-        when :DERIVED
+        when :BOOL
+          item.default.nil? ? nil : (item.default ? 1 : 0)
+        else # :DERIVED and the opaque types (:ARRAY, :OBJECT, :ANY) have no XTCE initialValue
           nil
         end
-        attrs[:initialValue] = initial_value
+        # Omit the attribute entirely when there is no value, rather than emit an empty
+        # initialValue="" (invalid for an opaque Binary type and meaningless otherwise).
+        attrs[:initialValue] = initial_value unless initial_value.nil?
       end
       if item.data_type == :DERIVED
         # No Parameter is emitted for a DERIVED item: it occupies no bits and its

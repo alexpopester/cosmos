@@ -218,6 +218,11 @@ module OpenC3
     COSMOS_DERIVED = 'COSMOS_DERIVED'             # config fragment for DERIVED items
     COSMOS_CONVERSION = 'COSMOS_CONVERSION'       # read/write conversion XTCE can't express
     COSMOS_FORMAT_STRING = 'COSMOS_FORMAT_STRING' # printf-style display format
+    COSMOS_ITEM_META = 'COSMOS_ITEM_META'         # META hash + obfuscate/required/overflow
+    COSMOS_LIMITS_RESPONSE = 'COSMOS_LIMITS_RESPONSE' # limits response class XTCE can't express
+    COSMOS_BOOL = 'COSMOS_BOOL'                   # item is the COSMOS :BOOL data type
+    COSMOS_DATA_TYPE = 'COSMOS_DATA_TYPE'         # opaque COSMOS type (:ARRAY/:OBJECT/:ANY)
+    COSMOS_DEFAULT = 'COSMOS_DEFAULT'             # non-numeric default XTCE can't express
 
     def xtce_process_element(element)
       if XTCE_IGNORED_ELEMENTS.include?(element.name)
@@ -264,6 +269,16 @@ module OpenC3
           @current_type.conversion_config = element.text if @current_type
         when COSMOS_FORMAT_STRING
           @current_type.format_string = element.text if @current_type
+        when COSMOS_ITEM_META
+          @current_type.item_meta_carrier = JSON.parse(element.text) if @current_type
+        when COSMOS_LIMITS_RESPONSE
+          @current_type.limits_response_config = element.text if @current_type
+        when COSMOS_BOOL
+          @current_type.cosmos_bool = JSON.parse(element.text) if @current_type
+        when COSMOS_DATA_TYPE
+          @current_type.cosmos_data_type = JSON.parse(element.text) if @current_type
+        when COSMOS_DEFAULT
+          @current_type.default_carrier = JSON.parse(element.text) if @current_type
         end
 
       when 'ErrorDetectCorrect'
@@ -619,6 +634,14 @@ module OpenC3
       reference_location, bit_offset = xtce_handle_location_in_container_in_bits(element)
       object, type, data_type, array_type = get_object_types(element)
       item_name = cosmos_item_name(object)
+      # A COSMOS :BOOL item is emitted as an unsigned integer for foreign tools; the
+      # carrier marks it so the item is defined as :BOOL, not :UINT. set_min_max_default
+      # has no :BOOL branch, so the integer initialValue is ignored and the true/false
+      # default is restored from the carrier below.
+      data_type = :BOOL if type.cosmos_bool
+      # An opaque COSMOS type (:ARRAY/:OBJECT/:ANY) is emitted as a Binary blob; the
+      # carrier restores the exact type (and its default is restored below).
+      data_type = type.cosmos_data_type['data_type'].to_sym if type.cosmos_data_type
       # A COSMOS variable length string carries a placeholder size in the encoding;
       # the carrier restores the original 0 ("consume the rest of the packet").
       bit_size = type.variable_size ? 0 : Integer(type.sizeInBits)
@@ -652,6 +675,7 @@ module OpenC3
       item.states = type.states_carrier if type.states_carrier
       apply_state_meta(item, type)
       item.format_string = type.format_string if type.format_string
+      apply_item_meta(item, type)
       set_units(item, type)
       set_conversion(item, type, data_type)
       # Carried conversions (anything but PolynomialConversion) are reconstructed after
@@ -660,37 +684,70 @@ module OpenC3
       reconstruct_conversions(item, type)
       set_min_max_default(item, type, data_type)
       set_limits(item, type)
+      # Restore the :BOOL true/false default (carried verbatim). Done last so it is not
+      # overwritten by the integer default handling in set_min_max_default.
+      if type.cosmos_bool.is_a?(Hash) && type.cosmos_bool.key?('default')
+        item.default = type.cosmos_bool['default']
+      end
+      # Restore an opaque type's default ([] for :ARRAY, {} for :OBJECT, or an :ANY value).
+      if type.cosmos_data_type.is_a?(Hash) && type.cosmos_data_type.key?('default')
+        item.default = type.cosmos_data_type['default']
+      end
+      # Restore a non-numeric default XTCE couldn't express (e.g. an IP string). Done after
+      # reconstruct_conversions so the item's write conversion is present - COSMOS allows a
+      # non-matching default type only when a write conversion exists.
+      if type.default_carrier.is_a?(Hash) && type.default_carrier.key?('default')
+        item.default = type.default_carrier['default']
+      end
     end
 
     # Rebuild a non-derived item's carried read / write conversion. The carrier holds a
     # COSMOS config fragment (GENERIC_*_CONVERSION, SEG_POLY_*, READ/WRITE_CONVERSION),
-    # which is re-parsed through a throwaway single-item packet - reusing COSMOS's own
-    # conversion parsing - and the resulting conversion objects are copied onto the real
-    # item. A fragment that fails to parse (for example a custom conversion class whose
-    # file is unavailable here) is skipped with a warning rather than aborting the import.
+    # re-parsed through a throwaway single-item packet - reusing COSMOS's own conversion
+    # parsing - and the resulting conversion objects are copied onto the real item.
     def reconstruct_conversions(item, type)
-      config_text = type.conversion_config
-      return unless config_text
+      return unless type.conversion_config
 
-      bit_size = type.variable_size ? 0 : Integer(type.sizeInBits)
-      tempfile = Tempfile.new(['xtce_conv', '.txt'])
-      begin
-        tempfile.write("TELEMETRY #{@current_target_name} XTCE_CONV_RECONSTRUCT BIG_ENDIAN \"d\"\n")
-        tempfile.write("  ITEM VALUE 0 #{bit_size} #{item.data_type} \"d\"\n")
-        tempfile.write(config_text)
-        tempfile.close
-        # PacketConfig is referenced at runtime, not required: packet_config.rb requires
-        # this file, so a require here would be circular.
-        temp_config = PacketConfig.new
-        temp_config.process_file(tempfile.path, @current_target_name)
-        rebuilt = temp_config.telemetry[@current_target_name]['XTCE_CONV_RECONSTRUCT'].get_item('VALUE')
+      reparse_item_fragment(item, type, type.conversion_config, 'conversion') do |rebuilt|
         # A command argument's conversion lives in write_conversion, a telemetry item's
         # in read_conversion; the carrier may hold either or both, so copy whatever the
         # fragment produced without overwriting a native conversion with nil.
         item.read_conversion = rebuilt.read_conversion if rebuilt.read_conversion
         item.write_conversion = rebuilt.write_conversion if rebuilt.write_conversion
+      end
+    end
+
+    # Rebuild a telemetry item's carried LIMITS_RESPONSE from its config fragment. Same
+    # mechanism as conversions: the response is a class reference XTCE can't express.
+    def reconstruct_limits_response(item, type)
+      return unless type.limits_response_config
+
+      reparse_item_fragment(item, type, type.limits_response_config, 'limits response') do |rebuilt|
+        item.limits.response = rebuilt.limits.response if rebuilt.limits.response
+      end
+    end
+
+    # Re-parse a COSMOS config fragment attached to a throwaway single-item telemetry
+    # packet and yield the rebuilt item, so carried config (conversions, limits
+    # responses) can be lifted back onto the real item using COSMOS's own parser. A
+    # fragment that fails to parse (for example a custom class whose file is unavailable
+    # here) is skipped with a warning rather than aborting the whole import.
+    def reparse_item_fragment(item, type, fragment, what)
+      bit_size = type.variable_size ? 0 : Integer(type.sizeInBits)
+      tempfile = Tempfile.new(['xtce_reparse', '.txt'])
+      begin
+        tempfile.write("TELEMETRY #{@current_target_name} XTCE_REPARSE BIG_ENDIAN \"d\"\n")
+        tempfile.write("  ITEM VALUE 0 #{bit_size} #{item.data_type} \"d\"\n")
+        tempfile.write(fragment)
+        tempfile.close
+        # PacketConfig is referenced at runtime, not required: packet_config.rb requires
+        # this file, so a require here would be circular.
+        temp_config = PacketConfig.new
+        temp_config.process_file(tempfile.path, @current_target_name)
+        rebuilt = temp_config.telemetry[@current_target_name]['XTCE_REPARSE'].get_item('VALUE')
+        yield rebuilt
       rescue => e
-        msg = "Failed to reconstruct XTCE conversion for #{item.name}: #{e.message}"
+        msg = "Failed to reconstruct XTCE #{what} for #{item.name}: #{e.message}"
         Logger.instance.warn(msg)
         @warnings << msg
       ensure
@@ -821,6 +878,22 @@ module OpenC3
       item.messages_disabled = meta['messages_disabled'] if meta['messages_disabled']
     end
 
+    # Restore the simple scalar item metadata carried in COSMOS_ITEM_META: the META
+    # hash and the OBFUSCATE / REQUIRED / OVERFLOW settings. OVERFLOW is stored as a
+    # symbol; setting obfuscate also refreshes the packet's obfuscated-items cache.
+    def apply_item_meta(item, type)
+      return unless type.item_meta_carrier
+
+      m = type.item_meta_carrier
+      item.meta = m['meta'] if m['meta']
+      if m['obfuscate']
+        item.obfuscate = true
+        @current_packet.update_obfuscated_items_cache(item)
+      end
+      item.required = true if m['required']
+      item.overflow = m['overflow'].to_s.upcase.intern if m['overflow']
+    end
+
     def set_conversion(item, type, data_type)
       if type.conversion && type.conversion.class == PolynomialConversion
         if @current_cmd_or_tlm == PacketConfig::COMMAND
@@ -936,6 +1009,7 @@ module OpenC3
         values[:DEFAULT] = type.limits
         item.limits.values = values
       end
+      reconstruct_limits_response(item, type)
     end
 
     def xtce_format_attributes(element)

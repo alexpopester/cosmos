@@ -101,6 +101,30 @@ module OpenC3
       end
     end
 
+    # Whole-packet lossless comparison. Packet#to_config is COSMOS's own canonical
+    # serializer: it emits every field COSMOS can represent - each item's
+    # bit_offset / bit_size / array_size (so size and layout are covered), endianness,
+    # states, conversions, limits, units, format, meta, and the packet-level constructs
+    # (accessor, processors, hazardous, ...). So an empty diff of the two configs means
+    # the round trip lost nothing to_config can express - a far stronger check than any
+    # hand-picked field list. Size is called out explicitly up front, and items present
+    # in only one side are reported by name. Returns readable difference strings.
+    #
+    # Note: fields to_config itself does not serialize (KEY, OVERLAP, and a conversion's
+    # constructor args) are invisible to this check - those are COSMOS-core gaps, not
+    # XTCE round-trip gaps, and are documented separately.
+    #
+    # Delegates to XtceConverter.packet_differences so the spec and the xtce_compare CLI
+    # share one comparison implementation.
+    def packet_config_diff(original, reparsed, cmd_or_tlm)
+      XtceConverter.packet_differences(original, reparsed, cmd_or_tlm)
+    end
+
+    def expect_lossless(original, reparsed, cmd_or_tlm)
+      diffs = packet_config_diff(original, reparsed, cmd_or_tlm)
+      expect(diffs).to be_empty, "round trip is not lossless:\n#{diffs.join("\n")}"
+    end
+
     # ------------------------------------------------------------------ #
     # Telemetry
     # ------------------------------------------------------------------ #
@@ -306,6 +330,78 @@ module OpenC3
       end
     end
 
+    describe "telemetry booleans" do
+      it "round-trips a BOOL item (data type preserved via carrier)" do
+        pc = config_from(<<~CFG)
+          TELEMETRY TGT PKT BIG_ENDIAN "Packet"
+            APPEND_ID_ITEM ID 8 UINT 1 "id"
+            APPEND_ITEM FLAG 8 BOOL "bool item"
+            APPEND_ITEM WIDEFLAG 16 BOOL "wide bool"
+        CFG
+        original = pc.telemetry['TGT']['PKT']
+        reparsed, = round_trip(pc, 'TGT')
+        result = reparsed.telemetry['TGT']['PKT']
+        flag = result.get_item('FLAG')
+        expect(flag.data_type).to eq(:BOOL)
+        expect(flag.bit_size).to eq(8)
+        expect(flag.states).to be_nil
+        expect(result.get_item('WIDEFLAG').data_type).to eq(:BOOL)
+        expect(result.get_item('WIDEFLAG').bit_size).to eq(16)
+        # to_config is clean for telemetry BOOL, so use it as the lossless check.
+        expect(flag.to_config(:TELEMETRY, :BIG_ENDIAN)).to eq(original.get_item('FLAG').to_config(:TELEMETRY, :BIG_ENDIAN))
+      end
+    end
+
+    describe "telemetry opaque data types (ARRAY, OBJECT, ANY)" do
+      it "round-trips ARRAY, OBJECT and ANY items via the data-type carrier" do
+        pc = config_from(<<~CFG)
+          TELEMETRY TGT PKT BIG_ENDIAN "Packet"
+            APPEND_ID_ITEM ID 8 UINT 1 "id"
+            APPEND_ITEM ARR 8 ARRAY "complex array"
+            APPEND_ITEM OBJ 8 OBJECT "object item"
+            APPEND_ITEM ANYTHING 8 ANY "any item"
+        CFG
+        original = pc.telemetry['TGT']['PKT']
+        reparsed, = round_trip(pc, 'TGT')
+        result = reparsed.telemetry['TGT']['PKT']
+        { 'ARR' => :ARRAY, 'OBJ' => :OBJECT, 'ANYTHING' => :ANY }.each do |name, dtype|
+          item = result.get_item(name)
+          expect(item.data_type).to eq(dtype), "#{name} data_type"
+          expect(item.bit_size).to eq(8), "#{name} bit_size"
+          expect(item.to_config(:TELEMETRY, :BIG_ENDIAN)).to eq(
+            original.get_item(name).to_config(:TELEMETRY, :BIG_ENDIAN)
+          ), "#{name} to_config"
+        end
+      end
+    end
+
+    describe "telemetry item metadata" do
+      it "preserves item META" do
+        pc = config_from(<<~CFG)
+          TELEMETRY TGT PKT BIG_ENDIAN "Packet"
+            APPEND_ID_ITEM ID 8 UINT 1 "id"
+            APPEND_ITEM VALUE 16 UINT "value"
+              META TEST "VALUE1" "VALUE2"
+              META SINGLE "ONE"
+        CFG
+        original = pc.telemetry['TGT']['PKT']
+        reparsed, = round_trip(pc, 'TGT')
+        result = reparsed.telemetry['TGT']['PKT']
+        expect(result.get_item('VALUE').meta).to eq(original.get_item('VALUE').meta)
+      end
+
+      it "preserves the OBFUSCATE flag" do
+        pc = config_from(<<~CFG)
+          TELEMETRY TGT PKT BIG_ENDIAN "Packet"
+            APPEND_ID_ITEM ID 8 UINT 1 "id"
+            APPEND_ITEM SECRET 16 UINT "secret"
+              OBFUSCATE
+        CFG
+        reparsed, = round_trip(pc, 'TGT')
+        expect(reparsed.telemetry['TGT']['PKT'].get_item('SECRET').obfuscate).to be true
+      end
+    end
+
     describe "telemetry states (enumerations)" do
       it "preserves integer enumerated states" do
         pc = config_from(<<~CFG)
@@ -450,6 +546,38 @@ module OpenC3
         CFG
         reparsed, = round_trip(pc, 'TGT')
         expect(reparsed.telemetry['TGT']['PKT'].get_item('TEMP').limits.persistence_setting).to eq(5)
+      end
+
+      it "preserves a LIMITS_RESPONSE class" do
+        # The response is a class reference (its constructor args are not serialized by
+        # COSMOS's own to_config, same as conversions), so the class must be loadable at
+        # import time. require_class returns an already-loaded class without the file, so
+        # defining it here is enough.
+        response_file = File.join(File.dirname(__FILE__), "../../rt_limits_response.rb")
+        File.open(response_file, 'w') do |file|
+          file.puts "require 'openc3/packets/limits_response'"
+          file.puts "class RtLimitsResponse < OpenC3::LimitsResponse"
+          file.puts "  def call(target_name, packet_name, item, old_limits_state, new_limits_state)"
+          file.puts "  end"
+          file.puts "end"
+        end
+        saved_verbose = $VERBOSE
+        $VERBOSE = nil
+        load 'rt_limits_response.rb'
+        $VERBOSE = saved_verbose
+
+        pc = config_from(<<~CFG)
+          TELEMETRY TGT PKT BIG_ENDIAN "Packet"
+            APPEND_ID_ITEM ID 8 UINT 1 "id"
+            APPEND_ITEM TEMP 16 INT "temp"
+              LIMITS DEFAULT 1 ENABLED -80 -70 60 80
+              LIMITS_RESPONSE rt_limits_response.rb
+        CFG
+        reparsed, = round_trip(pc, 'TGT')
+        response = reparsed.telemetry['TGT']['PKT'].get_item('TEMP').limits.response
+        expect(response).to be_a(RtLimitsResponse)
+      ensure
+        File.delete(response_file) if response_file && File.exist?(response_file)
       end
     end
 
@@ -672,6 +800,40 @@ module OpenC3
         expect(conv.coeffs).to eq([0.0, 2.0])
       end
 
+      it "preserves a non-numeric default on a numeric arg with a write conversion" do
+        # A UINT whose default is an IP string, mapped to an int by a write conversion.
+        # XTCE can't hold "127.0.0.1" as an integer initialValue, so it rides COSMOS_DEFAULT.
+        conv_file = File.join(File.dirname(__FILE__), "../../rt_ip_write_conversion.rb")
+        File.open(conv_file, 'w') do |file|
+          file.puts "require 'openc3/conversions/conversion'"
+          file.puts "class RtIpWriteConversion < OpenC3::Conversion"
+          file.puts "  def initialize; super(); @converted_type = :UINT; @converted_bit_size = 32; end"
+          file.puts "  def call(value, packet, buffer)"
+          file.puts "    Integer(IPAddr.new(value).to_i) rescue 0"
+          file.puts "  end"
+          file.puts "end"
+        end
+        saved_verbose = $VERBOSE
+        $VERBOSE = nil
+        load 'rt_ip_write_conversion.rb'
+        $VERBOSE = saved_verbose
+
+        pc = config_from(<<~CFG)
+          COMMAND TGT PKT BIG_ENDIAN "Command"
+            APPEND_ID_PARAMETER OPCODE 8 UINT 1 1 1 "opcode"
+            APPEND_PARAMETER IP 32 UINT MIN MAX "127.0.0.1" "ip address"
+              WRITE_CONVERSION rt_ip_write_conversion.rb
+        CFG
+        reparsed, = round_trip(pc, 'TGT')
+        ip = reparsed.commands['TGT']['PKT'].get_item('IP')
+        expect(ip.data_type).to eq(:UINT)
+        expect(ip.bit_size).to eq(32)
+        expect(ip.default).to eq("127.0.0.1")
+        expect(ip.write_conversion).to be_a(RtIpWriteConversion)
+      ensure
+        File.delete(conv_file) if conv_file && File.exist?(conv_file)
+      end
+
       it "preserves a generic write conversion on an argument" do
         pc = config_from(<<~CFG)
           COMMAND TGT PKT BIG_ENDIAN "Command"
@@ -688,6 +850,39 @@ module OpenC3
         expect(result.get_item('RAW').to_config(:COMMAND, :BIG_ENDIAN)).to eq(
           original.get_item('RAW').to_config(:COMMAND, :BIG_ENDIAN)
         )
+      end
+
+      it "round-trips a BOOL argument with a boolean default" do
+        pc = config_from(<<~CFG)
+          COMMAND TGT PKT BIG_ENDIAN "Command"
+            APPEND_ID_PARAMETER OPCODE 8 UINT 1 1 1 "opcode"
+            APPEND_PARAMETER ENABLE 8 BOOL true "enable flag"
+            APPEND_PARAMETER DISABLE 16 BOOL false "disable flag"
+        CFG
+        reparsed, = round_trip(pc, 'TGT')
+        result = reparsed.commands['TGT']['PKT']
+        enable = result.get_item('ENABLE')
+        expect(enable.data_type).to eq(:BOOL)
+        expect(enable.bit_size).to eq(8)
+        expect(enable.default).to be(true)
+        disable = result.get_item('DISABLE')
+        expect(disable.data_type).to eq(:BOOL)
+        expect(disable.bit_size).to eq(16)
+        expect(disable.default).to be(false)
+      end
+
+      it "preserves the REQUIRED flag and a non-default OVERFLOW" do
+        pc = config_from(<<~CFG)
+          COMMAND TGT PKT BIG_ENDIAN "Command"
+            APPEND_ID_PARAMETER OPCODE 8 UINT 1 1 1 "opcode"
+            APPEND_PARAMETER LEVEL 16 UINT 0 1000 500 "level"
+              REQUIRED
+              OVERFLOW TRUNCATE
+        CFG
+        reparsed, = round_trip(pc, 'TGT')
+        level = reparsed.commands['TGT']['PKT'].get_item('LEVEL')
+        expect(level.required).to be true
+        expect(level.overflow).to eq(:TRUNCATE)
       end
 
       it "preserves an array argument" do
@@ -775,6 +970,64 @@ module OpenC3
         expect(result.get_item('SAMPLES').data_type).to eq(:INT)
         expect(result.get_item('LABEL').bit_size).to eq(64)
         expect(result.get_item('PAYLOAD').bit_size).to eq(0)
+      end
+
+      it "is fully lossless by canonical config diff (size and every serialized field)" do
+        pc = config_from(<<~CFG)
+          TELEMETRY TGT KITCHEN BIG_ENDIAN "Kitchen sink packet"
+            APPEND_ID_ITEM APID 8 UINT 1 "apid"
+            APPEND_ITEM COUNTER 32 UINT "counter" LITTLE_ENDIAN
+            APPEND_ITEM TEMP 16 UINT "temperature"
+              POLY_READ_CONVERSION -100.0 0.00305
+              UNITS Celsius C
+              FORMAT_STRING "%.2f"
+              LIMITS DEFAULT 1 ENABLED -80 -70 60 80 -20 20
+              LIMITS TVAC 1 ENABLED -60 -50 40 50
+              META SOURCE "sensor_a"
+            APPEND_ITEM MODE 8 UINT "mode"
+              STATE OFF 0
+              STATE ON 1 GREEN
+              STATE ERROR ANY
+            APPEND_ARRAY_ITEM SAMPLES 16 INT 160 "ten signed samples"
+            APPEND_ITEM LABEL 64 STRING "label"
+            APPEND_ITEM PAYLOAD 0 BLOCK "variable payload"
+        CFG
+        original = pc.telemetry['TGT']['KITCHEN']
+        reparsed, = round_trip(pc, 'TGT')
+        result = reparsed.telemetry['TGT']['KITCHEN']
+        # Size and every to_config-serialized field must match exactly.
+        expect(original.defined_length_bits).to eq(result.defined_length_bits)
+        expect_lossless(original, result, :TELEMETRY)
+      end
+
+      it "reports no differences from XtceConverter.compare for a faithful round trip" do
+        pc = config_from(<<~CFG)
+          TELEMETRY TGT PKT1 BIG_ENDIAN "Packet 1"
+            APPEND_ID_ITEM ID 8 UINT 1 "id"
+            APPEND_ITEM A 16 UINT "a"
+          TELEMETRY TGT PKT2 BIG_ENDIAN "Packet 2"
+            APPEND_ID_ITEM ID 8 UINT 2 "id"
+            APPEND_ITEM B 16 INT "b"
+              LIMITS DEFAULT 1 ENABLED -80 -70 60 80
+        CFG
+        reparsed, = round_trip(pc, 'TGT')
+        expect(XtceConverter.compare(pc, reparsed)).to be_empty
+      end
+
+      it "flags via XtceConverter.compare a packet present in one side only" do
+        pc = config_from(<<~CFG)
+          TELEMETRY TGT PKT1 BIG_ENDIAN "Packet 1"
+            APPEND_ID_ITEM ID 8 UINT 1 "id"
+            APPEND_ITEM A 16 UINT "a"
+          TELEMETRY TGT PKT2 BIG_ENDIAN "Packet 2"
+            APPEND_ID_ITEM ID 8 UINT 2 "id"
+            APPEND_ITEM B 16 UINT "b"
+        CFG
+        reparsed, = round_trip(pc, 'TGT')
+        reparsed.telemetry['TGT'].delete('PKT2')
+        diffs = XtceConverter.compare(pc, reparsed)
+        expect(diffs).to have_key('TLM TGT PKT2')
+        expect(diffs['TLM TGT PKT2'].first).to match(/not candidate/)
       end
 
       it "round-trips two targets exported in the same pass" do

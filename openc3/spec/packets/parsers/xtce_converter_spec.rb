@@ -541,7 +541,7 @@ module OpenC3
       tf.puts "        <xtce:ArgumentList>"
       tf.puts "          <xtce:Argument name=\"CMD_UNSIGNED\" argumentTypeRef=\"CMD_PKT_CMD_UNSIGNED_Type\" initialValue=\"TRUE\"/>"
       tf.puts "          <xtce:Argument name=\"CMD_SIGNED\" argumentTypeRef=\"CMD_PKT_CMD_SIGNED_Type\" initialValue=\"0\"/>"
-      tf.puts "          <xtce:Argument name=\"CMD_ARRAY\" argumentTypeRef=\"CMD_PKT_CMD_ARRAY_ArrayType\" initialValue=\"\"/>"
+      tf.puts "          <xtce:Argument name=\"CMD_ARRAY\" argumentTypeRef=\"CMD_PKT_CMD_ARRAY_ArrayType\"/>"
       tf.puts "          <xtce:Argument name=\"CMD_FLOAT\" argumentTypeRef=\"CMD_PKT_CMD_FLOAT_Type\" initialValue=\"10.0\"/>"
       tf.puts "          <xtce:Argument name=\"CMD_DOUBLE\" argumentTypeRef=\"CMD_PKT_CMD_DOUBLE_Type\" initialValue=\"0.0\"/>"
       tf.puts "          <xtce:Argument name=\"CMD_STRING\" argumentTypeRef=\"CMD_PKT_CMD_STRING_Type\" initialValue=\"DEAD\"/>"
@@ -1522,6 +1522,11 @@ module OpenC3
         expect(combined).to include("READ_CONVERSION conversion_2.rb")
         # No TODO placeholder parameters/types are emitted for the derived items anymore
         expect(xtce_doc.to_s).not_to include("TODOParameterType")
+        # The fake all-"TODO" AlgorithmSet comment is no longer emitted either. Derived
+        # item fidelity rides the COSMOS_DERIVED carrier above, so the placeholder
+        # algorithm (which was never read back) was pure noise.
+        expect(xtce_doc.to_s).not_to include("CustomAlgorithm")
+        expect(xtce_doc.to_s).not_to include("AlgorithmSet")
         tf.unlink
         File.delete(filename) if File.exist?(filename)
         FileUtils.rm_rf File.join(spec_install, "TGT1")

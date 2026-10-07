@@ -37,6 +37,7 @@ require 'ostruct'
 require 'optparse'
 require 'openc3/utilities/zip'
 require 'fileutils'
+require 'tmpdir'
 require 'find'
 require 'json'
 require 'redis'
@@ -77,6 +78,7 @@ def print_usage
   puts "  cli pkginstall PKGFILENAME SCOPE  # Install loaded package (Ruby gem or python package)"
   puts "  cli pkguninstall PKGFILENAME SCOPE  # Uninstall loaded package (Ruby gem or python package)"
   puts "  cli xtce_converter                # Convert to and from the XTCE format. Run with --help for more info."
+  puts "  cli xtce_compare                  # Check an .xtce file defines the same packets as a plugin/gem. Run with --help for more info."
   puts "  cli cstol_converter               # Converts CSTOL files (.prc) to COSMOS. Run with --help for more info."
   puts "  cli setpassword                   # Set the initial password from OPENC3_API_PASSWORD env var"
   puts "  cli initsettings                  # Seed settings from OPENC3_SETTING_* env vars"
@@ -229,6 +231,137 @@ def xtce_converter(args)
     end
   else
     abort(option_parser.to_s)
+  end
+end
+
+# Check that an .xtce file defines the same packets as a reference - either a COSMOS
+# plugin/gem or another definition file. Both sides are parsed into COSMOS packets and
+# compared with XtceConverter.compare, which diffs COSMOS's own canonical config
+# (sizes, layout, every item field and packet-level construct).
+#
+# With --plugin, the reference is the XTCE COSMOS itself exports from the gem, so the
+# check answers "will COSMOS build the same packets from my .xtce as from this plugin".
+# Fields COSMOS's exporter cannot carry are therefore absent from both sides by
+# construction.
+def xtce_compare(args)
+  options = {}
+  option_parser = OptionParser.new do |opts|
+    opts.banner = "Usage: xtce_compare --xtce candidate.xtce --plugin /PATH/FILENAME.gem [--variables variables.txt] [--time_association_name NAME]\n" +
+      "       xtce_compare --xtce candidate.xtce --reference other.xtce\n" +
+      "       xtce_compare --xtce candidate.xtce --reference target_cmd_tlm.txt"
+    opts.separator("")
+    opts.on("-h", "--help", "Show this message") do
+      puts opts
+      exit
+    end
+    opts.on("-x VALUE", "--xtce VALUE", "The candidate .xtce file to check") do |arg|
+      options[:xtce] = arg
+    end
+    opts.on("-p VALUE", "--plugin VALUE", "Compare against the packets COSMOS exports from this plugin/gem") do |arg|
+      options[:plugin] = arg
+    end
+    opts.on("-r VALUE", "--reference VALUE", "Compare against another .xtce file or a COSMOS cmd/tlm definition (.txt)") do |arg|
+      options[:reference] = arg
+    end
+    opts.on("--target NAME", "Restrict the comparison to this target. Also the target name used to read a raw --reference .txt config.") do |arg|
+      options[:target] = arg
+    end
+    opts.on("-v VARIABLES", "--variables VARIABLES", "Optional variables file to pass to the plugin") do |arg|
+      options[:variables] = arg
+    end
+    opts.on("-t NAME", "--time_association_name NAME", "Time item name to use when exporting the plugin") do |arg|
+      options[:time_association_name] = arg
+    end
+  end
+
+  begin
+    option_parser.parse!(args)
+  rescue
+    abort(option_parser.to_s)
+  end
+
+  unless options[:xtce] && (options[:plugin] || options[:reference])
+    abort(option_parser.to_s)
+  end
+  if options[:plugin] && options[:reference]
+    puts "xtce_compare options --plugin and --reference are mutually exclusive"
+    abort(option_parser.to_s)
+  end
+
+  ENV['OPENC3_NO_STORE'] = '1'
+  OpenC3::Logger.stdout = false
+  OpenC3::Logger.level = OpenC3::Logger::DEBUG
+
+  # Reference side: the source of truth. Built first because installing a plugin loads
+  # its custom conversion / limits-response classes into the VM; parsing the candidate
+  # afterwards lets it resolve those same classes, so the two sides are compared on equal
+  # footing rather than the candidate silently losing conversions the plugin defines.
+  reference = OpenC3::PacketConfig.new
+  if options[:plugin]
+    ref_label = "plugin #{File.basename(options[:plugin])} (via COSMOS XTCE export)"
+    Dir.mktmpdir('xtce_compare') do |tmp|
+      variables = nil
+      variables = JSON.parse(File.read(options[:variables]), allow_nan: true, create_additions: true) if options[:variables]
+      puts "Exporting #{File.basename(options[:plugin])} to XTCE for comparison..."
+      plugin_hash = OpenC3::PluginModel.install_phase1(options[:plugin], existing_variables: variables, scope: 'DEFAULT', validate_only: true)
+      plugin_hash['variables']['xtce_output'] = tmp
+      plugin_hash['variables']['time_association_name'] = options[:time_association_name]
+      OpenC3::PluginModel.install_phase2(plugin_hash, scope: 'DEFAULT', validate_only: true, gem_file_path: options[:plugin])
+      # When scoped to a target, parse only that target's file so an unrelated target's
+      # export problem can't abort the comparison. Otherwise parse every per-target file,
+      # skipping the combined roll-up so packets aren't counted twice.
+      glob = options[:target] ? File.join(tmp, options[:target], "**", "*.xtce") : File.join(tmp, "**", "*.xtce")
+      files = Dir.glob(glob).reject { |f| f.include?("TARGETS_COMBINED") }.sort
+      abort("No .xtce files were exported from #{options[:plugin]}#{options[:target] ? " for target #{options[:target]}" : ""}") if files.empty?
+      files.each do |f|
+        begin
+          reference.process_file(f, nil)
+        rescue => e
+          abort("COSMOS exported #{File.basename(f)} from the plugin but could not re-parse it: #{e.message}\n" \
+                "This is an exporter/parser round-trip bug in the plugin's definitions, not necessarily your candidate file.")
+        end
+      end
+    end
+  else
+    ref_label = File.basename(options[:reference])
+    puts "Reading reference #{options[:reference]}..."
+    ext = File.extname(options[:reference]).to_s.downcase
+    if ext == '.xtce' || ext == '.xml'
+      reference.process_file(options[:reference], nil)
+    else
+      unless options[:target]
+        abort("--target NAME is required when --reference is a raw COSMOS config (.txt); an .xtce or plugin supplies its own target name")
+      end
+      begin
+        reference.process_file(options[:reference], options[:target])
+      rescue => e
+        abort("Could not parse reference #{options[:reference]}: #{e.message}")
+      end
+    end
+  end
+
+  # Candidate side: the .xtce the user wants to verify (parsed after the reference so any
+  # classes the plugin loaded are available to it too).
+  candidate = OpenC3::PacketConfig.new
+  puts "Reading candidate #{options[:xtce]}..."
+  begin
+    candidate.process_file(options[:xtce], nil)
+  rescue => e
+    abort("Could not parse candidate #{options[:xtce]}: #{e.message}")
+  end
+
+  diffs = OpenC3::XtceConverter.compare(reference, candidate, targets: options[:target] ? [options[:target]] : nil)
+  if diffs.empty?
+    puts "\nMATCH: #{File.basename(options[:xtce])} defines the same packets as #{ref_label}."
+    exit(0)
+  else
+    puts "\nDIFFERENCES (reference = #{ref_label}; '-' only in reference, '+' only in candidate):"
+    diffs.sort.each do |label, lines|
+      puts "\n[#{label}]"
+      lines.each { |line| puts "  #{line}" }
+    end
+    puts "\n#{diffs.length} packet(s) differ."
+    exit(ERROR_CODE)
   end
 end
 
@@ -1249,6 +1382,9 @@ if not ARGV[0].nil? # argument(s) given
 
   when 'xtce_converter'
     xtce_converter(ARGV[1..-1])
+
+  when 'xtce_compare'
+    xtce_compare(ARGV[1..-1])
 
   when 'bridge'
     if ARGV[1] == '--help' || ARGV[1] == '-h'
