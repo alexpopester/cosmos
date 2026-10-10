@@ -1,0 +1,4 @@
+# Only needed for AUTH_MODE OIDC (Keycloak JWT validation). The [crypto] extra
+# pulls in `cryptography` for RS256 signature verification. TOKEN mode needs
+# nothing here. COSMOS installs this into the interface's Python venv on load.
+PyJWT[crypto]>=2.8.0

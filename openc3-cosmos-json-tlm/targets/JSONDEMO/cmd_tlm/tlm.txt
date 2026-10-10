@@ -1,0 +1,38 @@
+# Ordinary binary packet definition - nothing JSON specific. It exercises the
+# cases that matter for JSON ingest: IDs, conversions with and without a write
+# conversion, states, strings, arrays, derived items and limits.
+TELEMETRY JSONDEMO STATUS BIG_ENDIAN "Status packet fed over REST"
+  APPEND_ID_ITEM PKTID       8 UINT 1 "Packet ID"
+  APPEND_ITEM    COUNTER    32 UINT   "Sequence counter"
+  APPEND_ITEM    TEMP       16 UINT   "Temperature, both conversions"
+    POLY_READ_CONVERSION  -100.0 0.01
+    POLY_WRITE_CONVERSION 10000.0 100.0
+    UNITS CELSIUS C
+    LIMITS DEFAULT 1 ENABLED -80.0 -70.0 60.0 80.0
+  APPEND_ITEM    VOLTAGE    16 UINT   "Voltage, read conversion only"
+    POLY_READ_CONVERSION 0.0 0.001
+    UNITS VOLTS V
+  APPEND_ITEM    MODE        8 UINT   "Operating mode"
+    STATE SAFE 0
+    STATE NOMINAL 1
+    STATE SCIENCE 2
+  APPEND_ITEM    LABEL      64 STRING "Free text"
+  APPEND_ARRAY_ITEM WHEELS  16 INT 64 "Wheel speeds"
+  ITEM           TEMP_X2     0 0 DERIVED "Derived from TEMP"
+    GENERIC_READ_CONVERSION_START FLOAT 64
+      packet.read("TEMP") * 2
+    GENERIC_READ_CONVERSION_END
+
+# Large "waveform" packets for throughput testing. A big array item is the
+# representative heavy case: COSMOS writes/validates every element on ingest.
+# WAVE:    8-byte header + 2048 x UINT16 = 4104 bytes binary
+# WAVEBIG: 8-byte header + 8192 x UINT16 = 16392 bytes binary
+TELEMETRY JSONDEMO WAVE BIG_ENDIAN "4 KB waveform packet for throughput testing"
+  APPEND_ID_ITEM    PKTID      8 UINT 2 "Packet ID"
+  APPEND_ITEM       TIMESTAMP 64 UINT   "Sample time (ns since epoch)"
+  APPEND_ARRAY_ITEM SAMPLES   16 UINT 32768 "2048 x UINT16 ADC samples"
+
+TELEMETRY JSONDEMO WAVEBIG BIG_ENDIAN "16 KB waveform packet for throughput testing"
+  APPEND_ID_ITEM    PKTID      8 UINT 3 "Packet ID"
+  APPEND_ITEM       TIMESTAMP 64 UINT   "Sample time (ns since epoch)"
+  APPEND_ARRAY_ITEM SAMPLES   16 UINT 131072 "8192 x UINT16 ADC samples"

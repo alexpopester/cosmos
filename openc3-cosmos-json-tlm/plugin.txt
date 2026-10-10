@@ -1,0 +1,62 @@
+# OpenC3 JSON Telemetry plugin
+#
+# Adds a REST endpoint that accepts telemetry as JSON and feeds it into the
+# normal COSMOS telemetry pipeline using your EXISTING packet definitions.
+# Nothing in your target definitions changes.
+#
+# Variables (set on the plugin install screen):
+#   json_tlm_enabled     true/false: create the interface at all (install-time toggle)
+#   json_tlm_targets     space separated list of existing targets to accept JSON for
+#   json_tlm_mapping     ENABLED/DISABLED: initial state of each target on this interface
+#                        (runtime toggle - flip it per target from the CmdTlmServer
+#                        Interfaces tab without reinstalling)
+#   include_demo_target  true/false: install the JSONDEMO target for testing
+#   json_tlm_auth_mode   TOKEN (COSMOS Core) or OIDC (Enterprise/Keycloak)
+#   json_tlm_auth_secret TOKEN mode: Admin > Secrets entry holding the API token
+#   json_tlm_oidc_role   OIDC mode: realm role a token must carry to post telemetry
+#
+# Note: the Python interface must be able to load your targets' conversions.
+# Targets with Ruby-only conversion classes need the Ruby port of this interface.
+
+VARIABLE json_tlm_enabled true
+VARIABLE json_tlm_targets JSONDEMO
+VARIABLE json_tlm_mapping ENABLED
+VARIABLE include_demo_target true
+VARIABLE json_tlm_int_name JSON_TLM_INT
+VARIABLE json_tlm_port 7780
+VARIABLE json_tlm_route_prefix /json-tlm
+VARIABLE json_tlm_default_type RAW
+VARIABLE json_tlm_missing_items DEFAULTS
+# Authentication: TOKEN (shared secret, Core) or OIDC (Keycloak JWT, Enterprise)
+VARIABLE json_tlm_auth_mode TOKEN
+# TOKEN mode only:
+VARIABLE json_tlm_auth_secret JSON_TLM_TOKEN
+# OIDC mode only (realm role the posting client must have; blank = any valid token):
+VARIABLE json_tlm_oidc_role tlm_writer
+
+<% if include_demo_target.to_s == "true" %>
+TARGET JSONDEMO JSONDEMO
+<% end %>
+
+<% if json_tlm_enabled.to_s == "true" %>
+INTERFACE <%= json_tlm_int_name %> json_tlm_server_interface.py <%= json_tlm_port %> <%= json_tlm_route_prefix %>
+  <% json_tlm_targets.to_s.split.each do |target_name| %>
+  MAP_TLM_TARGET <%= target_name %> <%= json_tlm_mapping %>
+  <% end %>
+  OPTION AUTH_MODE <%= json_tlm_auth_mode %>
+  <% if json_tlm_auth_mode.to_s.upcase == "OIDC" %>
+  # Enterprise: validate Keycloak JWTs. Issuer/JWKS/audience come from the
+  # OPENC3_KEYCLOAK_* / OPENC3_API_CLIENT env vars COSMOS already injects.
+  <% unless json_tlm_oidc_role.to_s.strip.empty? %>
+  OPTION OIDC_REQUIRED_ROLE <%= json_tlm_oidc_role %>
+  <% end %>
+  <% else %>
+  # Core: shared-secret token from Admin > Secrets, so it never sits in plugin.txt
+  SECRET ENV <%= json_tlm_auth_secret %> JSON_TLM_AUTH_TOKEN AUTH_TOKEN
+  <% end %>
+  OPTION DEFAULT_TYPE <%= json_tlm_default_type %>
+  OPTION MISSING_ITEMS <%= json_tlm_missing_items %>
+  # Expose through Traefik at http://<cosmos-host>:2900<route_prefix>
+  PORT <%= json_tlm_port %>
+  ROUTE_PREFIX <%= json_tlm_route_prefix %>
+<% end %>
