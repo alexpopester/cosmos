@@ -1,0 +1,47 @@
+# OpenC3 GMSEC telemetry plugin
+#
+# Subscribes to GMSEC (API 4.9.1) subjects and turns the raw packet bytes in
+# each message's BIN field (DATA in COMPAT C2 / C2MS TLM messages) into COSMOS
+# telemetry, decoded by your existing packet definitions.
+#
+# Requires GMSEC API 4.9.1 in the image the interface runs in - build it with
+# docker/Dockerfile. See README.
+#
+# Variables (set on the plugin install screen):
+#   gmsec_targets        space separated targets whose packets arrive over GMSEC
+#   gmsec_mw_id          middleware wrapper (activemq39 / activemq395 for ActiveMQ)
+#   gmsec_server         broker URL, e.g. tcp://activemq:61616 or failover:(tcp://a:61616,tcp://b:61616)
+#   gmsec_subjects       space separated subjects to subscribe to (wildcards ok)
+#   gmsec_data_field     BIN field holding the packet bytes (AUTO = first BIN field)
+#   gmsec_api_home       GMSEC install root inside the image
+#   gmsec_container      Enterprise only: image to run this interface in (blank = default)
+#   include_demo_target  install the GMSECDEMO target for testing
+
+VARIABLE gmsec_int_name GMSEC_INT
+VARIABLE gmsec_targets GMSECDEMO
+VARIABLE gmsec_mw_id activemq39
+VARIABLE gmsec_server tcp://activemq:61616
+VARIABLE gmsec_subjects GMSEC.DEMO.SAT1.MSG.TLM.>
+VARIABLE gmsec_data_field DATA
+VARIABLE gmsec_api_home /opt/GMSEC_API
+VARIABLE gmsec_container ""
+VARIABLE include_demo_target true
+
+<% if include_demo_target.to_s == "true" %>
+TARGET GMSECDEMO GMSECDEMO
+<% end %>
+
+INTERFACE <%= gmsec_int_name %> gmsec_interface.py <%= gmsec_mw_id %> <%= gmsec_server %> <%= gmsec_subjects %>
+  <% gmsec_targets.to_s.split.each do |target_name| %>
+  MAP_TLM_TARGET <%= target_name %>
+  <% end %>
+  <% unless gmsec_container.to_s.strip.empty? %>
+  # On Kubernetes, run just this interface in the GMSEC-enabled image
+  CONTAINER <%= gmsec_container %>
+  <% end %>
+  ENV GMSEC_API_HOME <%= gmsec_api_home %>
+  ENV LD_LIBRARY_PATH <%= gmsec_api_home %>/bin
+  OPTION DATA_FIELD <%= gmsec_data_field %>
+  OPTION EXTRA_FIELD MESSAGE-SUBTYPE
+  OPTION EXTRA_FIELD COLLECTION-POINT
+  OPTION EXTRA_FIELD STREAM-MODE
