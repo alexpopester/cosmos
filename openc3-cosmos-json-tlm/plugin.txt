@@ -22,11 +22,15 @@ VARIABLE json_tlm_enabled true
 VARIABLE json_tlm_targets JSONDEMO
 VARIABLE json_tlm_mapping ENABLED
 VARIABLE include_demo_target true
+VARIABLE json_http_demo_port 7781
 VARIABLE json_tlm_int_name JSON_TLM_INT
 VARIABLE json_tlm_port 7780
 VARIABLE json_tlm_route_prefix /json-tlm
 VARIABLE json_tlm_default_type RAW
 VARIABLE json_tlm_missing_items DEFAULTS
+# CHECK rejects (400) packets with an empty VARIABLE_BIT_SIZE item that COSMOS decom
+# can't decode; REJECT refuses any empty one; ALLOW turns the guard off
+VARIABLE json_tlm_empty_variable_items CHECK
 # Authentication: TOKEN (shared secret, Core) or OIDC (Keycloak JWT, Enterprise)
 VARIABLE json_tlm_auth_mode TOKEN
 # TOKEN mode only:
@@ -36,6 +40,13 @@ VARIABLE json_tlm_oidc_role tlm_writer
 
 <% if include_demo_target.to_s == "true" %>
 TARGET JSONDEMO JSONDEMO
+
+# Comparison only: COSMOS's built-in HttpServerInterface feeding JSON-accessor
+# packets. It has no authentication, so it is NOT routed through Traefik and is
+# only reachable from inside the COSMOS network.
+TARGET JSONHTTP JSONHTTP
+INTERFACE JSON_HTTP_INT openc3/interfaces/http_server_interface.py <%= json_http_demo_port %>
+  MAP_TARGET JSONHTTP
 <% end %>
 
 <% if json_tlm_enabled.to_s == "true" %>
@@ -56,6 +67,7 @@ INTERFACE <%= json_tlm_int_name %> json_tlm_server_interface.py <%= json_tlm_por
   <% end %>
   OPTION DEFAULT_TYPE <%= json_tlm_default_type %>
   OPTION MISSING_ITEMS <%= json_tlm_missing_items %>
+  OPTION EMPTY_VARIABLE_ITEMS <%= json_tlm_empty_variable_items %>
   # Expose through Traefik at http://<cosmos-host>:2900<route_prefix>
   PORT <%= json_tlm_port %>
   ROUTE_PREFIX <%= json_tlm_route_prefix %>

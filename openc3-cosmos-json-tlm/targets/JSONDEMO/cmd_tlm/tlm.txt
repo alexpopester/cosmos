@@ -36,3 +36,75 @@ TELEMETRY JSONDEMO WAVEBIG BIG_ENDIAN "16 KB waveform packet for throughput test
   APPEND_ID_ITEM    PKTID      8 UINT 3 "Packet ID"
   APPEND_ITEM       TIMESTAMP 64 UINT   "Sample time (ns since epoch)"
   APPEND_ARRAY_ITEM SAMPLES   16 UINT 131072 "8192 x UINT16 ADC samples"
+
+# Variable length packet using VARIABLE_BIT_SIZE: each dynamic item's size comes
+# from a length item earlier in the packet, and everything after it shifts. A
+# JSON sender just gives the values; the length items are filled in for them.
+TELEMETRY JSONDEMO VARIABLE BIG_ENDIAN "Variable length items driven by length fields"
+  APPEND_ID_ITEM    PKTID       8 UINT 4 "Packet ID"
+  APPEND_ITEM       NAME_LEN    8 UINT   "Length of NAME in bytes"
+  APPEND_ITEM       NAME        0 STRING "Variable length string"
+    VARIABLE_BIT_SIZE NAME_LEN
+  APPEND_ITEM       COUNT      16 UINT   "Number of SAMPLES"
+  APPEND_ARRAY_ITEM SAMPLES    16 INT 0  "Variable length array of INT16"
+    VARIABLE_BIT_SIZE COUNT 16
+  APPEND_ITEM       BLOB_LEN   16 UINT   "Length of BLOB_LEN + BLOB in bytes"
+  APPEND_ITEM       BLOB        0 BLOCK  "Variable length block"
+    VARIABLE_BIT_SIZE BLOB_LEN 8 -16
+  APPEND_ITEM       VINT_LEN    2 UINT   "QUIC length code for VINT"
+  APPEND_ITEM       VINT        0 UINT   "QUIC variable length integer"
+    VARIABLE_BIT_SIZE VINT_LEN
+  APPEND_ITEM       TRAILER    16 UINT   "Fixed item after the variable ones"
+    POLY_READ_CONVERSION 0.0 0.5
+    POLY_WRITE_CONVERSION 0.0 2.0
+
+# Legacy dynamic items: a 0 size takes the rest of the packet, a negative size
+# takes the rest of the packet minus that many bits (here a fixed CRC trailer).
+TELEMETRY JSONDEMO TAIL BIG_ENDIAN "Trailing dynamic string"
+  APPEND_ID_ITEM    PKTID       8 UINT 5 "Packet ID"
+  APPEND_ITEM       SEQ        16 UINT   "Sequence"
+  APPEND_ITEM       MESSAGE     0 STRING "Rest of the packet"
+
+TELEMETRY JSONDEMO TAILARRAY BIG_ENDIAN "Trailing dynamic array before a fixed CRC"
+  APPEND_ID_ITEM    PKTID       8 UINT 6 "Packet ID"
+  ARRAY_ITEM        DATA        8 16 UINT -16 "Everything up to the CRC"
+  ITEM              CRC       -16 16 UINT   "Trailer at the end of the packet"
+
+# JSON-accessor versions of STATUS and WAVE. The packet buffer is the JSON text
+# itself and each item's KEY is a JSONPath into it, so nothing is packed into
+# bits: no offsets, byte order or variable sizes. Same items and conversions as
+# the binary packets so the two can be compared directly.
+TELEMETRY JSONDEMO STATUSJ BIG_ENDIAN "STATUS as a JSON-accessor packet"
+  ACCESSOR JsonAccessor
+  APPEND_ITEM    COUNTER    32 UINT   "Sequence counter"
+    KEY $.COUNTER
+  APPEND_ITEM    TEMP       16 UINT   "Temperature, both conversions"
+    KEY $.TEMP
+    POLY_READ_CONVERSION  -100.0 0.01
+    POLY_WRITE_CONVERSION 10000.0 100.0
+    UNITS CELSIUS C
+    LIMITS DEFAULT 1 ENABLED -80.0 -70.0 60.0 80.0
+  APPEND_ITEM    VOLTAGE    16 UINT   "Voltage, read conversion only"
+    KEY $.VOLTAGE
+    POLY_READ_CONVERSION 0.0 0.001
+    UNITS VOLTS V
+  APPEND_ITEM    MODE        8 UINT   "Operating mode"
+    KEY $.MODE
+    STATE SAFE 0
+    STATE NOMINAL 1
+    STATE SCIENCE 2
+  APPEND_ITEM    LABEL      64 STRING "Free text"
+    KEY $.LABEL
+  APPEND_ARRAY_ITEM WHEELS  16 INT 0  "Wheel speeds"
+    KEY $.WHEELS
+  ITEM           TEMP_X2     0 0 DERIVED "Derived from TEMP"
+    GENERIC_READ_CONVERSION_START FLOAT 64
+      packet.read("TEMP") * 2
+    GENERIC_READ_CONVERSION_END
+
+TELEMETRY JSONDEMO WAVEJ BIG_ENDIAN "WAVE as a JSON-accessor packet"
+  ACCESSOR JsonAccessor
+  APPEND_ITEM       TIMESTAMP 64 UINT   "Sample time (ns since epoch)"
+    KEY $.TIMESTAMP
+  APPEND_ARRAY_ITEM SAMPLES   16 UINT 0 "ADC samples"
+    KEY $.SAMPLES

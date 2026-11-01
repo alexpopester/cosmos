@@ -202,6 +202,67 @@ ISO-8601 (`"2026-10-08T12:00:00Z"`). Omit to let COSMOS stamp receipt time.
 **`stored`** — `true` marks the packet as historical: it's logged and decommutated
 but does **not** update the current value table (so it won't overwrite live data).
 
+**BLOCK values** — JSON has no bytes type, so a BLOCK item accepts a string
+(UTF-8 encoded), a list of byte values (`[1, 2, 255]`), or COSMOS's own JSON
+binary form (`{"json_class": "String", "raw": [1, 2, 255]}`).
+
+### Dynamic and variable length items
+
+Both kinds of dynamic item work with no definition changes. Send the data; the
+packet grows, shrinks and shifts to fit.
+
+- **Legacy dynamic items** — a `0` bit size / array size ("rest of the packet")
+  or a negative one ("rest of the packet minus N bits", e.g. before a CRC). The
+  value's length sets the packet length.
+- **`VARIABLE_BIT_SIZE` items** — the size comes from a length item:
+  `length × bits_per_count + bit_offset`. The interface **fills the length item
+  in for you** from the value, and every item after it moves along. Works for
+  STRING (UTF-8 byte length), BLOCK, arrays of any element size, and QUIC
+  variable length INT/UINT (the length code 0–3 is picked from the value).
+  - Don't send the length item. If you do, it's only checked: a value that
+    doesn't match the data is a `400`, so a sender can assert its own length.
+  - A value whose size can't be expressed by the length item (e.g. 3 bytes when
+    `bits_per_count` is 32) is a `400`.
+  - Unsent variable items are **empty** (`MISSING_ITEMS DEFAULTS`) or keep the
+    previous packet's value (`LAST`).
+
+Using the demo target's `VARIABLE` packet:
+
+```bash
+curl -X POST http://localhost:2900/json-tlm/tlm/JSONDEMO/VARIABLE \
+  -H "Authorization: Bearer my-token" -H "Content-Type: application/json" \
+  -d '{"items": {"NAME": "héllo", "SAMPLES": [1, -2, 3], "BLOB": [1, 2, 3], "VINT": 1000, "TRAILER": 7}}'
+# NAME_LEN=6 (UTF-8 bytes), COUNT=3, BLOB_LEN=5 (3 bytes + the -16 bit offset), VINT_LEN=1
+```
+
+`GET /tlm/<TGT>/<PKT>` marks these items with `"dynamic": true`, includes each
+variable item's `variable_bit_size`, and marks length items with `"length_of"`.
+
+### JSON-accessor packets
+
+A packet defined with `ACCESSOR JsonAccessor` (a `KEY` JSON path per item) has
+no bit layout: its buffer is the JSON document itself, so that's what is
+published, logged and decoded. The interface handles these too. It validates
+every item exactly as for a binary packet, applies write conversions and
+states, and writes the values into the document (parsed and serialised once
+per packet). See `JSONDEMO STATUSJ` / `WAVEJ`.
+
+- Unsent items are **absent** (`DEFAULTS`, starting from the definition's
+  `TEMPLATE` or `{}`), so COSMOS reads them as nil rather than 0. `LAST` starts
+  from the last document received.
+- A derived item or conversion that reads a missing item makes COSMOS decom
+  raise and drop the whole packet. Send those items, or make the conversion
+  handle nil.
+- Logged packets are 2–3× larger than packed binary, and build plus decom cost
+  about 1.5× more per packet (`./test/run_bench.sh build`).
+- `GET /tlm/<TGT>/<PKT>` reports `"accessor"` and each item's `"key"`.
+
+The demo also installs `JSONHTTP`, the same packets fed by COSMOS's built-in
+`HttpServerInterface` on port `json_http_demo_port` (7781), purely for
+comparison. That interface has no authentication and doesn't validate bodies
+(it replies 200, then decom drops bad packets), so it's only reachable inside
+the COSMOS network. `./test/compare_paths.sh` benchmarks every path end to end.
+
 ## Authentication modes
 
 Pick with the `json_tlm_auth_mode` plugin variable. `GET /health` is always open;
@@ -275,12 +336,14 @@ installs it into the interface's Python venv when the plugin loads.
 | `json_tlm_enabled` | `true` | `false` removes the interface entirely |
 | `json_tlm_targets` | `JSONDEMO` | Space-separated existing targets to accept JSON for |
 | `json_tlm_mapping` | `ENABLED` | Initial per-target state (`ENABLED`/`DISABLED`, flip later on the Interfaces tab) |
-| `include_demo_target` | `true` | Install the `JSONDEMO` test target |
+| `include_demo_target` | `true` | Install the `JSONDEMO` test target, and the `JSONHTTP` comparison target and interface |
+| `json_http_demo_port` | `7781` | Port of the comparison `HttpServerInterface` (internal only, no auth) |
 | `json_tlm_int_name` | `JSON_TLM_INT` | Interface name |
 | `json_tlm_port` | `7780` | Port the HTTP server binds inside the container |
 | `json_tlm_route_prefix` | `/json-tlm` | Traefik path prefix (the public URL) |
 | `json_tlm_default_type` | `RAW` | Value type when a body omits `type` |
 | `json_tlm_missing_items` | `DEFAULTS` | `DEFAULTS` or `LAST` for unsent items |
+| `json_tlm_empty_variable_items` | `CHECK` | Guard for empty `VARIABLE_BIT_SIZE` items: `CHECK`, `REJECT` or `ALLOW` (see gotchas) |
 | `json_tlm_auth_mode` | `TOKEN` | `TOKEN` or `OIDC` |
 | `json_tlm_auth_secret` | `JSON_TLM_TOKEN` | (TOKEN) Admin > Secrets entry holding the token |
 | `json_tlm_oidc_role` | `tlm_writer` | (OIDC) realm role a token must carry; blank = any valid token |
@@ -301,6 +364,7 @@ installs it into the interface's Python venv when the plugin loads.
 | `DEFAULT_TYPE` | both | `RAW` | `RAW` or `CONVERTED` when body omits `type` |
 | `MISSING_ITEMS` | both | `DEFAULTS` | `DEFAULTS` (clean buffer) or `LAST` (keep previous) |
 | `STRICT_CONVERTED` | both | `TRUE` | Reject CONVERTED writes that would double-convert |
+| `EMPTY_VARIABLE_ITEMS` | both | `CHECK` | `CHECK`: `400` if COSMOS decom couldn't decode the packet because of an empty variable item. `REJECT`: `400` for any empty variable item. `ALLOW`: no guard |
 | `LISTEN_ADDRESS` | both | `0.0.0.0` | Bind address inside the container |
 | `MAX_BODY_BYTES` | both | `1048576` | Max request body; larger → `413` |
 | `MAX_QUEUE` | both | `10000` | Backpressure limit; full → `503` |
@@ -335,6 +399,26 @@ payload never disconnects the interface.
 - **Values must fit the binary field** — a 16-bit UINT rejects `70000`; a STRING's
   bytes must fit its defined length.
 - **All errors in a packet are reported at once** — fix them in one round trip.
+- **Empty variable items break COSMOS decom (COSMOS core bug).** When a
+  `VARIABLE_BIT_SIZE` item has a size of 0, COSMOS's decom reads it as "the
+  rest of the packet". For strings, blocks and 8-bit arrays that item shows the
+  bytes after it. For **arrays of wider elements** (e.g. INT16), decom can raise
+  `array_size … not a multiple of bit_size` and **drop the whole packet** from
+  the current value table (it's still in the raw log). The bytes the interface
+  sends are correct; this happens for any interface, not only JSON.
+  **The interface guards against it** (`EMPTY_VARIABLE_ITEMS CHECK`, the
+  default): a packet with an empty variable item is test-decoded the way COSMOS
+  will, and if that fails the sender gets a `400` naming the item instead of the
+  packet silently vanishing. Trade-off: a rejected packet isn't in the raw log
+  either, whereas a dropped one is. `REJECT` refuses any empty variable item
+  (even ones that decode, but read wrong); `ALLOW` turns the guard off. Until
+  core is fixed, the real cure is to send every variable item with at least one
+  element, or use `MISSING_ITEMS LAST` so unsent ones keep their previous value.
+- **Variable size writes are fixed up in the plugin.** COSMOS's write path sizes
+  variable items as `len(value) × 8`, which is wrong for arrays with elements
+  that aren't 8 bits and for non-ASCII strings. The interface swaps in its own
+  `BinaryAccessor` subclass on its private copy of the packet to size them
+  correctly. Packets with a non-binary accessor (JSON, CBOR, …) are left alone.
 - **Python only.** This is the Python interface; targets whose conversions are
   Ruby classes need a Ruby port.
 
@@ -346,15 +430,42 @@ validating — is CPU-bound Python, so it's bounded by **one core / the GIL**. T
 `202` is returned once the packet is queued; decommutation drains the queue
 asynchronously.
 
-Rough numbers from the bundled demo packet on localhost (one operator, no network
-latency — treat as a ceiling, not a promise):
+Live numbers from `./test/compare_live.sh` on a local COSMOS 7.4.1 (i7-1165G7,
+clients inside the operator container, 5 s runs). "Sustained" counts until the
+interface had published every accepted packet to Redis:
 
-| Load | Result |
-|---|---|
-| Single POST, 1 client | ~1.9 ms median, ~470 req/s |
-| Single POST, ~4 clients | **~1,200 req/s** (peak) |
-| Single POST, 64 clients | throughput *drops*, p99 → ~1 s, some `502`s |
-| Batch, 100 packets/request | **~3,600 packets/s** |
+| Load | inject_tlm | JSON interface (sustained) |
+|---|---|---|
+| STATUS, 1 client | 311 pkt/s, 3.0 ms | **1,206 pkt/s**, 0.8 ms (3.9×) |
+| STATUS, 4 clients | 570 pkt/s, 6.6 ms | **1,281 pkt/s**, 2.9 ms (2.2×) |
+| STATUS, 16 clients | 475 pkt/s, 31 ms | 884 pkt/s, 17 ms (1.9×) |
+| WAVE 4 KB, 1 client | 126 pkt/s, 7.6 ms | **647 pkt/s**, 1.4 ms (5.1×) |
+| WAVE 4 KB, 4 clients | 192 pkt/s, 20 ms | 568 pkt/s, 6.6 ms (3.0×) |
+| STATUS, batches of 100, 1 client | (no batch form) | **2,639 pkt/s** (accepted 4,076/s, some `503`s) |
+| STATUS, batches of 100, 16 clients | (no batch form) | 1,360 pkt/s |
+
+The live ceiling for one interface is about **2,600 packets/s**, set by publishing
+each packet to Redis, not by HTTP: batches are *accepted* faster than that, the
+queue fills, and the interface answers `503` until it catches up.
+
+To measure without a running COSMOS (real COSMOS library, fakeredis, no Traefik
+or Redis publish, so higher than live), run `./test/run_bench.sh build` for
+per-packet costs and `./test/run_bench.sh http` for HTTP load. On an i7-1165G7:
+
+| Packet (demo target) | Build µs | COSMOS decom µs | Single POST, 4 clients | Batch of 100 |
+|---|---|---|---|---|
+| `STATUS` (26 B, all items) | 59 | 90 | ~2,100 req/s | ~10,500 pkt/s |
+| `WAVE` (4 KB array) | 440 | 370 | ~810 req/s | — |
+| `VARIABLE` small (4 variable items) | 270 | 140 | ~1,100 req/s | ~2,500 pkt/s |
+| `VARIABLE` large (8 KB, variable) | 760 | 470 | ~490 req/s | — |
+| `TAIL` (1 KB dynamic string) | 31 | 55 | — | — |
+
+To compare against COSMOS's built-in `inject_tlm` on a **running** COSMOS (plugin
+installed with the demo target), run `./test/compare_live.sh`. It asks for your
+COSMOS password and the plugin token, then prints the table above.
+
+`VARIABLE_BIT_SIZE` packets cost more to build because every variable item
+moves the bytes after it, and each one needs its own copy of the packet's items.
 
 Guidance:
 
@@ -363,13 +474,14 @@ Guidance:
   connection storm can exceed the server's small TCP backlog and surface as
   Traefik `502`s. Have senders retry `502`/`503` with backoff.
 - **Batch whenever you can.** `POST /tlm` with many packets amortizes the HTTP
-  round-trip and JSON parse, and is ~3× more efficient per packet.
+  round-trip and JSON parse: about 2× the sustained rate of single POSTs live.
 - **Scale out with more interfaces, not more threads.** Install additional JSON
   interfaces on their own `json_tlm_port` / `json_tlm_route_prefix` (each is a
   separate process with its own GIL) and shard targets across them.
 - Real throughput drops with heavier conversions, larger packets, and more
   targets. If the queue backs up to `MAX_QUEUE` (default 10,000) the interface
-  returns `503` — that means decom, not the HTTP layer, is the limit.
+  returns `503` — that means publishing to Redis, not the HTTP layer, is the
+  limit. Treat `503` as "retry shortly", not as an error.
 
 ## Errors & troubleshooting
 

@@ -1,0 +1,36 @@
+# The request bodies posted to the built-in HttpServerInterface, read with the
+# JSON accessor. Same items as JSONDEMO STATUSJ / WAVEJ.
+TELEMETRY JSONHTTP STATUS BIG_ENDIAN "STATUS request body"
+  ACCESSOR openc3/accessors/http_accessor.py openc3/accessors/json_accessor.py
+  APPEND_ITEM    COUNTER    32 UINT   "Sequence counter"
+    KEY $.COUNTER
+  APPEND_ITEM    TEMP       16 UINT   "Temperature, both conversions"
+    KEY $.TEMP
+    POLY_READ_CONVERSION  -100.0 0.01
+    POLY_WRITE_CONVERSION 10000.0 100.0
+    UNITS CELSIUS C
+    LIMITS DEFAULT 1 ENABLED -80.0 -70.0 60.0 80.0
+  APPEND_ITEM    VOLTAGE    16 UINT   "Voltage, read conversion only"
+    KEY $.VOLTAGE
+    POLY_READ_CONVERSION 0.0 0.001
+    UNITS VOLTS V
+  APPEND_ITEM    MODE        8 UINT   "Operating mode"
+    KEY $.MODE
+    STATE SAFE 0
+    STATE NOMINAL 1
+    STATE SCIENCE 2
+  APPEND_ITEM    LABEL      64 STRING "Free text"
+    KEY $.LABEL
+  APPEND_ARRAY_ITEM WHEELS  16 INT 0  "Wheel speeds"
+    KEY $.WHEELS
+  ITEM           TEMP_X2     0 0 DERIVED "Derived from TEMP"
+    GENERIC_READ_CONVERSION_START FLOAT 64
+      packet.read("TEMP") * 2
+    GENERIC_READ_CONVERSION_END
+
+TELEMETRY JSONHTTP WAVE BIG_ENDIAN "WAVE request body"
+  ACCESSOR openc3/accessors/http_accessor.py openc3/accessors/json_accessor.py
+  APPEND_ITEM       TIMESTAMP 64 UINT   "Sample time (ns since epoch)"
+    KEY $.TIMESTAMP
+  APPEND_ARRAY_ITEM SAMPLES   16 UINT 0 "ADC samples"
+    KEY $.SAMPLES

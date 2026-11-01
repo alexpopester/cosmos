@@ -33,6 +33,8 @@
 #   DEFAULT_TYPE RAW|CONVERTED      Value type when the body has no "type" (default RAW)
 #   MISSING_ITEMS DEFAULTS|LAST     What unsent items contain (default DEFAULTS)
 #   STRICT_CONVERTED TRUE|FALSE     Reject CONVERTED writes that would double-convert (default TRUE)
+#   EMPTY_VARIABLE_ITEMS CHECK|REJECT|ALLOW  Guard for empty VARIABLE_BIT_SIZE items COSMOS decom can't
+#                                   decode (default CHECK: reject only those; REJECT: any empty one)
 #   MAX_BODY_BYTES <n>              Default 1048576
 #   MAX_QUEUE <n>                   Backpressure limit, returns 503 when full (default 10000)
 
@@ -45,12 +47,14 @@ from threading import Thread
 
 from json_oidc_auth import OidcValidator
 from json_packet_protocol import (
+    EMPTY_VARIABLE_MODES,
     MISSING_ITEM_MODES,
     VALUE_TYPES,
     JsonTlmError,
     build_packet_from_json,
 )
 
+from openc3.accessors.binary_accessor import BinaryAccessor
 from openc3.config.config_parser import ConfigParser
 from openc3.interfaces.interface import Interface
 from openc3.packets.packet import Packet
@@ -175,6 +179,7 @@ class JsonTlmServerInterface(Interface):
         self.default_value_type = "RAW"
         self.missing_items = "DEFAULTS"
         self.strict_converted = True
+        self.empty_variable_items = "CHECK"
         self.max_body_bytes = 1_048_576
         self.max_queue = 10_000
         self.server = None
@@ -221,6 +226,10 @@ class JsonTlmServerInterface(Interface):
             self.missing_items = str(value).upper()
         elif name == "STRICT_CONVERTED":
             self.strict_converted = ConfigParser.handle_true_false(value)
+        elif name == "EMPTY_VARIABLE_ITEMS":
+            if str(value).upper() not in EMPTY_VARIABLE_MODES:
+                raise ValueError(f"EMPTY_VARIABLE_ITEMS must be one of {EMPTY_VARIABLE_MODES}")
+            self.empty_variable_items = str(value).upper()
         elif name == "MAX_BODY_BYTES":
             self.max_body_bytes = int(value)
         elif name == "MAX_QUEUE":
@@ -309,6 +318,7 @@ class JsonTlmServerInterface(Interface):
                     default_value_type=self.default_value_type,
                     missing_items=self.missing_items,
                     strict_converted=self.strict_converted,
+                    empty_variable_items=self.empty_variable_items,
                 )
             except JsonTlmError as error:
                 self.rejected_count += 1
@@ -370,23 +380,45 @@ class JsonTlmServerInterface(Interface):
             packet = System.telemetry.packet(target_name, packet_name)
         except Exception as error:
             raise JsonTlmError(f"Unknown telemetry packet {target_name} {packet_name}", status=404) from error
+        # Length items are filled in from the data of the item they size
+        length_of = {
+            item.variable_bit_size["length_item_name"]: item.name
+            for item in packet.sorted_items
+            if item.variable_bit_size and item.data_type != "DERIVED"
+        }
+        # Non-binary (JSON, CBOR, ...) packets have no bit layout: items live at their KEY
+        structured = not isinstance(packet.accessor, BinaryAccessor)
         items = []
         for item in packet.sorted_items:
             if item.data_type == "DERIVED":
                 continue
-            items.append(
-                {
-                    "name": item.name,
-                    "data_type": item.data_type,
-                    "bit_size": item.bit_size,
-                    "array_size": item.array_size,
-                    "states": list(item.states.keys()) if item.states else None,
-                    "read_conversion": item.read_conversion is not None,
-                    "write_conversion": item.write_conversion is not None,
-                    "units": item.units,
-                }
-            )
-        return {"target": target_name, "packet": packet_name, "items": items}
+            # Report the defined sizes; the live item may have been resized by the last packet
+            array_size = item.original_array_size
+            entry = {
+                "name": item.name,
+                "data_type": item.data_type,
+                "bit_size": item.original_bit_size,
+                "array_size": array_size,
+                "states": list(item.states.keys()) if item.states else None,
+                "read_conversion": item.read_conversion is not None,
+                "write_conversion": item.write_conversion is not None,
+                "units": item.units,
+                "dynamic": not structured
+                and (
+                    bool(item.variable_bit_size)
+                    or item.original_bit_size <= 0
+                    or (array_size is not None and array_size <= 0)
+                ),
+            }
+            if structured:
+                entry["key"] = item.key
+            if item.variable_bit_size:
+                entry["variable_bit_size"] = item.variable_bit_size
+            if item.name in length_of:
+                entry["length_of"] = length_of[item.name]
+            items.append(entry)
+        accessor = type(packet.accessor).__name__
+        return {"target": target_name, "packet": packet_name, "accessor": accessor, "items": items}
 
     def details(self):
         result = super().details()

@@ -1,0 +1,14 @@
+# COSMOS's built-in HttpServerInterface, for comparison with the JSON interface.
+# Each "command" is the response to a path: a POST to HTTP_PATH gets this reply,
+# and the request body is saved as the HTTP_PACKET telemetry packet.
+COMMAND JSONHTTP STATUS_RESPONSE BIG_ENDIAN "Reply to POST /status"
+  ACCESSOR openc3/accessors/http_accessor.py
+  TEMPLATE ""
+  PARAMETER HTTP_PATH   0 0 DERIVED nil nil "/status"
+  PARAMETER HTTP_PACKET 0 0 DERIVED nil nil "STATUS"
+
+COMMAND JSONHTTP WAVE_RESPONSE BIG_ENDIAN "Reply to POST /wave"
+  ACCESSOR openc3/accessors/http_accessor.py
+  TEMPLATE ""
+  PARAMETER HTTP_PATH   0 0 DERIVED nil nil "/wave"
+  PARAMETER HTTP_PACKET 0 0 DERIVED nil nil "WAVE"
