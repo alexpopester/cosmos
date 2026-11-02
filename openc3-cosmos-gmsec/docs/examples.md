@@ -6,9 +6,9 @@ shown stays as it is. For what each option does, see the Reference section of
 the [README](../README.md#reference). For how the packet travels through COSMOS
 after the interface, see [telemetry-pipeline.md](telemetry-pipeline.md).
 
-Examples 1–3 are what the unit and live tests cover. The others use standard
-COSMOS protocols and GMSEC settings that haven't been run against this plugin
-yet. Check them with a captured message first (README, "Verify with a real
+The unit tests cover examples 2–4, and example 1 with a single target. The
+others use standard COSMOS protocols and GMSEC settings that haven't been run
+against this plugin yet. Check them with a captured message first (README, "Verify with a real
 sample before deploying").
 
 - [1. Several targets on one interface](#1-several-targets-on-one-interface)
