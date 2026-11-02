@@ -1,10 +1,10 @@
 # OpenC3 GMSEC telemetry plugin
 #
-# Subscribes to GMSEC (API 4.9.1) subjects and turns the raw packet bytes in
+# Subscribes to GMSEC (API 4.x or 5.x) subjects and turns the raw packet bytes in
 # each message's BIN field (DATA in COMPAT C2 / C2MS TLM messages) into COSMOS
 # telemetry, decoded by your existing packet definitions.
 #
-# Requires GMSEC API 4.9.1 in the image the interface runs in - build it with
+# Requires GMSEC API 4.x or 5.x in the image the interface runs in - build it with
 # docker/Dockerfile. See README.
 #
 # Variables (set on the plugin install screen):

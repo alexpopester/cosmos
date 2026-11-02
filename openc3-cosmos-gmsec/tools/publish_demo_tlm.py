@@ -1,8 +1,8 @@
 # Publishes GMSECDEMO telemetry as COMPAT C2 / C2MS style TLM messages with the
-# raw CCSDS packet in a DATA BIN field, using the real GMSEC API 4.9.1 binding.
+# raw CCSDS packet in a DATA BIN field, using the real GMSEC API binding (4.x or 5.x).
 #
 #   export GMSEC_API_HOME=/opt/GMSEC_API
-#   export PYTHONPATH=$GMSEC_API_HOME/bin:$GMSEC_API_HOME/bin/lib/GMSECAPI4
+#   export PYTHONPATH=$GMSEC_API_HOME/bin:$GMSEC_API_HOME/bin/lib/GMSECAPI4   # GMSECAPI5 for 5.x
 #   export LD_LIBRARY_PATH=$GMSEC_API_HOME/bin
 #   python3 publish_demo_tlm.py mw-id=bolt server=localhost:9100 [rate=1] [count=0]
 #
@@ -18,6 +18,34 @@ import libgmsec_python3 as gmsec
 
 SUBJECT = "GMSEC.DEMO.SAT1.MSG.TLM.CCSDSPKT"
 EVENT_SUBJECT = "GMSEC.DEMO.SAT1.MSG.TLM.EVENT"
+# API 5.x renamed ConnectionManager to Connection and changed Message construction
+GMSEC4 = hasattr(gmsec, "ConnectionManager")
+
+
+def connect(config):
+    if GMSEC4:
+        conn = gmsec.ConnectionManager(config)
+        conn.initialize()
+    else:
+        conn = gmsec.Connection(config)
+        conn.connect()
+    return conn
+
+
+def close(conn):
+    if GMSEC4:
+        conn.cleanup()
+    else:
+        conn.disconnect()
+
+
+def new_message(subject):
+    if GMSEC4:
+        return gmsec.Message(subject, gmsec.Message.PUBLISH)
+    msg = gmsec.Message()
+    msg.set_subject(subject)
+    msg.set_kind(gmsec.Message.Kind_PUBLISH)
+    return msg
 
 
 def ccsds(apid, seq, payload):
@@ -25,7 +53,7 @@ def ccsds(apid, seq, payload):
 
 
 def tlm_message(subject, data):
-    msg = gmsec.Message(subject, gmsec.Message.PUBLISH)
+    msg = new_message(subject)
     msg.add_field(gmsec.F32Field("HEADER-VERSION", 2010.0))
     msg.add_field(gmsec.StringField("MESSAGE-TYPE", "MSG"))
     msg.add_field(gmsec.StringField("MESSAGE-SUBTYPE", "TLM"))
@@ -43,8 +71,7 @@ def main():
     rate = float(config.get_value("rate", "1"))
     count = int(config.get_value("count", "0"))
 
-    conn_mgr = gmsec.ConnectionManager(config)
-    conn_mgr.initialize()
+    conn_mgr = connect(config)
     print(conn_mgr.get_library_version())
     seq = 0
     try:
@@ -61,7 +88,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        conn_mgr.cleanup()
+        close(conn_mgr)
 
 
 if __name__ == "__main__":

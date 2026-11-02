@@ -1,15 +1,17 @@
-# COSMOS operator image with GMSEC API 4.9.1 (C++ core, ActiveMQ wrapper and
-# Python3 binding) built in, for the openc3-cosmos-gmsec plugin.
+# COSMOS operator image with the GMSEC API (C++ core, ActiveMQ wrapper and
+# Python3 binding) built in, for the openc3-cosmos-gmsec plugin. One GMSEC
+# version per image, picked with GMSEC_VERSION (4.9.1 or a 5.x release); the
+# plugin detects which one it is running against.
 #
 # Everything is compiled inside the operator image itself, so the Python
 # binding matches the exact Python (and glibc/libstdc++) the interface
 # microservice runs under. Only the build output lands in the final image.
 # Works on Debian (e.g. COSMOS 7.4.x) and Alpine/musl (e.g. 7.2.x) bases.
 #
-#   docker build -t <registry>/openc3-operator-gmsec:7.4.1 \
-#     --build-arg OPENC3_TAG=7.4.1 openc3-cosmos-gmsec/docker
+#   docker build -t <registry>/openc3-operator-gmsec:7.4.1-gmsec4.9.1 \
+#     --build-arg OPENC3_TAG=7.4.1 --build-arg GMSEC_VERSION=4.9.1 openc3-cosmos-gmsec/docker
 #
-# Air-gapped: put GMSEC_API-4.9.1.tar.gz (GitHub tag tarball) and
+# Air-gapped: put GMSEC_API-<GMSEC_VERSION>.tar.gz (GitHub tag tarball) and
 # activemq-cpp-library-3.9.5-src.tar.gz next to this file and they are used
 # instead of downloading.
 
@@ -35,7 +37,10 @@ RUN if command -v apk >/dev/null; then \
       apt-get install -y --no-install-recommends \
         swig curl ca-certificates libapr1-dev uuid-dev pkg-config && \
       rm -rf /var/lib/apt/lists/*; \
-    fi
+    fi && \
+    # GMSEC 5's ActiveMQ wrapper treats a Linux without /etc/lsb-release as RHEL
+    # and looks for APR in /usr/include/apr-1; Debian keeps it in apr-1.0
+    if [ -d /usr/include/apr-1.0 ] && [ ! -e /usr/include/apr-1 ]; then ln -s apr-1.0 /usr/include/apr-1; fi
 
 COPY . /context/
 WORKDIR /build
@@ -64,9 +69,11 @@ RUN src="/context/GMSEC_API-${GMSEC_VERSION}.tar.gz" && \
 # Binding bug fix: SWIG -threads releases the GIL around every wrapped call,
 # including these hand-written %extend methods that call the Python C API
 # (BinaryField.get_value builds a bytearray). Without the GIL that segfaults
-# on Python 3.13, so keep the GIL held for them.
-RUN cd GMSEC_API/python3/gmsec4/interfaces && \
+# on Python 3.13, so keep the GIL held for them. The 4.x and 5.x bindings
+# live in python3/gmsec4 and python3/gmsec5; 5.x has no ProductFile.i.
+RUN cd "GMSEC_API/python3/gmsec${GMSEC_VERSION%%.*}/interfaces" && \
     for f in field/BinaryField.i mist/ProductFile.i; do \
+      [ -f "$f" ] || continue; \
       sed -i 's/^%extend /%feature("nothread");\n%extend /' "$f" && \
       printf '\n%%feature("nothread", "0");\n' >> "$f"; \
     done
@@ -85,11 +92,8 @@ RUN export GMSEC_PLATFORM=linux.x86_64 \
 # Smoke test: the binding imports under the venv Python, binary fields round
 # trip (the GIL fix above), and the ActiveMQ wrapper loads (no broker needed)
 RUN cd /build/release/GMSEC_API/bin && \
-    LD_LIBRARY_PATH=. PYTHONPATH=.:lib/GMSECAPI4 /openc3/python/.venv/bin/python -X faulthandler -c \
-      "import ctypes, libgmsec_python3 as g; print(g.ConnectionManager.get_API_version()); \
-       m = g.Message('A.B', g.Message.PUBLISH); m.add_field('DATA', bytearray(b'\x01\x02\x03'), 3); \
-       assert bytes(m.get_binary_field('DATA').get_value()) == b'\x01\x02\x03'; print('binary fields ok'); \
-       ctypes.CDLL('./libgmsec_activemq395.so'); print('activemq395 wrapper loads')"
+    LD_LIBRARY_PATH=. PYTHONPATH=".:lib/GMSECAPI${GMSEC_VERSION%%.*}" \
+      /openc3/python/.venv/bin/python -X faulthandler /context/smoke_test.py
 
 
 FROM ${OPENC3_REGISTRY}/${OPENC3_NAMESPACE}/${OPENC3_IMAGE}:${OPENC3_TAG}
@@ -109,6 +113,9 @@ COPY --from=gmsec-build /build/release/GMSEC_API/README.txt /opt/GMSEC_API/
 
 # Every microservice this image runs can find GMSEC, with or without the
 # plugin's ENV lines
+ARG GMSEC_VERSION=4.9.1
+LABEL org.openc3.gmsec.version="${GMSEC_VERSION}"
+ENV GMSEC_API_VERSION=${GMSEC_VERSION}
 ENV GMSEC_API_HOME=/opt/GMSEC_API
 ENV LD_LIBRARY_PATH=/opt/GMSEC_API/bin
 

@@ -4,9 +4,12 @@
 # No COSMOS install needed; everything runs in throwaway containers.
 #
 #   ./test/e2e/run_activemq_e2e.sh [image]     # default image: openc3-operator-gmsec:7.4.1
+#   PUB_IMAGE=<other image> ./test/e2e/run_activemq_e2e.sh <image>
+#                                              # publish with another image, e.g. GMSEC 4 to 5
 set -euo pipefail
 
 IMAGE="${1:-openc3-operator-gmsec:7.4.1}"
+PUB_IMAGE="${PUB_IMAGE:-$IMAGE}"
 BROKER_IMAGE="${BROKER_IMAGE:-apache/activemq-classic:5.18.6}"
 PLUGIN_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 NET=gmsec-e2e
@@ -25,9 +28,11 @@ for _ in $(seq 60); do
 done
 
 run() {
+  local image="$IMAGE"
+  if [ "$1" = "--pub" ]; then image="$PUB_IMAGE"; shift; fi
   docker run --rm --network "$NET" -v "$PLUGIN_DIR:/plugin:ro" \
-    -e PYTHONPATH=/opt/GMSEC_API/bin:/opt/GMSEC_API/bin/lib/GMSECAPI4 \
-    --entrypoint /openc3/python/.venv/bin/python "$IMAGE" -X faulthandler "$@"
+    -e PYTHONPATH=/opt/GMSEC_API/bin:/opt/GMSEC_API/bin/lib/GMSECAPI4:/opt/GMSEC_API/bin/lib/GMSECAPI5 \
+    --entrypoint /openc3/python/.venv/bin/python "$image" -X faulthandler "$@"
 }
 
 echo "Starting GmsecInterface reader..."
@@ -36,7 +41,7 @@ reader=$!
 sleep 6
 
 echo "Publishing demo telemetry..."
-run /plugin/tools/publish_demo_tlm.py mw-id=activemq39 server=tcp://activemq:61616 rate=10 count=15 >/dev/null
+run --pub /plugin/tools/publish_demo_tlm.py mw-id=activemq39 server=tcp://activemq:61616 rate=10 count=15 >/dev/null
 
 status=0
 wait "$reader" || status=$?

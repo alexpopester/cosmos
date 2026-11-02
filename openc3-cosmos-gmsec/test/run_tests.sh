@@ -39,4 +39,8 @@ if [ -n "$libstdcxx" ]; then
 fi
 
 echo "Running plugin tests with: ${PY[*]}  (cwd: $COSMOS_PY)"
-COSMOS_PLUGIN_DIR="$PLUGIN_DIR" exec "${PY[@]}" -m pytest "$PLUGIN_DIR/test" -v "$@"
+# Once per GMSEC API major version; the fake binding imitates whichever is asked for
+for api in 4 5; do
+  echo "=== GMSEC API $api.x"
+  FAKE_GMSEC_API=$api COSMOS_PLUGIN_DIR="$PLUGIN_DIR" "${PY[@]}" -m pytest "$PLUGIN_DIR/test" -v "$@"
+done

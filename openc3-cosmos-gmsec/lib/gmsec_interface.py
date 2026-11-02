@@ -1,7 +1,7 @@
 # GMSEC telemetry interface for OpenC3 COSMOS.
 #
-# Subscribes to one or more GMSEC subjects using the GMSEC API 4.9.1 Python3
-# binding (libgmsec_python3), pulls the raw packet bytes out of a BIN field of
+# Subscribes to one or more GMSEC subjects using the GMSEC API Python3 binding
+# (libgmsec_python3, API 4.x or 5.x), pulls the raw packet bytes out of a BIN field of
 # each received message (COMPAT C2 / C2MS style TLM messages carry them in
 # DATA), and feeds those bytes into the normal COSMOS telemetry pipeline.
 #
@@ -30,6 +30,7 @@
 #   MW_USERNAME / MW_PASSWORD  broker credentials, typically via
 #                              SECRET ENV <secret> <env var> MW_PASSWORD
 
+import contextlib
 import ctypes
 import glob
 import importlib
@@ -46,22 +47,63 @@ from openc3.utilities.logger import Logger
 # The binding is loaded on first connect so the plugin installs (and the
 # tests run) on machines without GMSEC
 gmsec = None
+api = None
+
+
+class GmsecApi:
+    """The few calls that differ between GMSEC API 4.x and 5.x. Everything else
+    the interface uses (Config, subscribe, receive, Message getters,
+    to_BinaryField) is the same in both bindings."""
+
+    def __init__(self, module):
+        self.module = module
+        # 5.x renamed ConnectionManager to Connection
+        self.major = 4 if hasattr(module, "ConnectionManager") else 5
+        self.bin_type = module.Field.BIN_TYPE if self.major == 4 else module.Field.Type_BINARY
+
+    def open(self, config):
+        if self.major == 4:
+            conn = self.module.ConnectionManager(config)
+            start = conn.initialize
+        else:
+            conn = self.module.Connection(config)
+            start = conn.connect
+        try:
+            start()
+        except Exception:
+            with contextlib.suppress(Exception):
+                self.close(conn)
+            raise
+        return conn
+
+    def release(self, conn, message):
+        if self.major == 4:
+            conn.release(message)
+        else:
+            self.module.Message.destroy(message)
+
+    def close(self, conn):
+        if self.major == 4:
+            conn.cleanup()
+        else:
+            conn.disconnect()
 
 
 def load_gmsec(gmsec_home=None, mw_id=None):
-    global gmsec
+    global gmsec, api
     if gmsec is not None:
         return gmsec
     gmsec_home = gmsec_home or os.environ.get("GMSEC_API_HOME")
     if gmsec_home:
         bin_dir = os.path.join(gmsec_home, "bin")
-        for path in (os.path.join(bin_dir, "lib", "GMSECAPI4"), bin_dir):
+        for path in (os.path.join(bin_dir, "lib", "GMSECAPI5"), os.path.join(bin_dir, "lib", "GMSECAPI4"), bin_dir):
             if os.path.isdir(path) and path not in sys.path:
                 sys.path.insert(0, path)
         # LD_LIBRARY_PATH is only read at process start, so preload the core
-        # library and the middleware wrapper. GMSEC dlopen()s the wrapper by
-        # bare soname, which glibc resolves to the already loaded copy.
-        libs = [os.path.join(bin_dir, "libGMSECAPI.so")]
+        # library (libGMSECAPI.so in 4.x, libgmsec_api.so in 5.x) and the
+        # middleware wrapper. GMSEC dlopen()s the wrapper by bare soname, which
+        # glibc resolves to the already loaded copy.
+        libs = [os.path.join(bin_dir, "libGMSECAPI.so"), os.path.join(bin_dir, "libgmsec_api.so")]
         if mw_id:
             libs.append(os.path.join(bin_dir, f"libgmsec_{mw_id}.so"))
         for lib in libs:
@@ -71,13 +113,15 @@ def load_gmsec(gmsec_home=None, mw_id=None):
                 except OSError as error:
                     Logger.warn(f"GMSEC: could not preload {match}: {error}")
     try:
-        gmsec = importlib.import_module("libgmsec_python3")
+        module = importlib.import_module("libgmsec_python3")
     except ImportError as error:
         raise RuntimeError(
             "GMSEC API Python3 binding (libgmsec_python3) not found. Set GMSEC_API_HOME "
-            "to a GMSEC API 4.9.1 install whose binding is built for this Python "
+            "to a GMSEC API 4.x or 5.x install whose binding is built for this Python "
             f"({sys.version.split()[0]}): {error}"
         ) from error
+    api = GmsecApi(module)
+    gmsec = module
     return gmsec
 
 
@@ -129,9 +173,8 @@ class GmsecInterface(Interface):
         load_gmsec(self.gmsec_home, self.mw_id)
         if not self.subjects:
             raise RuntimeError("GmsecInterface requires at least one subject to subscribe to")
-        conn_mgr = gmsec.ConnectionManager(self.build_config())
+        conn_mgr = api.open(self.build_config())
         try:
-            conn_mgr.initialize()
             self.subscriptions = [conn_mgr.subscribe(subject) for subject in self.subjects]
         except Exception:
             self._cleanup(conn_mgr)
@@ -161,7 +204,7 @@ class GmsecInterface(Interface):
             Logger.warn(f"{self.name}: GMSEC unsubscribe failed: {error}")
         self.subscriptions = []
         try:
-            conn_mgr.cleanup()
+            api.close(conn_mgr)
         except Exception as error:
             Logger.warn(f"{self.name}: GMSEC cleanup failed: {error}")
 
@@ -178,7 +221,7 @@ class GmsecInterface(Interface):
                 try:
                     data, extra = self.extract(message)
                 finally:
-                    conn_mgr.release(message)
+                    api.release(conn_mgr, message)
             if data is not None:
                 self.read_interface_base(data, extra)
                 return (data, extra)
@@ -207,13 +250,13 @@ class GmsecInterface(Interface):
 
     def find_data_field(self, message):
         if self.data_field != "AUTO":
-            if message.has_field(self.data_field) and message.get_field_type(self.data_field) == gmsec.Field.BIN_TYPE:
+            if message.has_field(self.data_field) and message.get_field_type(self.data_field) == api.bin_type:
                 return message.get_binary_field(self.data_field)
             return None
         iterator = message.get_field_iterator()
         while iterator.has_next():
             field = iterator.next()
-            if field.get_type() == gmsec.Field.BIN_TYPE:
+            if field.get_type() == api.bin_type:
                 return gmsec.to_BinaryField(field)
         return None
 

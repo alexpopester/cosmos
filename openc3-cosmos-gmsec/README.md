@@ -1,7 +1,7 @@
 # OpenC3 COSMOS GMSEC Telemetry Plugin
 
-Subscribes to GMSEC subjects over **ActiveMQ** with the **GMSEC API 4.9.1**
-Python3 binding. Each message carries a raw packet in a binary field (`DATA`
+Subscribes to GMSEC subjects over **ActiveMQ** with the **GMSEC API** Python3
+binding, **4.9.1 or 5.x** (the interface detects which one it is running against). Each message carries a raw packet in a binary field (`DATA`
 in COMPAT C2 / C2MS `MSG.TLM` messages). The plugin passes those bytes into
 the normal COSMOS telemetry pipeline, where your packet definitions decode
 them. Nothing GMSEC-specific goes in your target definitions.
@@ -30,15 +30,21 @@ below runs from the repo root.
 ### 1. Build the GMSEC image
 
 GMSEC is not on PyPI, so it is compiled into a copy of the COSMOS operator
-image. The build takes about 5 minutes. Use your COSMOS version as the tag;
-both Debian (7.4.x) and Alpine (7.2.x) bases work.
+image. The build takes about 5 minutes. Each image holds one GMSEC version,
+picked with `GMSEC_VERSION` (default `4.9.1`; `5.3` for GMSEC 5). Put both
+versions in the tag; both Debian (7.4.x) and Alpine (7.2.x) bases work.
 
 ```bash
 export COSMOS_VERSION=7.4.1                       # your COSMOS version
-export GMSEC_IMAGE=<registry>/openc3-operator-gmsec:$COSMOS_VERSION
+export GMSEC_VERSION=4.9.1                        # or 5.3
+export GMSEC_IMAGE=<registry>/openc3-operator-gmsec:$COSMOS_VERSION-gmsec$GMSEC_VERSION
 
-docker build -t $GMSEC_IMAGE --build-arg OPENC3_TAG=$COSMOS_VERSION openc3-cosmos-gmsec/docker
+docker build -t $GMSEC_IMAGE --build-arg OPENC3_TAG=$COSMOS_VERSION \
+  --build-arg GMSEC_VERSION=$GMSEC_VERSION openc3-cosmos-gmsec/docker
 ```
+
+The plugin gem is the same for both; only the image differs. See
+[GMSEC 4 and 5](#gmsec-4-and-5) for running both.
 
 If you pull COSMOS from a mirror, add `--build-arg OPENC3_REGISTRY=<mirror>`
 (and `OPENC3_NAMESPACE` if it isn't `openc3inc`). See
@@ -78,7 +84,7 @@ docker push $GMSEC_IMAGE
   ```yaml
   services:
     openc3-operator:
-      image: <registry>/openc3-operator-gmsec:7.4.1
+      image: <registry>/openc3-operator-gmsec:7.4.1-gmsec4.9.1   # the $GMSEC_IMAGE you built
   ```
 
 ### 4. Build the plugin gem
@@ -127,7 +133,7 @@ exist. If the broker needs a login, see [Credentials](#credentials).
    ```bash
    docker run --rm --network <network that reaches the broker> \
      -v $PWD/openc3-cosmos-gmsec/tools:/tools:ro \
-     -e PYTHONPATH=/opt/GMSEC_API/bin:/opt/GMSEC_API/bin/lib/GMSECAPI4 \
+     -e PYTHONPATH=/opt/GMSEC_API/bin:/opt/GMSEC_API/bin/lib/GMSECAPI4:/opt/GMSEC_API/bin/lib/GMSECAPI5 \
      --entrypoint /openc3/python/.venv/bin/python $GMSEC_IMAGE \
      /tools/publish_demo_tlm.py mw-id=activemq39 server=tcp://activemq:61616 rate=2
    ```
@@ -155,7 +161,7 @@ network that reaches your broker:
 ```bash
 docker run --rm --network <network that reaches the broker> \
   -v $PWD/openc3-cosmos-gmsec/tools:/tools:ro \
-  -e PYTHONPATH=/opt/GMSEC_API/bin:/opt/GMSEC_API/bin/lib/GMSECAPI4 \
+  -e PYTHONPATH=/opt/GMSEC_API/bin:/opt/GMSEC_API/bin/lib/GMSECAPI4:/opt/GMSEC_API/bin/lib/GMSECAPI5 \
   --entrypoint /openc3/python/.venv/bin/python $GMSEC_IMAGE \
   /tools/dump_messages.py mw-id=activemq39 server=tcp://<broker>:61616 subject='GMSEC.>' count=5
 ```
@@ -300,6 +306,40 @@ plugin:
   SECRET ENV GMSEC_PASSWORD GMSEC_PASSWORD MW_PASSWORD
 ```
 
+### GMSEC 4 and 5
+
+One gem, one image per GMSEC version. The interface checks which binding it
+loaded (5.x renamed `ConnectionManager` to `Connection`) and adapts the few
+calls that differ: connecting, releasing a received message, closing, and the
+BIN field type constant. Nothing in `plugin.txt` or your targets changes.
+
+| | GMSEC 4.9.1 | GMSEC 5.x |
+|---|---|---|
+| Build arg | `GMSEC_VERSION=4.9.1` (default) | `GMSEC_VERSION=5.3` |
+| Binding directory | `bin/lib/GMSECAPI4` | `bin/lib/GMSECAPI5` |
+| Core library | `libGMSECAPI.so` | `libgmsec_api.so` |
+| ActiveMQ `mw-id` | `activemq39` / `activemq395` | same |
+
+You usually need only one. The two versions interoperate on the wire: a 4.9.1
+publisher fed a 5.3 interface, and a 5.3 publisher fed a 4.9.1 interface,
+through the same ActiveMQ broker (`PUB_IMAGE=<4.9.1 image>
+./test/e2e/run_activemq_e2e.sh <5.3 image>`). That was with the demo message
+shape; check it with your real messages before relying on it. Throughput was
+the same within run-to-run noise, measured in COSMOS 7.4.1:
+
+| | Into current values, 1 / 4 publishers | Publish to interface output, idle median |
+|---|---|---|
+| 4.9.1 | 1,567 / 1,573 pkt/s | 2.1 ms |
+| 5.3 | 1,502 / 1,453 pkt/s | 4.5 ms |
+
+If you do run both, build both images and give each interface the one it
+needs. On Kubernetes that is `gmsec_container` per install. On Docker Compose
+every microservice shares the operator image, so one COSMOS runs one GMSEC
+version.
+
+The image reports its version in the `org.openc3.gmsec.version` label and the
+`GMSEC_API_VERSION` environment variable.
+
 ### Image details
 
 `docker/Dockerfile` starts from the stock `openc3-operator` image, builds
@@ -307,26 +347,34 @@ inside it, and copies only the results into a clean copy. The final image is
 the operator image plus `/opt/GMSEC_API`:
 
 - ActiveMQ-CPP 3.9.5, compiled from Apache source with SSL (OpenSSL 3)
-- GMSEC API 4.9.1: `libGMSECAPI.so`, the `activemq395` wrapper (plus its
-  `activemq39` alias), the `mb` wrapper, the message templates, and the
+- GMSEC API 4.9.1 or 5.x: the core library, the `activemq395` wrapper (plus
+  its `activemq39` alias), the `mb` wrapper, the message templates, and the
   Python3 binding built against the image's own Python (3.13 on 7.4, 3.12 on 7.2)
 - `GMSEC_API_HOME=/opt/GMSEC_API` and `LD_LIBRARY_PATH=/opt/GMSEC_API/bin`
 - A fix for a GMSEC binding bug: `BinaryField.get_value()` calls the Python
   C API with the GIL released (SWIG `-threads`). On current Pythons that
   segfaults on the first received message, so the build marks those methods
-  `nothread`
+  `nothread`. 5.x has the same bug in `BinaryField` and gets the same fix
+- On Debian, an `/usr/include/apr-1` link in the build stage only: GMSEC 5's
+  ActiveMQ wrapper takes a Linux without `/etc/lsb-release` for RHEL and
+  looks for the APR headers there
 
 Both COSMOS base image families work: 7.2.x is Alpine (musl) and 7.4.x is
-Debian (glibc). The Dockerfile detects `apk` vs `apt`. Both were built and
-passed the live ActiveMQ test on 7.4.1 and 7.2.0. Because the binding is tied
-to the image's Python, **rebuild whenever you upgrade COSMOS**. A smoke test
-during the build imports the binding, round-trips binary data and loads the
-ActiveMQ wrapper. The image is x86_64 only, which is all GMSEC's build
-configuration supports.
+Debian (glibc). The Dockerfile detects `apk` vs `apt`. GMSEC 4.9.1 was built
+and passed the live ActiveMQ test on 7.4.1 and 7.2.0; GMSEC 5.3 so far only
+on 7.4.1. Because the binding is tied to the image's Python, **rebuild
+whenever you upgrade COSMOS**. A smoke test during the build imports the
+binding, round-trips binary data and loads the ActiveMQ wrapper. The image is
+x86_64 only. GMSEC 5 ships an aarch64 build configuration, but this
+Dockerfile hasn't been tried on it.
+
+GMSEC's own build compiles its libraries without optimization (no `-O` flag in
+either version). The numbers above are with that default.
 
 Build args: `OPENC3_REGISTRY`, `OPENC3_NAMESPACE`, `OPENC3_IMAGE` (default
-`openc3-operator`), `OPENC3_TAG`, `GMSEC_URL`, `ACTIVEMQ_CPP_URL`. For
-air-gapped builds, put `GMSEC_API-4.9.1.tar.gz` (GitHub tag tarball) and
+`openc3-operator`), `OPENC3_TAG`, `GMSEC_VERSION` (default `4.9.1`),
+`GMSEC_URL`, `ACTIVEMQ_CPP_URL`. For air-gapped builds, put
+`GMSEC_API-<GMSEC_VERSION>.tar.gz` (GitHub tag tarball) and
 `activemq-cpp-library-3.9.5-src.tar.gz` next to the Dockerfile and nothing is
 downloaded.
 
@@ -336,7 +384,7 @@ manifests at it, and leave `gmsec_container` blank.
 
 The plugin's `ENV` lines repeat the image defaults, so they also work when
 GMSEC is mounted at a custom `gmsec_api_home`. On connect, the interface adds
-the binding to `sys.path` and preloads `libGMSECAPI.so` and the wrapper. If
+the binding to `sys.path` and preloads the core library and the wrapper. If
 GMSEC is missing, the interface shows a connection error that says so, and
 COSMOS keeps retrying.
 
@@ -344,8 +392,9 @@ COSMOS keeps retrying.
 
 | Test | Command | Needs |
 |---|---|---|
-| Unit (13 tests) | `./openc3-cosmos-gmsec/test/run_tests.sh` | the repo's `openc3/python` venv; no GMSEC, broker or COSMOS |
+| Unit (14 tests, run once per API) | `./openc3-cosmos-gmsec/test/run_tests.sh` | the repo's `openc3/python` venv; no GMSEC, broker or COSMOS |
 | Live end-to-end | `./openc3-cosmos-gmsec/test/e2e/run_activemq_e2e.sh <image>` | Docker and a built GMSEC image |
+| Live, mixed versions | `PUB_IMAGE=<other image> ./openc3-cosmos-gmsec/test/e2e/run_activemq_e2e.sh <image>` | Both images |
 
 The unit tests use an in-process fake of `libgmsec_python3`
 (`test/fake_gmsec`) and push messages through COSMOS's own `handle_packet` and

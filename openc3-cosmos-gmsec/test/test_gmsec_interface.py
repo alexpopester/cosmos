@@ -19,7 +19,8 @@ PLUGIN_DIR = os.environ.get("COSMOS_PLUGIN_DIR", os.path.abspath(os.path.join(os
 sys.path.insert(0, os.path.join(PLUGIN_DIR, "lib"))
 sys.path.insert(0, os.path.join(PLUGIN_DIR, "test", "fake_gmsec"))
 
-import libgmsec_python3 as gmsec  # noqa: E402  (the fake)
+import gmsec_interface  # noqa: E402
+import libgmsec_python3 as gmsec  # noqa: E402  (the fake; FAKE_GMSEC_API picks 4.x or 5.x)
 from gmsec_interface import GmsecInterface  # noqa: E402
 
 from openc3.microservices.decom_microservice import DecomMicroservice  # noqa: E402
@@ -68,9 +69,9 @@ class GmsecTestCase(unittest.TestCase):
         self.redis = mock_redis(self)
         load_system()
         Logger.stdout = False
-        while not gmsec.ConnectionManager.bus.empty():
-            gmsec.ConnectionManager.bus.get_nowait()
-        gmsec.ConnectionManager.instances.clear()
+        while not gmsec.FakeConnection.bus.empty():
+            gmsec.FakeConnection.bus.get_nowait()
+        gmsec.FakeConnection.instances.clear()
 
     def make_interface(self, *subjects, **options):
         interface = GmsecInterface("bolt", "localhost:9100", *(subjects or (SUBJECT,)))
@@ -86,7 +87,7 @@ class GmsecTestCase(unittest.TestCase):
 
     def publish(self, *messages):
         for msg in messages:
-            gmsec.ConnectionManager.bus.put(msg)
+            gmsec.FakeConnection.bus.put(msg)
 
 
 class TestConnection(GmsecTestCase):
@@ -100,35 +101,39 @@ class TestConnection(GmsecTestCase):
         )
         interface.connect()
         self.assertTrue(interface.connected())
-        conn_mgr = gmsec.ConnectionManager.instances[-1]
-        self.assertTrue(conn_mgr.initialized)
+        conn_mgr = gmsec.FakeConnection.instances[-1]
+        self.assertTrue(conn_mgr.started)
         self.assertEqual(conn_mgr.subscribed, [SUBJECT, "GMSEC.OTHER.>", "GMSEC.THIRD"])
         self.assertEqual(conn_mgr.config.values["mw-id"], "bolt")
         self.assertEqual(conn_mgr.config.values["server"], "localhost:9100")
         self.assertEqual(conn_mgr.config.values["gmsec-schema-level"], "0")
         self.assertEqual(conn_mgr.config.values["mw-password"], "s3cret")
 
+    def test_detects_the_api_version(self):
+        self.make_interface().connect()
+        self.assertEqual(gmsec_interface.api.major, gmsec.API)
+
     def test_no_server_leaves_it_to_gmsec_defaults(self):
         interface = GmsecInterface("mb", "None", SUBJECT)
         interface.connect()
         self.addCleanup(interface.disconnect)
-        self.assertNotIn("server", gmsec.ConnectionManager.instances[-1].config.values)
+        self.assertNotIn("server", gmsec.FakeConnection.instances[-1].config.values)
 
     def test_disconnect_unsubscribes_and_cleans_up(self):
         interface = self.make_interface()
         interface.connect()
-        conn_mgr = gmsec.ConnectionManager.instances[-1]
+        conn_mgr = gmsec.FakeConnection.instances[-1]
         interface.disconnect()
         self.assertFalse(interface.connected())
         self.assertEqual(conn_mgr.subscribed, [])
-        self.assertTrue(conn_mgr.cleaned_up)
+        self.assertTrue(conn_mgr.closed)
 
     def test_failed_initialize_cleans_up_and_raises(self):
         interface = GmsecInterface("broken", "nowhere", SUBJECT)
         with self.assertRaises(gmsec.GmsecError):
             interface.connect()
         self.assertFalse(interface.connected())
-        self.assertTrue(gmsec.ConnectionManager.instances[-1].cleaned_up)
+        self.assertTrue(gmsec.FakeConnection.instances[-1].closed)
 
     def test_requires_a_subject(self):
         with self.assertRaisesRegex(RuntimeError, "subject"):
@@ -213,6 +218,7 @@ class TestEndToEnd(GmsecTestCase):
         self.int_ms = SimpleNamespace(
             interface=self.interface, scope="DEFAULT", queued=False, cancel_thread=True, logger=Logger
         )
+        self.int_ms._known_tlm_packet = lambda packet: InterfaceMicroservice._known_tlm_packet(self.int_ms, packet)
         self.decom_ms = SimpleNamespace(
             scope="DEFAULT",
             stored_limits_mode="PROCESS",
@@ -221,6 +227,7 @@ class TestEndToEnd(GmsecTestCase):
             logger=Logger,
             metric=SimpleNamespace(set=lambda **kw: None),
             target_names=["GMSECDEMO"],
+            update_topic_lag=lambda *args, **kwargs: None,
         )
 
     def pump(self, packet_name):

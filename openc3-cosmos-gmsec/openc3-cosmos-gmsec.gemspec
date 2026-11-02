@@ -1,7 +1,7 @@
 spec = Gem::Specification.new do |s|
   s.name = 'openc3-cosmos-gmsec'
   s.summary = 'GMSEC telemetry interface for OpenC3 COSMOS'
-  s.description = 'Subscribes to GMSEC API 4.9.1 subjects and feeds the raw packet bytes carried in COMPAT C2 / C2MS messages into the COSMOS telemetry pipeline.'
+  s.description = 'Subscribes to GMSEC API 4.x or 5.x subjects and feeds the raw packet bytes carried in COMPAT C2 / C2MS messages into the COSMOS telemetry pipeline.'
   s.authors = ['Alex Pope']
   s.email = ['alexpopester@gmail.com']
   s.homepage = 'https://github.com/OpenC3/cosmos'

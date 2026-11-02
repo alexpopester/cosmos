@@ -1,9 +1,19 @@
-# In-process stand-in for the GMSEC API 4.9.1 Python3 binding, covering only
-# the calls GmsecInterface makes. Method names match the SWIG renames in
-# GMSEC_API/python3/gmsec4/interfaces/*.i. Tests publish with
-# ConnectionManager.bus.put(message).
+# In-process stand-in for the GMSEC API Python3 binding, covering only the
+# calls GmsecInterface makes. Method names match the SWIG renames in
+# GMSEC_API/python3/gmsec4/interfaces/*.i (API 4.x) and gmsec5 (API 5.x).
+#
+# FAKE_GMSEC_API=4 (default) or 5 picks which API this module looks like. Only
+# that API's names exist, so code that calls a 4.x-only name fails under 5.
+# Tests publish with FakeConnection.bus.put(message) and inspect
+# FakeConnection.instances; message construction is a test convenience in both.
 
+import os
 import queue
+
+
+API = int(os.environ.get("FAKE_GMSEC_API", "4"))
+_BIN = 1
+_STRING = 9
 
 
 class GmsecError(Exception):
@@ -11,9 +21,6 @@ class GmsecError(Exception):
 
 
 class Field:
-    BIN_TYPE = 1
-    STRING_TYPE = 9
-
     def __init__(self, name, value, field_type):
         self._name = name
         self._value = value
@@ -26,14 +33,22 @@ class Field:
         return self._type
 
     def get_string_value(self):
-        if self._type == Field.BIN_TYPE:
+        if self._type == _BIN:
             return self._value.hex().upper()
         return str(self._value)
 
 
+if API == 4:
+    Field.BIN_TYPE = _BIN
+    Field.STRING_TYPE = _STRING
+else:
+    Field.Type_BINARY = _BIN
+    Field.Type_STRING = _STRING
+
+
 class BinaryField(Field):
     def __init__(self, name, data, length=None):
-        super().__init__(name, bytes(data), Field.BIN_TYPE)
+        super().__init__(name, bytes(data), _BIN)
 
     def get_value(self):
         return bytearray(self._value)
@@ -43,7 +58,7 @@ class BinaryField(Field):
 
 
 def to_BinaryField(field):  # noqa: N802  (matches the binding)
-    assert field.get_type() == Field.BIN_TYPE
+    assert field.get_type() == _BIN
     return field
 
 
@@ -70,7 +85,7 @@ class Message:
         if isinstance(value, (bytes, bytearray)):
             self._fields[name] = BinaryField(name, value, length)
         else:
-            self._fields[name] = Field(name, value, Field.STRING_TYPE)
+            self._fields[name] = Field(name, value, _STRING)
         return self
 
     def get_subject(self):
@@ -86,7 +101,7 @@ class Message:
 
     def get_binary_field(self, name):
         field = self._fields.get(name)
-        if field is None or field.get_type() != Field.BIN_TYPE:
+        if field is None or field.get_type() != _BIN:
             raise GmsecError(f"Message does not contain BinaryField {name}")
         return field
 
@@ -115,29 +130,33 @@ class SubscriptionInfo:
         self.subject = subject
 
 
-class ConnectionManager:
+class FakeConnection:
+    """ConnectionManager in API 4.x, Connection in 5.x."""
+
     bus = queue.Queue()
     instances = []
 
     def __init__(self, config):
         self.config = config
         self.subscribed = []
-        self.initialized = False
-        self.cleaned_up = False
-        self.released = []
-        ConnectionManager.instances.append(self)
+        self.started = False
+        self.closed = False
+        FakeConnection.instances.append(self)
 
     @staticmethod
     def get_API_version():  # noqa: N802
-        return "GMSEC API v4.9.1 (fake)"
+        return f"GMSEC API v{'4.9.1' if API == 4 else '5.3'} (fake)"
 
     def get_library_version(self):
         return f"fake {self.config.get_value('mw-id')}"
 
-    def initialize(self):
+    def _start(self):
         if self.config.get_value("mw-id") == "broken":
             raise GmsecError("Unable to connect to middleware")
-        self.initialized = True
+        self.started = True
+
+    def _close(self):
+        self.closed = True
 
     def subscribe(self, subject):
         self.subscribed.append(subject)
@@ -148,16 +167,25 @@ class ConnectionManager:
 
     # Subject filtering is the broker's job, so every queued message is delivered
     def receive(self, timeout_ms=-1):
-        if self.cleaned_up:
-            raise GmsecError("Connection has been cleaned up")
+        if self.closed:
+            raise GmsecError("Connection has been closed")
         try:
-            return ConnectionManager.bus.get(timeout=None if timeout_ms < 0 else timeout_ms / 1000)
+            return FakeConnection.bus.get(timeout=None if timeout_ms < 0 else timeout_ms / 1000)
         except queue.Empty:
             return None
 
-    def release(self, message):
-        message.released = True
-        self.released.append(message)
 
-    def cleanup(self):
-        self.cleaned_up = True
+def _release(message):
+    message.released = True
+
+
+if API == 4:
+    FakeConnection.initialize = FakeConnection._start
+    FakeConnection.cleanup = FakeConnection._close
+    FakeConnection.release = lambda self, message: _release(message)
+    ConnectionManager = FakeConnection
+else:
+    FakeConnection.connect = FakeConnection._start
+    FakeConnection.disconnect = FakeConnection._close
+    Message.destroy = staticmethod(_release)
+    Connection = FakeConnection
