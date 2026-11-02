@@ -18,6 +18,8 @@ Contents:
 - [Adapting to your real messages](#adapting-to-your-real-messages): what to change once you know the message shape
 - [Troubleshooting](#troubleshooting)
 - [Reference](#reference): variables, options, image details, tests
+- [Configuration examples](docs/examples.md): several targets, subject routing, headers, packed packets, SSL, scaling
+- [How COSMOS handles telemetry](docs/telemetry-pipeline.md): the path from GMSEC message to screens, logs and database
 
 ---
 
