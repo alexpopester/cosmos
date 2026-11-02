@@ -109,6 +109,24 @@ class TestConnection(GmsecTestCase):
         self.assertEqual(conn_mgr.config.values["gmsec-schema-level"], "0")
         self.assertEqual(conn_mgr.config.values["mw-password"], "s3cret")
 
+    def test_durable_subscribes_each_subject_under_its_own_name(self):
+        self.make_interface(SUBJECT, "GMSEC.OTHER.>", DURABLE=["cosmos-gmsec"]).connect()
+        conn_mgr = gmsec.FakeConnection.instances[-1]
+        self.assertEqual(conn_mgr.config.values["mw-connection-client-id"], "cosmos-gmsec")
+        self.assertEqual(conn_mgr.config.values["mw-filter-dups"], "no")
+        prefix = "" if gmsec.API == 4 else "mw-"
+        for subject in (SUBJECT, "GMSEC.OTHER.>"):
+            values = conn_mgr.subscribe_configs[subject].values
+            self.assertEqual(values[f"{prefix}durable-subscribe"], "true")
+            self.assertEqual(values[f"{prefix}durable-client-id"], f"cosmos-gmsec:{subject}")
+
+    def test_not_durable_by_default(self):
+        self.make_interface().connect()
+        conn_mgr = gmsec.FakeConnection.instances[-1]
+        self.assertNotIn("mw-connection-client-id", conn_mgr.config.values)
+        self.assertNotIn("mw-filter-dups", conn_mgr.config.values)
+        self.assertEqual(conn_mgr.subscribe_configs, {})
+
     def test_detects_the_api_version(self):
         self.make_interface().connect()
         self.assertEqual(gmsec_interface.api.major, gmsec.API)

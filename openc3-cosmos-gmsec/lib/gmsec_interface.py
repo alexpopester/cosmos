@@ -24,6 +24,9 @@
 #                              (repeatable, all must match)
 #   EXTRA_FIELD <field>        copy a message field into the packet's extra
 #                              data (repeatable)
+#   DURABLE <name>             ActiveMQ durable subscriptions: the broker keeps
+#                              messages published while the interface is
+#                              disconnected. <name> must be unique per interface
 #   RECEIVE_TIMEOUT <seconds>  receive poll period (default 1.0), bounds how
 #                              long a disconnect waits for the read thread
 #   GMSEC_API_HOME <path>      GMSEC install root, if not set via ENV
@@ -60,6 +63,8 @@ class GmsecApi:
         # 5.x renamed ConnectionManager to Connection
         self.major = 4 if hasattr(module, "ConnectionManager") else 5
         self.bin_type = module.Field.BIN_TYPE if self.major == 4 else module.Field.Type_BINARY
+        # 4.x reads per-subscription ActiveMQ keys without the mw- prefix
+        self.subscribe_prefix = "" if self.major == 4 else "mw-"
 
     def open(self, config):
         if self.major == 4:
@@ -139,6 +144,7 @@ class GmsecInterface(Interface):
         self.filters = {}
         self.extra_fields = []
         self.receive_timeout = 1.0
+        self.durable_name = None
         self.gmsec_home = None
         self.write_allowed = False
         self.write_raw_allowed = False
@@ -165,9 +171,27 @@ class GmsecInterface(Interface):
         config.add_value("mw-id", self.mw_id)
         if self.server:
             config.add_value("server", self.server)
+        if self.durable_name:
+            # ActiveMQ ties a durable subscription to the connection's client ID
+            config.add_value("mw-connection-client-id", self.durable_name)
+            # The broker replays a backlog one topic at a time, so messages
+            # arrive out of publish order. GMSEC's duplicate filter drops any
+            # message older than the newest seen from its publisher, which
+            # would silently lose part of the backlog
+            config.add_value("mw-filter-dups", "no")
         for key, value in self.config_entries.items():
             config.add_value(key, value)
         return config
+
+    def subscribe(self, conn_mgr, subject):
+        if not self.durable_name:
+            return conn_mgr.subscribe(subject)
+        # One durable subscription per subject: ActiveMQ replaces a durable
+        # subscription when its name is reused for a different topic
+        config = gmsec.Config()
+        config.add_value(f"{api.subscribe_prefix}durable-subscribe", "true")
+        config.add_value(f"{api.subscribe_prefix}durable-client-id", f"{self.durable_name}:{subject}")
+        return conn_mgr.subscribe(subject, config)
 
     def connect(self):
         load_gmsec(self.gmsec_home, self.mw_id)
@@ -175,7 +199,7 @@ class GmsecInterface(Interface):
             raise RuntimeError("GmsecInterface requires at least one subject to subscribe to")
         conn_mgr = api.open(self.build_config())
         try:
-            self.subscriptions = [conn_mgr.subscribe(subject) for subject in self.subjects]
+            self.subscriptions = [self.subscribe(conn_mgr, subject) for subject in self.subjects]
         except Exception:
             self._cleanup(conn_mgr)
             raise
@@ -285,6 +309,8 @@ class GmsecInterface(Interface):
                 self.filters[option_values[0]] = " ".join(str(value) for value in option_values[1:])
             case "EXTRA_FIELD":
                 self.extra_fields.extend(option_values)
+            case "DURABLE":
+                self.durable_name = option_values[0]
             case "RECEIVE_TIMEOUT":
                 self.receive_timeout = float(option_values[0])
             case "GMSEC_API_HOME":

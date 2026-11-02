@@ -15,6 +15,8 @@
 #   gmsec_data_field     BIN field holding the packet bytes (AUTO = first BIN field)
 #   gmsec_api_home       GMSEC install root inside the image
 #   gmsec_container      Enterprise only: image to run this interface in (blank = default)
+#   gmsec_durable_name   ActiveMQ durable subscription name, unique per interface: the
+#                        broker keeps messages while the interface is down (blank = off)
 #   include_demo_target  install the GMSECDEMO target for testing
 
 VARIABLE gmsec_int_name GMSEC_INT
@@ -25,6 +27,7 @@ VARIABLE gmsec_subjects GMSEC.DEMO.SAT1.MSG.TLM.>
 VARIABLE gmsec_data_field DATA
 VARIABLE gmsec_api_home /opt/GMSEC_API
 VARIABLE gmsec_container ""
+VARIABLE gmsec_durable_name ""
 VARIABLE include_demo_target true
 
 <% if include_demo_target.to_s == "true" %>
@@ -42,6 +45,9 @@ INTERFACE <%= gmsec_int_name %> gmsec_interface.py <%= gmsec_mw_id %> <%= gmsec_
   ENV GMSEC_API_HOME <%= gmsec_api_home %>
   ENV LD_LIBRARY_PATH <%= gmsec_api_home %>/bin
   OPTION DATA_FIELD <%= gmsec_data_field %>
+  <% unless gmsec_durable_name.to_s.strip.empty? %>
+  OPTION DURABLE <%= gmsec_durable_name %>
+  <% end %>
   OPTION EXTRA_FIELD MESSAGE-SUBTYPE
   OPTION EXTRA_FIELD COLLECTION-POINT
   OPTION EXTRA_FIELD STREAM-MODE

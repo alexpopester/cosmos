@@ -6,10 +6,10 @@ shown stays as it is. For what each option does, see the Reference section of
 the [README](../README.md#reference). For how the packet travels through COSMOS
 after the interface, see [telemetry-pipeline.md](telemetry-pipeline.md).
 
-The unit tests cover examples 2–4, and example 1 with a single target. The
-others use standard COSMOS protocols and GMSEC settings that haven't been run
-against this plugin yet. Check them with a captured message first (README, "Verify with a real
-sample before deploying").
+The unit tests cover examples 2–4, and example 1 with a single target; the live
+tests cover example 11. The others use standard COSMOS protocols and GMSEC
+settings that haven't been run against this plugin yet. Check them with a
+captured message first (README, "Verify with a real sample before deploying").
 
 - [1. Several targets on one interface](#1-several-targets-on-one-interface)
 - [2. One subject per packet, no ID in the bytes](#2-one-subject-per-packet-no-id-in-the-bytes)
@@ -21,6 +21,7 @@ sample before deploying").
 - [8. Broker login, SSL and failover](#8-broker-login-ssl-and-failover)
 - [9. A packet rate above what one decom keeps up with](#9-a-packet-rate-above-what-one-decom-keeps-up-with)
 - [10. Kubernetes: run only this interface in the GMSEC image](#10-kubernetes-run-only-this-interface-in-the-gmsec-image)
+- [11. Keep messages while the interface is down](#11-keep-messages-while-the-interface-is-down)
 
 ---
 
@@ -207,3 +208,18 @@ gmsec_container  registry.example.com/openc3-operator-gmsec:7.4.1-gmsec5.3
 That adds `CONTAINER <image>` to the interface. The cluster must be able to
 pull from that registry. On Docker Compose there's no per-interface image;
 replace the operator image instead (README, quick start step 3).
+
+## 11. Keep messages while the interface is down
+
+Restarts and upgrades shouldn't lose telemetry. Give the interface a durable
+subscription name:
+
+```
+gmsec_durable_name  cosmos-sat1
+```
+
+That adds `OPTION DURABLE cosmos-sat1`. The broker then holds every message
+published while the interface is down and delivers them when it reconnects.
+With two interfaces (example 7), give each its own name. Tested live on
+GMSEC 4.9.1 and 5.3, including a broker restart; see "Durable subscriptions"
+in the README for what to watch for.

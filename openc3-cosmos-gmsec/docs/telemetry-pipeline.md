@@ -153,13 +153,16 @@ Ingest Paths").
 - **The interface itself** is one process with one GMSEC connection. In our
   tests it kept up well past decom's rate, so it isn't the limit.
 
-## 7. What this plugin doesn't do yet
+## 7. When the interface is down
 
-- **Durable subscriptions.** ActiveMQ topics keep nothing for a subscriber
-  that isn't connected, so messages published while the interface is down are
-  lost. GMSEC's ActiveMQ wrapper can subscribe durably (`mw-durable-subscribe`,
-  `mw-durable-client-id`), but reads those from a per-subscription config. The
-  interface subscribes without one, so `OPTION CONFIG` can't turn it on.
+ActiveMQ topics keep nothing for a subscriber that isn't connected, so by
+default messages published while the interface is down are lost. With
+`OPTION DURABLE <name>` the broker keeps them and delivers the backlog on
+reconnect, and COSMOS processes it like any other burst: it is logged, stored
+and decoded at decom's normal rate. See "Durable subscriptions" in the README.
+
+## 8. What this plugin doesn't do yet
+
 - **Commands.** Writing to the interface raises an error.
 - **Message time.** COSMOS's received time is when the interface got the
   message, not a time field in it. See "Adapting to your real messages" in the

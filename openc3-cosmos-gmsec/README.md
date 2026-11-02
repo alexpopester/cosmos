@@ -277,6 +277,7 @@ fields listed with `EXTRA_FIELD`; the plugin.txt default lists
 | `gmsec_data_field` | `DATA` | BIN field holding the packet. `AUTO` uses the first BIN field |
 | `gmsec_api_home` | `/opt/GMSEC_API` | GMSEC install root inside the image |
 | `gmsec_container` | blank | Enterprise only: image this interface runs in (emits `CONTAINER`) |
+| `gmsec_durable_name` | blank | Turns on [durable subscriptions](#durable-subscriptions) under this name (emits `OPTION DURABLE`) |
 | `include_demo_target` | `true` | Installs the `GMSECDEMO` target |
 
 ### Interface options
@@ -289,6 +290,7 @@ INTERFACE GMSEC_INT gmsec_interface.py <mw-id> <server> <subject> [<subject> ...
   OPTION FILTER MESSAGE-SUBTYPE TLM   # field must equal value (repeatable, all must match)
   OPTION FILTER STREAM-MODE RT
   OPTION EXTRA_FIELD COLLECTION-POINT # copy a field into packet extra (repeatable)
+  OPTION DURABLE cosmos-gmsec-int     # durable subscriptions (see below)
   OPTION RECEIVE_TIMEOUT 1.0          # receive poll period in seconds
   OPTION GMSEC_API_HOME /opt/GMSEC_API
   OPTION MW_USERNAME <user>           # broker credentials (see below)
@@ -307,6 +309,40 @@ plugin:
   OPTION MW_USERNAME cosmos
   SECRET ENV GMSEC_PASSWORD GMSEC_PASSWORD MW_PASSWORD
 ```
+
+### Durable subscriptions
+
+By default the interface subscribes like any ActiveMQ topic subscriber, and the
+broker keeps nothing for it while it is disconnected. Messages published while
+the interface is restarting, being upgraded or cut off from the broker are
+lost.
+
+Set `gmsec_durable_name` (or `OPTION DURABLE <name>`) and the broker instead
+keeps every message for the interface while it is away, then delivers the
+backlog when it reconnects. This works on GMSEC 4.9.1 and 5.3. The backlog
+also survives a broker restart, as long as publishers send persistent messages
+(ActiveMQ's default, and what GMSEC does unless configured otherwise).
+
+- **The name identifies the subscription.** Reconnecting under the same name
+  picks up the backlog. Each interface needs its own name, and two running
+  copies can't share one.
+- **The backlog grows while the interface is away.** A subscription that is
+  never reconnected keeps growing until it hits the broker's storage limits.
+  When you remove the interface or change its name, delete the old durable
+  subscription in the ActiveMQ console (Subscribers).
+- **The backlog arrives all at once.** Decom works through it at its normal
+  rate, so current values lag until it clears. Backlog packets are marked
+  real-time, so they update current values and limits as they play through.
+- **Order across subjects changes.** The broker replays the backlog one topic
+  at a time, so packets from different subjects arrive grouped rather than
+  interleaved. Packets on one subject stay in order.
+- **GMSEC's duplicate filter is turned off.** That filter drops any message
+  older than the newest one seen from the same publisher, which would silently
+  discard most of a replayed backlog. With it off, a message the broker
+  redelivers (for example after a failover) arrives twice.
+- **Changing the name on an upgrade.** `openc3cli load` keeps the installed
+  variables when it upgrades a plugin and ignores `--variables`. Set the name
+  from the Admin upgrade dialog, or uninstall and install fresh.
 
 ### GMSEC 4 and 5
 
@@ -394,14 +430,18 @@ COSMOS keeps retrying.
 
 | Test | Command | Needs |
 |---|---|---|
-| Unit (14 tests, run once per API) | `./openc3-cosmos-gmsec/test/run_tests.sh` | the repo's `openc3/python` venv; no GMSEC, broker or COSMOS |
+| Unit (16 tests, run once per API) | `./openc3-cosmos-gmsec/test/run_tests.sh` | the repo's `openc3/python` venv; no GMSEC, broker or COSMOS |
 | Live end-to-end | `./openc3-cosmos-gmsec/test/e2e/run_activemq_e2e.sh <image>` | Docker and a built GMSEC image |
 | Live, mixed versions | `PUB_IMAGE=<other image> ./openc3-cosmos-gmsec/test/e2e/run_activemq_e2e.sh <image>` | Both images |
+| Live, durable subscriptions | `./openc3-cosmos-gmsec/test/e2e/run_durable_e2e.sh <image>` | Docker and a built GMSEC image |
 
 The unit tests use an in-process fake of `libgmsec_python3`
 (`test/fake_gmsec`) and push messages through COSMOS's own `handle_packet` and
-decom code into the current value table. The live test uses a real ActiveMQ
-broker, the real binding and the real interface.
+decom code into the current value table. The live tests use a real ActiveMQ
+broker, the real binding and the real interface. The durable test publishes 42
+messages while the interface is disconnected and checks that all of them
+arrive on reconnect, with and without a broker restart, and that none do
+without `DURABLE`.
 
 ### Files
 
@@ -416,5 +456,5 @@ openc3-cosmos-gmsec/
 └── test/
     ├── test_gmsec_interface.py   unit tests
     ├── fake_gmsec/               stand-in for libgmsec_python3
-    └── e2e/                      live ActiveMQ test
+    └── e2e/                      live ActiveMQ tests (basic and durable)
 ```

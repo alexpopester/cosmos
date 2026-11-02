@@ -139,6 +139,7 @@ class FakeConnection:
     def __init__(self, config):
         self.config = config
         self.subscribed = []
+        self.subscribe_configs = {}
         self.started = False
         self.closed = False
         FakeConnection.instances.append(self)
@@ -158,8 +159,10 @@ class FakeConnection:
     def _close(self):
         self.closed = True
 
-    def subscribe(self, subject):
+    def subscribe(self, subject, config=None):
         self.subscribed.append(subject)
+        if config is not None:
+            self.subscribe_configs[subject] = config
         return SubscriptionInfo(subject)
 
     def unsubscribe(self, info):
