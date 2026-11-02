@@ -52,6 +52,9 @@ If you pull COSMOS from a mirror, add `--build-arg OPENC3_REGISTRY=<mirror>`
 (and `OPENC3_NAMESPACE` if it isn't `openc3inc`). See
 [Image details](#image-details) for air-gapped builds.
 
+To build other images on top of GMSEC, such as COSMOS Enterprise's, build
+`openc3-base` too; see [Base images](#base-images-for-your-own-builds).
+
 ### 2. Check the image against a real broker
 
 This starts a throwaway ActiveMQ, publishes demo telemetry with real GMSEC,
@@ -380,9 +383,11 @@ The image reports its version in the `org.openc3.gmsec.version` label and the
 
 ### Image details
 
-`docker/Dockerfile` starts from the stock `openc3-operator` image, builds
-inside it, and copies only the results into a clean copy. The final image is
-the operator image plus `/opt/GMSEC_API`:
+`docker/Dockerfile` compiles GMSEC inside the stock `openc3-base` image (the
+image the operator and API images are built from, so they all share its
+Python), then copies only the results into a clean copy of `OPENC3_IMAGE`
+(default `openc3-operator`). The final image is that image plus
+`/opt/GMSEC_API`:
 
 - ActiveMQ-CPP 3.9.5, compiled from Apache source with SSL (OpenSSL 3)
 - GMSEC API 4.9.1 or 5.x: the core library, the `activemq395` wrapper (plus
@@ -402,7 +407,8 @@ Debian (glibc). The Dockerfile detects `apk` vs `apt`. GMSEC 4.9.1 was built
 and passed the live ActiveMQ test on 7.4.1 and 7.2.0; GMSEC 5.3 so far only
 on 7.4.1. Because the binding is tied to the image's Python, **rebuild
 whenever you upgrade COSMOS**. A smoke test during the build imports the
-binding, round-trips binary data and loads the ActiveMQ wrapper. The image is
+binding, round-trips binary data and loads the ActiveMQ wrapper; it runs again
+in the final image, in case that image's Python differs. The image is
 x86_64 only. GMSEC 5 ships an aarch64 build configuration, but this
 Dockerfile hasn't been tried on it.
 
@@ -410,7 +416,8 @@ GMSEC's own build compiles its libraries without optimization (no `-O` flag in
 either version). The numbers above are with that default.
 
 Build args: `OPENC3_REGISTRY`, `OPENC3_NAMESPACE`, `OPENC3_IMAGE` (default
-`openc3-operator`), `OPENC3_TAG`, `GMSEC_VERSION` (default `4.9.1`),
+`openc3-operator`), `OPENC3_BUILD_IMAGE` (default `openc3-base`), `OPENC3_TAG`,
+`GMSEC_VERSION` (default `4.9.1`),
 `GMSEC_URL`, `ACTIVEMQ_CPP_URL`. For air-gapped builds, put
 `GMSEC_API-<GMSEC_VERSION>.tar.gz` (GitHub tag tarball) and
 `activemq-cpp-library-3.9.5-src.tar.gz` next to the Dockerfile and nothing is
@@ -425,6 +432,46 @@ GMSEC is mounted at a custom `gmsec_api_home`. On connect, the interface adds
 the binding to `sys.path` and preloads the core library and the wrapper. If
 GMSEC is missing, the interface shows a connection error that says so, and
 COSMOS keeps retrying.
+
+### Base images for your own builds
+
+COSMOS's images build `FROM ${OPENC3_REGISTRY}/${OPENC3_NAMESPACE}/<image>:${OPENC3_TAG}`,
+and the operator and API images start from `openc3-base`. To have GMSEC in
+images you build yourself, such as COSMOS Enterprise's, build GMSEC versions
+of the base images under their stock names and point those args at them:
+
+```bash
+OPENC3_TAG=7.4.1 GMSEC_VERSION=4.9.1 \
+OUT_REGISTRY=<registry> OUT_NAMESPACE=<namespace> PUSH=1 \
+  ./openc3-cosmos-gmsec/docker/build_images.sh
+```
+
+That builds, and with `PUSH=1` pushes:
+
+```
+<registry>/<namespace>/openc3-base:7.4.1-gmsec4.9.1
+<registry>/<namespace>/openc3-operator:7.4.1-gmsec4.9.1
+```
+
+Name other images on the command line to build them too (any image built
+from `openc3-base`, e.g. `openc3-cosmos-script-runner-api` so scripts can use
+GMSEC). GMSEC compiles once; the other images reuse it from the build cache.
+Then build on top of them:
+
+```bash
+docker build --build-arg OPENC3_REGISTRY=<registry> --build-arg OPENC3_NAMESPACE=<namespace> \
+  --build-arg OPENC3_TAG=7.4.1-gmsec4.9.1 ...
+```
+
+- Images built from these have `GMSEC_API_HOME` and `LD_LIBRARY_PATH` set,
+  so an operator built this way runs every microservice with GMSEC, and
+  `gmsec_container` can stay blank.
+- If a build takes several base images from the same `OPENC3_TAG` (for
+  example `openc3-cosmos-init` as well), those must exist under the new tag
+  too. Copy the ones without GMSEC as they are:
+  `docker tag openc3inc/openc3-cosmos-init:7.4.1 <registry>/<namespace>/openc3-cosmos-init:7.4.1-gmsec4.9.1`.
+- Rebuild the images, and everything built from them, for each COSMOS
+  upgrade.
 
 ### Tests
 
@@ -452,7 +499,8 @@ openc3-cosmos-gmsec/
 ├── targets/GMSECDEMO/            demo packet definitions (CCSDS)
 ├── tools/publish_demo_tlm.py     publishes demo telemetry over GMSEC
 ├── tools/dump_messages.py        prints real messages to see their shape
-├── docker/Dockerfile             builds the GMSEC-enabled operator image
+├── docker/Dockerfile             builds a GMSEC-enabled COSMOS image (operator by default)
+├── docker/build_images.sh        builds GMSEC openc3-base + openc3-operator to use as base images
 └── test/
     ├── test_gmsec_interface.py   unit tests
     ├── fake_gmsec/               stand-in for libgmsec_python3

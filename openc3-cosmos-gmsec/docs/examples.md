@@ -209,6 +209,11 @@ That adds `CONTAINER <image>` to the interface. The cluster must be able to
 pull from that registry. On Docker Compose there's no per-interface image;
 replace the operator image instead (README, quick start step 3).
 
+If you build your own operator image (Enterprise's, for example), build it
+from the GMSEC `openc3-base` instead and leave `gmsec_container` blank:
+every microservice then has GMSEC (README, "Base images for your own
+builds").
+
 ## 11. Keep messages while the interface is down
 
 Restarts and upgrades shouldn't lose telemetry. Give the interface a durable

@@ -1,15 +1,22 @@
-# COSMOS operator image with the GMSEC API (C++ core, ActiveMQ wrapper and
-# Python3 binding) built in, for the openc3-cosmos-gmsec plugin. One GMSEC
-# version per image, picked with GMSEC_VERSION (4.9.1 or a 5.x release); the
-# plugin detects which one it is running against.
+# A COSMOS image with the GMSEC API (C++ core, ActiveMQ wrapper and Python3
+# binding) built in, for the openc3-cosmos-gmsec plugin. OPENC3_IMAGE picks the
+# COSMOS image to add it to: openc3-operator (default), or openc3-base, the
+# image the operator and API images are built from, to use as a base image.
+# One GMSEC version per image, picked with GMSEC_VERSION (4.9.1 or a 5.x
+# release); the plugin detects which one it is running against.
 #
-# Everything is compiled inside the operator image itself, so the Python
-# binding matches the exact Python (and glibc/libstdc++) the interface
-# microservice runs under. Only the build output lands in the final image.
+# Everything is compiled inside OPENC3_BUILD_IMAGE (openc3-base), so the Python
+# binding matches the exact Python (and glibc/libstdc++) that openc3-base and
+# every image built from it run. Only the build output lands in the final
+# image. The compile doesn't depend on OPENC3_IMAGE, so building several images
+# reuses it from the build cache (build_images.sh does that).
 # Works on Debian (e.g. COSMOS 7.4.x) and Alpine/musl (e.g. 7.2.x) bases.
 #
 #   docker build -t <registry>/openc3-operator-gmsec:7.4.1-gmsec4.9.1 \
 #     --build-arg OPENC3_TAG=7.4.1 --build-arg GMSEC_VERSION=4.9.1 openc3-cosmos-gmsec/docker
+#
+#   build_images.sh (next to this file) builds openc3-base and openc3-operator
+#   in one go, tagged so other Dockerfiles can build FROM them.
 #
 # Air-gapped: put GMSEC_API-<GMSEC_VERSION>.tar.gz (GitHub tag tarball) and
 # activemq-cpp-library-3.9.5-src.tar.gz next to this file and they are used
@@ -19,8 +26,9 @@ ARG OPENC3_REGISTRY=docker.io
 ARG OPENC3_NAMESPACE=openc3inc
 ARG OPENC3_TAG=latest
 ARG OPENC3_IMAGE=openc3-operator
+ARG OPENC3_BUILD_IMAGE=openc3-base
 
-FROM ${OPENC3_REGISTRY}/${OPENC3_NAMESPACE}/${OPENC3_IMAGE}:${OPENC3_TAG} AS gmsec-build
+FROM ${OPENC3_REGISTRY}/${OPENC3_NAMESPACE}/${OPENC3_BUILD_IMAGE}:${OPENC3_TAG} AS gmsec-build
 
 ARG GMSEC_VERSION=4.9.1
 ARG GMSEC_URL=https://github.com/nasa/GMSEC_API/archive/refs/tags/API-${GMSEC_VERSION}-release.tar.gz
@@ -111,9 +119,16 @@ COPY --from=gmsec-build /build/release/GMSEC_API/bin /opt/GMSEC_API/bin
 COPY --from=gmsec-build /build/release/GMSEC_API/templates /opt/GMSEC_API/templates
 COPY --from=gmsec-build /build/release/GMSEC_API/README.txt /opt/GMSEC_API/
 
+# Same smoke test in the final image, in case OPENC3_IMAGE runs a different
+# Python than OPENC3_BUILD_IMAGE
+ARG GMSEC_VERSION=4.9.1
+RUN --mount=type=bind,source=smoke_test.py,target=/tmp/gmsec_smoke_test.py \
+    cd /opt/GMSEC_API/bin && \
+    LD_LIBRARY_PATH=. PYTHONPATH=".:lib/GMSECAPI${GMSEC_VERSION%%.*}" \
+      /openc3/python/.venv/bin/python -X faulthandler /tmp/gmsec_smoke_test.py
+
 # Every microservice this image runs can find GMSEC, with or without the
 # plugin's ENV lines
-ARG GMSEC_VERSION=4.9.1
 LABEL org.openc3.gmsec.version="${GMSEC_VERSION}"
 ENV GMSEC_API_VERSION=${GMSEC_VERSION}
 ENV GMSEC_API_HOME=/opt/GMSEC_API
