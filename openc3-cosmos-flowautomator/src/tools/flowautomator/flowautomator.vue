@@ -89,6 +89,26 @@
       <span class="text-body-2 mr-3" :class="armed ? 'text-success' : ''">
         {{ armed ? 'Armed' : 'Disarmed' }}
       </span>
+      <v-btn-toggle
+        v-model="flowSettings.mode"
+        mandatory
+        density="compact"
+        variant="outlined"
+        divided
+        class="fa-mode-toggle mr-3"
+        @update:model-value="changed"
+      >
+        <v-btn
+          v-for="m in modes"
+          :key="m.value"
+          :value="m.value"
+          size="small"
+          :title="m.hint"
+          :prepend-icon="m.icon"
+        >
+          {{ m.title }}
+        </v-btn>
+      </v-btn-toggle>
       <v-menu v-if="triggerNodes.length > 1">
         <template #activator="{ props: menuProps }">
           <v-btn
@@ -137,6 +157,30 @@
         Stop
       </v-btn>
       <v-spacer />
+      <v-menu v-if="allApprovals.length" max-width="560">
+        <template #activator="{ props: menuProps }">
+          <v-chip
+            v-bind="menuProps"
+            size="small"
+            color="warning"
+            variant="flat"
+            class="mr-2 fa-approvals-chip"
+            prepend-icon="mdi-hand-back-right"
+          >
+            {{ allApprovals.length }} awaiting approval
+          </v-chip>
+        </template>
+        <v-list density="compact">
+          <v-list-item
+            v-for="a in allApprovals"
+            :key="a.id"
+            :title="`${a.flow_name}: ${a.label}`"
+            :subtitle="a.preview"
+            prepend-icon="mdi-hand-back-right"
+            @click="openApproval(a)"
+          />
+        </v-list>
+      </v-menu>
       <v-tooltip location="bottom">
         <template #activator="{ props: tip }">
           <v-chip
@@ -208,6 +252,11 @@
 
       <div class="fa-center">
         <div class="fa-canvas" @drop="onDrop" @dragover.prevent>
+          <approval-panel
+            :approvals="flowApprovals"
+            :now="engineStatus.time"
+            @decided="pollStatus"
+          />
           <VueFlow
             id="flow-automator"
             v-model:nodes="nodes"
@@ -325,9 +374,11 @@ import { TopBar } from '@openc3/vue-common/components'
 import FlowNode from './FlowNode.vue'
 import NodeInspector from './NodeInspector.vue'
 import RunPanel from './RunPanel.vue'
+import ApprovalPanel from './ApprovalPanel.vue'
 import flowApi, { ROUTE_PREFIX, errorInfo } from './flowApi'
 import {
   CATEGORIES,
+  MODES,
   NODE_TYPES,
   categoryColor,
   defaultData,
@@ -338,7 +389,14 @@ const STATUS_POLL_MS = 1000
 const RUN_POLL_MS = 500
 
 function blankSettings() {
-  return { name: 'New flow', description: '', policy: 'skip', variables: {} }
+  return {
+    name: 'New flow',
+    description: '',
+    policy: 'skip',
+    mode: 'walk',
+    approval_timeout: 0,
+    variables: {},
+  }
 }
 
 export default {
@@ -351,6 +409,7 @@ export default {
     FlowNode,
     NodeInspector,
     RunPanel,
+    ApprovalPanel,
   },
   provide() {
     return { flowContext: this.flowContext }
@@ -380,7 +439,9 @@ export default {
       runs: [],
       selectedRun: null,
       followLive: true,
-      engineStatus: { armed: 0, active_runs: [], triggers: {} },
+      engineStatus: { armed: 0, active_runs: [], approvals: [], triggers: {} },
+      seenApprovals: new Set(),
+      modes: MODES,
       engineOnline: true,
       engineError: '',
       scripts: [],
@@ -460,6 +521,27 @@ export default {
     },
     triggerNodes() {
       return this.nodes.filter((n) => NODE_TYPES[n.data.kind]?.trigger)
+    },
+    allApprovals() {
+      return this.engineStatus.approvals || []
+    },
+    flowApprovals() {
+      // Approvals of this flow's runs, including sub-flows they called
+      const runs = this.engineStatus.active_runs
+      const ids = new Set(
+        runs.filter((r) => r.flow_id === this.flowId).map((r) => r.id),
+      )
+      let grew = true
+      while (grew) {
+        grew = false
+        for (const r of runs) {
+          if (r.parent_id && ids.has(r.parent_id) && !ids.has(r.id)) {
+            ids.add(r.id)
+            grew = true
+          }
+        }
+      }
+      return this.allApprovals.filter((a) => ids.has(a.run_id))
     },
     activeRunIds() {
       return this.engineStatus.active_runs
@@ -546,6 +628,8 @@ export default {
             name: flow.name,
             description: flow.description || '',
             policy: flow.policy || 'skip',
+            mode: flow.mode || 'run',
+            approval_timeout: flow.approval_timeout || 0,
             variables: { ...(flow.variables || {}) },
           }
         : blankSettings()
@@ -741,6 +825,12 @@ export default {
       try {
         const status = await flowApi.status()
         this.engineStatus = status
+        try {
+          this.announceApprovals(status.approvals || [])
+        } catch (error) {
+          // A toast failing must not look like the engine going offline
+          console.error(error)
+        }
         // Someone else added or deleted a flow: keep the selector current
         if (status.flows !== this.flows.length) this.refreshFlows()
         this.engineOnline = true
@@ -811,7 +901,37 @@ export default {
       for (const id of run.active_nodes || []) {
         status[id] = 'running'
       }
+      for (const approval of run.approvals || []) {
+        status[approval.node] = 'waiting'
+      }
       return status
+    },
+    announceApprovals(approvals) {
+      // Toast each new approval once, wherever it is, so operators notice
+      // runs that triggers started in other flows
+      for (const a of approvals) {
+        if (this.seenApprovals.has(a.id)) continue
+        this.seenApprovals.add(a.id)
+        const level = a.reason.includes('HAZARDOUS') ? 'serious' : 'caution'
+        this.$notify[level]({
+          title: `Approval needed: ${a.flow_name}`,
+          body: `${a.label}: ${a.preview}`,
+        })
+      }
+    },
+    openApproval(approval) {
+      if (approval.flow_id === this.flowId) return
+      const run = this.engineStatus.active_runs.find(
+        (r) => r.id === approval.run_id,
+      )
+      // A sub-flow's approval is answered from the flow that called it
+      let flowId = approval.flow_id
+      let top = run
+      while (top && top.parent_id) {
+        top = this.engineStatus.active_runs.find((r) => r.id === top.parent_id)
+        if (top) flowId = top.flow_id
+      }
+      this.openFlow(flowId)
     },
 
     // ---- validation -----------------------------------------------------
@@ -989,6 +1109,7 @@ export default {
   border-bottom: 1px solid rgba(255, 255, 255, 0.12);
 }
 .fa-flow-select {
+  min-width: 220px;
   max-width: 280px;
 }
 .fa-main {

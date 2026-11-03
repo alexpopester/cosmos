@@ -41,9 +41,9 @@ export default {
       data: {},
       headers: handled,
     }).then(unwrap),
-  run: (id, triggerNode, variables) =>
+  run: (id, triggerNode, variables, mode) =>
     Api.post(`${BASE}/flows/${id}/run`, {
-      data: { trigger_node: triggerNode, variables },
+      data: { trigger_node: triggerNode, variables, mode },
       headers: handled,
     }).then(unwrap),
   listRuns: (flowId, limit = 50) =>
@@ -56,6 +56,11 @@ export default {
     Api.post(`${BASE}/runs/${id}/stop`, { data: {}, headers: handled }).then(
       unwrap,
     ),
+  approve: (runId, approvalId, decision) =>
+    Api.post(`${BASE}/runs/${runId}/approve`, {
+      data: { approval_id: approvalId, decision },
+      headers: handled,
+    }).then(unwrap),
   stopAll: () => Api.post(`${BASE}/stop_all`, { data: {} }).then(unwrap),
   // Script Runner's file list, for the Run script node
   listScripts: () => Api.get('/script-api/scripts').then(unwrap),

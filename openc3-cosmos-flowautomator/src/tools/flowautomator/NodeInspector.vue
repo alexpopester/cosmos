@@ -43,6 +43,17 @@
         class="mb-3"
         @update:model-value="changed"
       />
+      <v-switch
+        v-if="!spec.trigger"
+        v-model="config.require_approval"
+        label="Ask operator first (walk mode)"
+        hint="In walk mode the run pauses here until an operator approves. Crawl mode asks at every step; run mode never asks."
+        persistent-hint
+        color="warning"
+        density="compact"
+        class="mb-3"
+        @update:model-value="changed"
+      />
       <template v-for="field in visibleFields" :key="field.key">
         <v-textarea
           v-if="field.type === 'condition' || field.type === 'template'"
@@ -220,6 +231,40 @@
         :hint="policyHint"
         @update:model-value="changed"
       />
+      <v-select
+        v-model="settings.mode"
+        :items="modes"
+        item-title="title"
+        item-value="value"
+        label="Execution mode"
+        density="compact"
+        variant="outlined"
+        class="mb-3"
+        persistent-hint
+        :hint="modeHint"
+        @update:model-value="changed"
+      >
+        <template #item="{ props: itemProps, item }">
+          <v-list-item
+            v-bind="itemProps"
+            :prepend-icon="item.raw.icon"
+            :subtitle="item.raw.hint"
+          />
+        </template>
+      </v-select>
+      <v-text-field
+        v-if="settings.mode !== 'run'"
+        v-model.number="settings.approval_timeout"
+        type="number"
+        min="0"
+        label="Approval timeout (s)"
+        hint="Fail the run if nobody answers in time. 0 waits forever."
+        persistent-hint
+        density="compact"
+        variant="outlined"
+        class="mb-3"
+        @update:model-value="changed"
+      />
       <key-value-editor
         v-model="settings.variables"
         label="Starting variables"
@@ -236,7 +281,7 @@
 </template>
 
 <script>
-import { NODE_TYPES, categoryColor } from './nodeTypes'
+import { MODES, NODE_TYPES, categoryColor } from './nodeTypes'
 import KeyValueEditor from './KeyValueEditor.vue'
 
 export default {
@@ -251,6 +296,7 @@ export default {
   emits: ['changed', 'delete-node'],
   data() {
     return {
+      modes: MODES,
       policies: [
         { title: 'Skip the new trigger', value: 'skip' },
         { title: 'Queue it', value: 'queue' },
@@ -278,6 +324,9 @@ export default {
     },
     flowItems() {
       return this.flows.filter((f) => !this.flow || f.id !== this.flow.id)
+    },
+    modeHint() {
+      return MODES.find((m) => m.value === this.flow.mode)?.hint
     },
     policyHint() {
       return {

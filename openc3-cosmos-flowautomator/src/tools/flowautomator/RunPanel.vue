@@ -99,7 +99,8 @@
             </v-chip>
             <span class="ml-2 text-caption">
               {{ run.flow_name }} · {{ run.reason }} ·
-              {{ run.step_count }} steps
+              {{ run.step_count }} steps · {{ run.mode }} mode
+              <span v-if="run.auto_approve">(running the rest)</span>
               <span v-if="run.steps_dropped">
                 ({{ run.steps_dropped }} oldest not shown)
               </span>
@@ -203,6 +204,7 @@ export default {
           failed: 'error',
           error: 'error',
           stopped: 'warning',
+          waiting: 'amber',
         }[status] || 'grey'
       )
     },

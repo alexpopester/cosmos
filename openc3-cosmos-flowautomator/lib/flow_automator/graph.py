@@ -22,6 +22,10 @@ from .expressions import check_syntax, check_template
 
 
 POLICIES = ("skip", "queue", "parallel")
+# Execution modes, most cautious first: crawl asks the operator before every
+# step, walk only before steps marked require_approval and hazardous commands,
+# run never asks
+MODES = ("crawl", "walk", "run")
 ERROR_HANDLE = "error"
 
 
@@ -85,6 +89,13 @@ def validate_flow(flow):
         problem("Flow needs a name")
     if flow.get("policy", "skip") not in POLICIES:
         problem(f"Policy must be one of {', '.join(POLICIES)}")
+    if flow.get("mode", "run") not in MODES:
+        problem(f"Mode must be one of {', '.join(MODES)}")
+    try:
+        if float(flow.get("approval_timeout") or 0) < 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        problem("Approval timeout must be zero (wait forever) or a positive number of seconds")
     variables = flow.get("variables") or {}
     if not isinstance(variables, dict):
         problem("Variables must be an object")

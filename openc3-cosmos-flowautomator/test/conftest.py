@@ -39,6 +39,10 @@ class FakeBackend:
     def tlm_counts(self, packets):
         return [self.counts.get(tuple(packet), 0) for packet in packets]
 
+    def cmd_hazardous(self, command):
+        parts = command.split()
+        return len(parts) > 1 and parts[1] in self.hazardous
+
     def send_cmd(self, command, allow_hazardous=False):
         name = command.split()[1] if len(command.split()) > 1 else command
         if name in self.fail_commands:

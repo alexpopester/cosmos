@@ -6,7 +6,7 @@ import threading
 import time
 import uuid
 
-from .graph import POLICIES, is_trigger, validate_flow
+from .graph import MODES, POLICIES, is_trigger, validate_flow
 from .runner import FlowRun
 from .triggers import TriggerManager
 
@@ -115,6 +115,8 @@ class FlowEngine:
                 flow["created_at"] = time.time()
             flow["name"] = str(flow.get("name") or "Untitled flow").strip()
             flow.setdefault("description", "")
+            if flow.get("mode") not in MODES:
+                flow["mode"] = "run"  # flows saved before modes existed keep running unattended
             if flow.get("policy") not in POLICIES:
                 flow["policy"] = "skip"
             flow.setdefault("variables", {})
@@ -161,7 +163,7 @@ class FlowEngine:
 
     # ---- runs ------------------------------------------------------------
 
-    def trigger(self, flow_id, node_id=None, reason="", variables=None, manual=False):
+    def trigger(self, flow_id, node_id=None, reason="", variables=None, manual=False, mode=None):
         """Start a run of a flow from a trigger node, applying the flow's re-trigger policy.
 
         Returns {"result": "started" | "queued" | "skipped", "run": run json or None}.
@@ -200,16 +202,18 @@ class FlowEngine:
                         message = f"Queue full ({MAX_QUEUED_PER_FLOW}), trigger dropped"
                         self.log("warn", f"Flow '{flow['name']}': {message}")
                         return {"result": "skipped", "run": None, "message": message}
-                    queue.append((node_id, reason, variables))
+                    queue.append((node_id, reason, variables, mode))
                     return {"result": "queued", "run": None, "message": f"Queued ({len(queue)} waiting)"}
-            return self._start_run(flow, node_id, reason, variables)
+            if mode is not None and mode not in MODES:
+                raise EngineError(f"Mode must be one of {', '.join(MODES)}")
+            return self._start_run(flow, node_id, reason, variables, mode)
 
-    def _start_run(self, flow, node_id, reason, variables):
+    def _start_run(self, flow, node_id, reason, variables, mode=None):
         if len(self.runs) >= MAX_ACTIVE_RUNS:
             message = f"Too many active runs ({MAX_ACTIVE_RUNS}), run not started"
             self.log("error", f"Flow '{flow['name']}': {message}")
             return {"result": "skipped", "run": None, "message": message}
-        run = FlowRun(self, flow, node_id, reason, variables)
+        run = FlowRun(self, flow, node_id, reason, variables, mode=mode)
         self.runs[run.id] = run
         self.log("info", f"Flow '{flow['name']}' run {run.id} started: {reason}")
         run.start_thread()
@@ -253,6 +257,21 @@ class FlowEngine:
         if next_start:
             with self.lock:
                 self._start_run(*next_start)
+
+    def approve(self, run_id, approval_id, decision):
+        """An operator answers a run's pending approval (crawl/walk modes)."""
+        with self.lock:
+            run = self.runs.get(run_id)
+        if run is None:
+            raise NotFoundError(f"Run '{run_id}' is not active")
+        try:
+            answered = run.approve(approval_id, decision)
+        except ValueError as error:
+            raise EngineError(str(error)) from None
+        if not answered:
+            raise NotFoundError(f"Approval '{approval_id}' is not pending (already answered or timed out)")
+        self.log("info", f"Flow '{run.flow.get('name')}' run {run.id}: operator chose '{decision}'")
+        return {"run": run.as_json(include_steps=False)}
 
     def stop_run(self, run_id):
         with self.lock:
@@ -311,6 +330,7 @@ class FlowEngine:
                 "flows": len(self.flows),
                 "armed": sum(1 for flow in self.flows.values() if flow.get("armed")),
                 "active_runs": [run.as_json(include_steps=False) for run in self.runs.values()],
+                "approvals": [a for run in self.runs.values() for a in run.pending_approvals()],
                 "queued": {flow_id: len(queue) for flow_id, queue in self.queues.items() if queue},
                 "triggers": self.triggers.status(),
                 "time": time.time(),

@@ -14,13 +14,14 @@ import time
 import uuid
 
 from .expressions import _TEMPLATE_RE, Evaluator, normalize_item
-from .graph import ERROR_HANDLE, NODE_TYPES, Graph
+from .graph import ERROR_HANDLE, MODES, NODE_TYPES, Graph, is_trigger
 
 
 MAX_STEPS_RECORDED = 1000
 DEFAULT_MAX_STEPS = 100_000
 SCRIPT_DONE_STATES = ("completed", "completed_errors", "stopped", "crashed", "killed")
 SCRIPT_POLL_SECONDS = 1.0
+APPROVAL_DECISIONS = ("go", "run", "abort")
 
 
 class RunStoppedError(Exception):
@@ -40,8 +41,13 @@ def node_label(node):
     return data.get("label") or node.get("type")
 
 
+def strictest_mode(*modes):
+    """The most cautious of the given execution modes (crawl > walk > run)."""
+    return min((m for m in modes if m in MODES), key=MODES.index, default="run")
+
+
 class FlowRun:
-    def __init__(self, engine, flow, trigger_node_id, reason="", variables=None, parent=None):
+    def __init__(self, engine, flow, trigger_node_id, reason="", variables=None, parent=None, mode=None):
         self.engine = engine
         self.flow = copy.deepcopy(flow)
         self.graph = Graph(self.flow)
@@ -63,6 +69,16 @@ class FlowRun:
         self.active = {}
         self.children = []
         self.loop_counters = {}
+        # Execution mode: an explicit override for this run, else the flow's own.
+        # A sub-flow runs at least as cautiously as the run that called it.
+        self.mode = mode if mode in MODES else self.flow.get("mode", "run")
+        if parent is not None:
+            self.mode = strictest_mode(self.mode, parent.mode)
+        self.approval_timeout = float(self.flow.get("approval_timeout") or 0)
+        self.approvals = {}  # id -> pending approval awaiting an operator
+        # Set when an operator chooses "go and run the rest": routine steps stop
+        # asking, hazardous commands still do
+        self.auto_approve = False
         self._cancel = threading.Event()
         self._lock = threading.RLock()
         self.thread = None
@@ -184,6 +200,8 @@ class FlowRun:
     def _execute_node(self, node):
         step = self._begin_step(node)
         try:
+            self._gate(node, step)
+            step["status"] = "running"
             handle = EXECUTORS[node["type"]](self, node, node.get("data") or {}, step)
             step["status"] = "done"
             step["output"] = handle
@@ -212,6 +230,112 @@ class FlowRun:
                     self.active[node["id"]] = count
                 else:
                     self.active.pop(node["id"], None)
+
+    # ---- operator approval (crawl / walk) --------------------------------
+
+    def _gate(self, node, step):
+        """Pause for operator approval if this run's mode requires it for this node."""
+        if is_trigger(node):
+            return
+        data = node.get("data") or {}
+        hazardous = False
+        preview = ""
+        if node["type"] == "send_cmd":
+            # Rendering or the hazard lookup may fail; the executor reports that
+            try:
+                preview = self.evaluator().render(data.get("command"))
+                hazardous = self.mode != "run" and bool(self.engine.backend.cmd_hazardous(preview))
+            except Exception:  # noqa: BLE001
+                hazardous = False
+        reasons = []
+        if self.auto_approve:
+            pass
+        elif self.mode == "crawl":
+            reasons.append("crawl mode: every step is approved")
+        elif self.mode == "walk" and data.get("require_approval"):
+            reasons.append("marked for approval")
+        if hazardous:
+            reasons.append("HAZARDOUS command")
+        if not reasons:
+            return
+        decision = self._wait_for_approval(node, step, "; ".join(reasons), preview or _preview(self, node, data))
+        if hazardous:
+            # The operator's approval is the hazardous acknowledgement
+            step["approved_hazardous"] = True
+        if decision == "run":
+            self.auto_approve = True
+            self.log("info", "operator chose to run the rest (hazardous commands still ask)")
+
+    def _wait_for_approval(self, node, step, reason, preview):
+        approval = {
+            "id": uuid.uuid4().hex[:8],
+            "run_id": self.id,
+            "flow_id": self.flow.get("id"),
+            "flow_name": self.flow.get("name"),
+            "node": node["id"],
+            "label": node_label(node),
+            "type": node["type"],
+            "reason": reason,
+            "preview": preview,
+            "requested_at": time.time(),
+            "event": threading.Event(),
+            "decision": None,
+        }
+        step["status"] = "waiting"
+        step["message"] = f"Waiting for operator: {reason}"
+        with self._lock:
+            self.approvals[approval["id"]] = approval
+        self.log("info", f"waiting for operator approval at '{approval['label']}' ({reason})")
+        deadline = time.monotonic() + self.approval_timeout if self.approval_timeout > 0 else None
+        try:
+            while not approval["event"].wait(0.1):
+                if self.cancelled():
+                    raise RunStoppedError()
+                if deadline is not None and time.monotonic() > deadline:
+                    raise RunFailedError(
+                        f"No operator approval for '{approval['label']}' within {self.approval_timeout:g}s"
+                    )
+        finally:
+            with self._lock:
+                self.approvals.pop(approval["id"], None)
+        decision = approval["decision"]
+        step["message"] = f"Operator chose {decision}"
+        if decision == "abort":
+            self.message = f"Aborted by operator at '{approval['label']}'"
+            self._cancel.set()
+            raise RunStoppedError()
+        return decision
+
+    def approve(self, approval_id, decision):
+        """Answer a pending approval: 'go', 'run' (go, and stop asking) or 'abort'."""
+        if decision not in APPROVAL_DECISIONS:
+            raise ValueError(f"Decision must be one of {', '.join(APPROVAL_DECISIONS)}")
+        with self._lock:
+            approval = self.approvals.get(approval_id)
+        if approval is None or approval["decision"] is not None:
+            return False
+        approval["decision"] = decision
+        if decision == "run":
+            # Release other branches waiting on routine steps right now too
+            self.auto_approve = True
+            with self._lock:
+                others = [
+                    a
+                    for a in self.approvals.values()
+                    if a is not approval and a["decision"] is None and "HAZARDOUS" not in a["reason"]
+                ]
+            for other in others:
+                other["decision"] = "go"
+                other["event"].set()
+        approval["event"].set()
+        return True
+
+    def pending_approvals(self):
+        with self._lock:
+            # Answered approvals linger until their thread wakes; they're no longer pending
+            return [
+                {k: v for k, v in a.items() if k != "event"} for a in self.approvals.values() if a["decision"] is None
+            ]
 
     def _begin_step(self, node):
         step = {
@@ -276,6 +400,9 @@ class FlowRun:
                 "started_at": self.started_at,
                 "ended_at": self.ended_at,
                 "active_nodes": list(self.active.keys()),
+                "mode": self.mode,
+                "auto_approve": self.auto_approve,
+                "approvals": self.pending_approvals(),
                 "children": list(self.children),
                 "variables": _json_safe(self.variables),
                 "step_count": self.step_count,
@@ -363,10 +490,38 @@ def exec_set_var(run, node, data, step):
     return "out"
 
 
+def _preview(run, node, data):
+    """What a node is about to do, shown to the operator approving it."""
+    try:
+        kind = node["type"]
+        if kind == "run_script":
+            return f"Run script {run.evaluator().render(data.get('filename'))}"
+        if kind == "set_tlm":
+            return f"Set {run.evaluator().render(data.get('item'))} = {run.render_value(data.get('value'))!r}"
+        if kind == "set_var":
+            return f"{data.get('name')} = {data.get('expression')}"
+        if kind in ("if", "wait_tlm", "wait_check") or (kind == "loop" and data.get("mode") == "while"):
+            return str(data.get("condition"))
+        if kind == "switch":
+            return str(data.get("expression"))
+        if kind == "wait_time":
+            return f"Wait {data.get('seconds')}s"
+        if kind == "log":
+            return run.evaluator().render(data.get("message") or "")
+        if kind == "subflow":
+            return f"Run sub-flow {data.get('flow_id')}"
+        if kind == "end":
+            return f"End run ({data.get('status', 'success')})"
+    except Exception as error:  # noqa: BLE001 - a preview must never block approval
+        return f"(preview unavailable: {error})"
+    return node_label(node)
+
+
 def exec_send_cmd(run, node, data, step):
     command = run.evaluator().render(data.get("command"))
     step["message"] = command
-    run.engine.backend.send_cmd(command, allow_hazardous=bool(data.get("allow_hazardous")))
+    allow = bool(data.get("allow_hazardous")) or bool(step.get("approved_hazardous"))
+    run.engine.backend.send_cmd(command, allow_hazardous=allow)
     run.variables["last_command"] = command
     return "out"
 

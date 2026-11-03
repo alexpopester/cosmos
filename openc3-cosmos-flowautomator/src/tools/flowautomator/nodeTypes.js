@@ -30,6 +30,28 @@ const CONDITION_HINT =
   "COSMOS check syntax or an expression, e.g. INST HEALTH_STATUS TEMP1 > 50 and count < 3. Use tlm_raw('TGT PKT ITEM') for raw values."
 const TEMPLATE_HINT = 'Use {{ expression }} to insert variables or telemetry'
 
+// Execution modes, most cautious first (graph.py MODES)
+export const MODES = [
+  {
+    value: 'crawl',
+    title: 'Crawl',
+    icon: 'mdi-tortoise',
+    hint: 'An operator approves every step before it runs',
+  },
+  {
+    value: 'walk',
+    title: 'Walk',
+    icon: 'mdi-walk',
+    hint: "An operator approves hazardous commands and steps marked 'Ask operator first'",
+  },
+  {
+    value: 'run',
+    title: 'Run',
+    icon: 'mdi-run-fast',
+    hint: "No operator approval. Hazardous commands need the node's 'Allow hazardous'",
+  },
+]
+
 export const NODE_TYPES = {
   trigger_manual: {
     category: 'trigger',

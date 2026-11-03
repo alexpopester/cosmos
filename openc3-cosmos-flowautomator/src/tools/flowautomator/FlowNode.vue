@@ -23,7 +23,19 @@
       <v-icon size="16" class="mr-1">{{ spec.icon }}</v-icon>
       <span class="fa-title">{{ data.config.label || spec.label }}</span>
       <v-spacer />
-      <v-icon v-if="status === 'running'" size="14" class="fa-spin">
+      <v-icon
+        v-if="data.config.require_approval && !spec.trigger"
+        size="14"
+        color="warning"
+        class="mr-1"
+        title="Asks the operator first in walk mode"
+      >
+        mdi-hand-back-right-outline
+      </v-icon>
+      <v-icon v-if="status === 'waiting'" size="14" color="warning">
+        mdi-hand-back-right
+      </v-icon>
+      <v-icon v-else-if="status === 'running'" size="14" class="fa-spin">
         mdi-loading
       </v-icon>
       <v-icon v-else-if="status === 'done'" size="14" color="success">
@@ -132,6 +144,18 @@ export default {
 .fa-node.fa-status-running {
   box-shadow: 0 0 0 3px rgba(77, 172, 255, 0.8);
   animation: fa-pulse 1s ease-in-out infinite alternate;
+}
+.fa-node.fa-status-waiting {
+  box-shadow: 0 0 0 3px rgba(255, 179, 0, 0.9);
+  animation: fa-pulse-waiting 0.8s ease-in-out infinite alternate;
+}
+@keyframes fa-pulse-waiting {
+  from {
+    box-shadow: 0 0 0 2px rgba(255, 179, 0, 0.4);
+  }
+  to {
+    box-shadow: 0 0 0 6px rgba(255, 179, 0, 1);
+  }
 }
 .fa-node.fa-status-done {
   box-shadow: 0 0 0 2px rgba(76, 175, 80, 0.8);

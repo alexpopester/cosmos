@@ -40,6 +40,31 @@ class CosmosBackend:
 
         return get_tlm_cnts([list(packet) for packet in packets], scope=self.scope)
 
+    def cmd_hazardous(self, command):
+        """True if the command, or a state chosen for one of its parameters, is hazardous.
+
+        Same rules as get_cmd_hazardous, which in COSMOS 7.4 raises KeyError for
+        commands that leave out a parameter that has states.
+        """
+        from openc3.models.target_model import TargetModel
+        from openc3.utilities.extract import extract_fields_from_cmd_text
+
+        target_name, cmd_name, params = extract_fields_from_cmd_text(command)
+        params = {k.upper(): v for k, v in params.items()}
+        packet = TargetModel.packet(target_name.upper(), cmd_name.upper(), type="CMD", scope=self.scope)
+        if packet.get("hazardous") is not None:
+            return True
+        for item in packet["items"]:
+            if item["name"] not in params or not item.get("states"):
+                continue
+            value = params[item["name"]]
+            if isinstance(value, str):
+                value = value.replace('"', "").replace("'", "")
+            for state_name, state in item["states"].items():
+                if state.get("hazardous") is not None and value in (state_name, state.get("value")):
+                    return True
+        return False
+
     def send_cmd(self, command, allow_hazardous=False):
         from openc3.api.cmd_api import cmd, cmd_no_hazardous_check
         from openc3.top_level import HazardousError

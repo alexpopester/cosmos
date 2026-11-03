@@ -15,10 +15,11 @@ good enough.
     DELETE <prefix>/api/flows/<id>
     POST   <prefix>/api/flows/<id>/arm
     POST   <prefix>/api/flows/<id>/disarm
-    POST   <prefix>/api/flows/<id>/run        {"trigger_node": id?, "variables": {}?}
+    POST   <prefix>/api/flows/<id>/run        {"trigger_node": id?, "variables": {}?, "mode": mode?}
     GET    <prefix>/api/runs?flow_id=&limit=
     GET    <prefix>/api/runs/<id>
     POST   <prefix>/api/runs/<id>/stop
+    POST   <prefix>/api/runs/<id>/approve     {"approval_id": id, "decision": "go" | "run" | "abort"}
     POST   <prefix>/api/stop_all
 """
 
@@ -58,6 +59,7 @@ def _routes():
         ("GET", r"/api/runs", "list_runs", False),
         ("GET", r"/api/runs/(?P<run_id>[\w-]+)", "get_run", False),
         ("POST", r"/api/runs/(?P<run_id>[\w-]+)/stop", "stop_run", True),
+        ("POST", r"/api/runs/(?P<run_id>[\w-]+)/approve", "approve", True),
         ("POST", r"/api/stop_all", "stop_all", True),
     ]
 
@@ -133,7 +135,12 @@ class FlowApi:
         if not isinstance(variables, dict):
             raise EngineError("variables must be an object")
         return self.engine.trigger(
-            flow_id, payload.get("trigger_node"), payload.get("reason") or "Manual run", variables, manual=True
+            flow_id,
+            payload.get("trigger_node"),
+            payload.get("reason") or "Manual run",
+            variables,
+            manual=True,
+            mode=payload.get("mode"),
         )
 
     def list_runs(self, query, **_):
@@ -146,6 +153,9 @@ class FlowApi:
 
     def get_run(self, run_id, **_):
         return self.engine.get_run(run_id)
+
+    def approve(self, run_id, payload, **_):
+        return self.engine.approve(run_id, payload.get("approval_id"), payload.get("decision"))
 
     def stop_run(self, run_id, **_):
         self.engine.stop_run(run_id)
