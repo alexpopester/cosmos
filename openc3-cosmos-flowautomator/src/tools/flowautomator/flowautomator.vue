@@ -99,9 +99,30 @@
         >
           Save
         </v-btn>
+        <v-chip
+          v-if="flowVersion"
+          size="x-small"
+          label
+          class="mr-2 fa-version-chip"
+          :title="`Version ${flowVersion}. File > History shows every version.`"
+          @click="openHistory()"
+        >
+          v{{ flowVersion }}
+        </v-chip>
         <span v-if="dirty" class="text-caption text-medium-emphasis mr-3">
           unsaved changes
         </span>
+        <v-chip
+          v-if="flowSettings.dry_run"
+          size="x-small"
+          label
+          color="info"
+          variant="flat"
+          class="mr-2 fa-dry-mode-chip"
+          title="Every run of this flow is a dry run: nothing is sent"
+        >
+          DRY-RUN MODE
+        </v-chip>
         <v-divider vertical class="mx-2" />
         <v-switch
           :model-value="armed"
@@ -171,6 +192,18 @@
           @click="runNow(triggerNodes[0] && triggerNodes[0].id)"
         >
           Run now
+        </v-btn>
+        <v-btn
+          size="small"
+          variant="tonal"
+          color="info"
+          prepend-icon="mdi-test-tube"
+          class="mr-2 fa-dry-run-btn"
+          title="Rehearse: check commands without sending them, optionally skipping waits"
+          :disabled="!triggerNodes.length"
+          @click="openRunDialog(manualTrigger, { dry_run: true })"
+        >
+          Dry run
         </v-btn>
         <v-btn
           size="small"
@@ -348,6 +381,7 @@
             @select-run="selectRun"
             @stop-run="stopRun"
             @focus-node="focusNode"
+            @open-version="openHistory"
           />
         </div>
       </div>
@@ -406,29 +440,201 @@
 
     <audit-log v-model="showAudit" />
 
-    <v-dialog v-model="paramDialog.show" max-width="480">
-      <v-card class="fa-param-dialog">
-        <v-card-title>Run '{{ flowSettings.name }}'</v-card-title>
+    <history-dialog
+      v-model="showHistory"
+      :flow-id="flowId"
+      :flow-name="flowSettings.name"
+      :current-version="flowVersion"
+      :initial-version="historyVersion"
+      :start-tab="historyTab"
+      @restored="onRestored"
+    />
+    <run-history
+      v-model="showRunHistory"
+      :flows="flows"
+      @open-run="openRunFromHistory"
+    />
+    <alerts-dialog v-model="showAlerts" />
+
+    <v-dialog v-model="runDialog.show" max-width="560" scrollable>
+      <v-card class="fa-run-dialog">
+        <v-card-title>
+          {{ runDialog.dry_run ? 'Dry run' : 'Run' }} '{{ flowSettings.name }}'
+        </v-card-title>
         <v-card-text>
-          <param-form
-            v-model="paramDialog.values"
-            :parameters="flowSettings.parameters || []"
+          <v-switch
+            v-model="runDialog.dry_run"
+            label="Dry run: check commands but send nothing"
+            color="info"
+            density="compact"
+            hide-details
+            :disabled="flowSettings.dry_run"
+            class="fa-run-dry"
           />
-          <div class="text-caption text-medium-emphasis">
-            Contact variables (contact_aos, contact_los ...) are only set when
-            the run is started by a scheduled activity.
+          <v-switch
+            v-if="runDialog.dry_run"
+            v-model="runDialog.skip_waits"
+            label="Skip waits (waits assume their conditions come true)"
+            color="info"
+            density="compact"
+            hide-details
+            class="fa-run-skip"
+          />
+          <div class="text-caption text-medium-emphasis mb-3">
+            <template v-if="runDialog.dry_run">
+              Commands are checked against the COSMOS command definitions but
+              not sent; scripts, telemetry writes and notifications are skipped.
+              Approvals still ask, so you can rehearse them.
+            </template>
+            <template v-else> A real run: commands are sent. </template>
           </div>
+          <div class="d-flex align-center mb-3">
+            <span class="text-body-2 mr-3">Mode</span>
+            <v-btn-toggle
+              v-model="runDialog.mode"
+              mandatory
+              density="compact"
+              variant="outlined"
+              divided
+              color="primary"
+            >
+              <v-btn
+                v-for="m in modes"
+                :key="m.value"
+                :value="m.value"
+                size="small"
+                :prepend-icon="m.icon"
+              >
+                {{ m.title }}
+              </v-btn>
+            </v-btn-toggle>
+          </div>
+          <template v-if="(flowSettings.parameters || []).length">
+            <div class="text-caption mb-1">Parameters</div>
+            <param-form
+              v-model="runDialog.values"
+              :parameters="flowSettings.parameters || []"
+            />
+          </template>
+          <template v-if="flowSettings.template || usesContact">
+            <div class="text-caption mb-1">Contact</div>
+            <v-btn-toggle
+              v-model="runDialog.contactKind"
+              mandatory
+              density="compact"
+              variant="outlined"
+              divided
+              class="mb-2 fa-run-contact"
+            >
+              <v-btn value="none" size="small">None</v-btn>
+              <v-btn value="simulated" size="small">Simulated</v-btn>
+              <v-btn value="predicted" size="small">A predicted pass</v-btn>
+            </v-btn-toggle>
+            <div v-if="runDialog.contactKind === 'simulated'" class="d-flex">
+              <v-text-field
+                v-model.number="runDialog.aos_in"
+                type="number"
+                label="AOS in (s)"
+                density="compact"
+                variant="outlined"
+                class="mr-2"
+                data-field="sim-aos"
+              />
+              <v-text-field
+                v-model.number="runDialog.duration"
+                type="number"
+                label="Lasting (s)"
+                density="compact"
+                variant="outlined"
+              />
+            </div>
+            <v-select
+              v-if="runDialog.contactKind === 'predicted'"
+              v-model="runDialog.contact_id"
+              :items="contactItems"
+              label="Pass"
+              density="compact"
+              variant="outlined"
+              no-data-text="No passes predicted in the next day"
+            />
+            <div
+              v-if="runDialog.contactKind === 'none'"
+              class="text-caption text-medium-emphasis"
+            >
+              Without a contact, Wait for contact and Contact time left fail and
+              contact_* variables are empty.
+            </div>
+          </template>
         </v-card-text>
         <v-card-actions>
           <v-spacer />
-          <v-btn variant="text" @click="paramDialog.show = false">Cancel</v-btn>
+          <v-btn variant="text" @click="runDialog.show = false">Cancel</v-btn>
+          <v-btn
+            :color="runDialog.dry_run ? 'info' : 'primary'"
+            variant="flat"
+            :prepend-icon="runDialog.dry_run ? 'mdi-test-tube' : 'mdi-play'"
+            class="fa-run-go"
+            @click="runFromDialog"
+          >
+            {{ runDialog.dry_run ? 'Dry run' : 'Run' }}
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <v-dialog v-model="conflict.show" max-width="520">
+      <v-card class="fa-conflict-dialog">
+        <v-card-title class="text-warning">
+          <v-icon class="mr-2">mdi-source-merge</v-icon>Someone else saved this
+          flow
+        </v-card-title>
+        <v-card-text>
+          {{ conflict.message }}. Saving now would overwrite their changes. You
+          can reload their version (your unsaved changes are lost), or save
+          yours over it (theirs stays in the history).
+        </v-card-text>
+        <v-card-actions>
+          <v-btn variant="text" @click="openHistory()">See history</v-btn>
+          <v-spacer />
+          <v-btn variant="text" @click="conflict.show = false">Cancel</v-btn>
+          <v-btn variant="tonal" @click="reloadTheirs">Reload theirs</v-btn>
+          <v-btn
+            color="warning"
+            variant="flat"
+            class="fa-overwrite"
+            @click="overwrite"
+          >
+            Save mine
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <v-dialog v-model="noteDialog.show" max-width="480">
+      <v-card class="fa-note-dialog">
+        <v-card-title>Save with a note</v-card-title>
+        <v-card-text>
+          <v-textarea
+            v-model="noteDialog.note"
+            label="What changed, and why"
+            rows="3"
+            auto-grow
+            autofocus
+            density="compact"
+            variant="outlined"
+            data-field="save-note"
+          />
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" @click="noteDialog.show = false">Cancel</v-btn>
           <v-btn
             color="primary"
             variant="flat"
-            prepend-icon="mdi-play"
-            @click="runWithParams"
+            class="fa-note-save"
+            @click="saveWithNote"
           >
-            Run
+            Save
           </v-btn>
         </v-card-actions>
       </v-card>
@@ -458,6 +664,9 @@ import ApprovalPanel from './ApprovalPanel.vue'
 import ContactsView from './ContactsView.vue'
 import ParamForm from './ParamForm.vue'
 import AuditLog from './AuditLog.vue'
+import HistoryDialog from './HistoryDialog.vue'
+import RunHistory from './RunHistory.vue'
+import AlertsDialog from './AlertsDialog.vue'
 import flowApi, { ROUTE_PREFIX, errorInfo } from './flowApi'
 import {
   CATEGORIES,
@@ -481,6 +690,7 @@ function blankSettings() {
     variables: {},
     template: false,
     parameters: [],
+    dry_run: false,
   }
 }
 
@@ -498,21 +708,34 @@ export default {
     ContactsView,
     ParamForm,
     AuditLog,
+    HistoryDialog,
+    RunHistory,
+    AlertsDialog,
   },
   provide() {
     return { flowContext: this.flowContext }
   },
   setup() {
-    const { screenToFlowCoordinate, fitView, setCenter, findNode } =
+    const { screenToFlowCoordinate, fitView, setCenter, findNode, viewport } =
       useVueFlow('flow-automator')
-    return { screenToFlowCoordinate, fitView, setCenter, findNode }
+    return { screenToFlowCoordinate, fitView, setCenter, findNode, viewport }
   },
   data() {
     return {
       title: 'Flow Automator',
       view: 'flows',
       showAudit: false,
-      paramDialog: { show: false, triggerNode: null, values: {} },
+      demoLoading: false,
+      showHistory: false,
+      showRunHistory: false,
+      showAlerts: false,
+      historyVersion: null,
+      historyTab: 'versions',
+      flowVersion: null,
+      runDialog: { show: false },
+      contactItems: [],
+      conflict: { show: false, message: '' },
+      noteDialog: { show: false, note: '' },
       routePrefix: ROUTE_PREFIX,
       nodeTypes: NODE_TYPES,
       categories: CATEGORIES,
@@ -564,6 +787,13 @@ export default {
               command: this.save,
             },
             {
+              label: 'Save With Note...',
+              icon: 'mdi-content-save-edit',
+              command: () => {
+                this.noteDialog = { show: true, note: '' }
+              },
+            },
+            {
               label: 'Save As Copy',
               icon: 'mdi-content-copy',
               command: this.saveCopy,
@@ -581,9 +811,34 @@ export default {
             },
             { divider: true },
             {
+              label: 'History...',
+              icon: 'mdi-history',
+              command: () => this.openHistory(),
+            },
+            {
+              label: 'Restore Deleted Flow...',
+              icon: 'mdi-delete-restore',
+              command: () => {
+                this.historyVersion = null
+                this.historyTab = 'deleted'
+                this.showHistory = true
+              },
+            },
+            {
               label: 'Delete Flow',
               icon: 'mdi-delete',
               command: this.deleteFlow,
+            },
+            { divider: true },
+            {
+              label: 'Load Demo...',
+              icon: 'mdi-presentation-play',
+              command: this.loadDemo,
+            },
+            {
+              label: 'Remove Demo',
+              icon: 'mdi-presentation',
+              command: this.clearDemo,
             },
           ],
         },
@@ -594,6 +849,20 @@ export default {
               label: 'Fit to Screen',
               icon: 'mdi-fit-to-screen',
               command: () => this.fitView({ padding: 0.2 }),
+            },
+            {
+              label: 'Run History',
+              icon: 'mdi-format-list-bulleted-type',
+              command: () => {
+                this.showRunHistory = true
+              },
+            },
+            {
+              label: 'Alerts...',
+              icon: 'mdi-bell-ring',
+              command: () => {
+                this.showAlerts = true
+              },
             },
             {
               label: 'Audit Log',
@@ -622,6 +891,17 @@ export default {
     },
     triggerNodes() {
       return this.nodes.filter((n) => NODE_TYPES[n.data.kind]?.trigger)
+    },
+    manualTrigger() {
+      const manual = this.triggerNodes.find(
+        (n) => n.data.kind === 'trigger_manual',
+      )
+      return (manual || this.triggerNodes[0])?.id
+    },
+    usesContact() {
+      return this.nodes.some((n) =>
+        ['wait_contact', 'contact_check'].includes(n.data.kind),
+      )
     },
     allApprovals() {
       return this.engineStatus.approvals || []
@@ -656,7 +936,10 @@ export default {
     },
   },
   created() {
-    if (this.$route?.query?.view === 'contacts') this.view = 'contacts'
+    const query = this.$route?.query || {}
+    if (query.view === 'contacts') this.view = 'contacts'
+    // Links from COSMOS notifications and webhooks: ?flow=<id>&run=<id>
+    if (query.flow) this.openRunFromHistory(query.flow, query.run)
     this.refreshFlows()
     this.pollStatus()
     this.timers.push(setInterval(this.pollStatus, STATUS_POLL_MS))
@@ -724,6 +1007,7 @@ export default {
     },
     loadFlow(flow) {
       this.flowId = flow ? flow.id : null
+      this.flowVersion = flow && flow.id ? flow.version || null : null
       this.armed = !!(flow && flow.armed)
       this.flowSettings = flow
         ? {
@@ -735,6 +1019,7 @@ export default {
             variables: { ...(flow.variables || {}) },
             template: !!flow.template,
             parameters: JSON.parse(JSON.stringify(flow.parameters || [])),
+            dry_run: !!flow.dry_run,
           }
         : blankSettings()
       this.nodes = (flow ? flow.nodes : []).map((n) => ({
@@ -771,15 +1056,21 @@ export default {
         })),
       }
     },
-    async save() {
+    // Saves a new version. base_version makes the engine refuse (409) if someone saved in between.
+    async save(options = {}) {
       this.saving = true
       try {
-        const body = this.toEngine()
+        const body = { ...this.toEngine(), note: options.note || '' }
+        if (this.flowId) {
+          body.base_version = this.flowVersion
+          body.force = !!options.force
+        }
         const result = this.flowId
           ? await flowApi.updateFlow(this.flowId, body)
           : await flowApi.createFlow(body)
         const wasArmed = this.armed
         this.flowId = result.flow.id
+        this.flowVersion = result.flow.version
         this.armed = result.flow.armed
         this.dirty = false
         this.applyProblems(result.problems)
@@ -792,6 +1083,10 @@ export default {
         await this.refreshFlows()
         return true
       } catch (error) {
+        if (error?.response?.status === 409) {
+          this.conflict = { show: true, message: errorInfo(error).message }
+          return false
+        }
         this.$notify.serious({
           title: 'Save failed',
           body: errorInfo(error).message,
@@ -801,8 +1096,79 @@ export default {
         this.saving = false
       }
     },
+    saveWithNote() {
+      const note = this.noteDialog.note
+      this.noteDialog.show = false
+      this.save({ note })
+    },
+    async overwrite() {
+      this.conflict.show = false
+      await this.save({ force: true, note: 'Saved over a newer version' })
+    },
+    async reloadTheirs() {
+      this.conflict.show = false
+      const { flow } = await flowApi.getFlow(this.flowId)
+      this.dirty = false
+      this.loadFlow(flow)
+    },
+    async loadDemo() {
+      if (
+        !window.confirm(
+          "Load the demo? It adds 'Demo: ' flows, a rule, DEMOSAT satellites and demo stations, replacing any earlier demo. Your own flows, satellites and stations are left alone. It needs the COSMOS demo plugin (INST target).",
+        )
+      )
+        return
+      try {
+        this.demoLoading = true
+        const summary = await flowApi.loadDemo()
+        await this.refreshFlows()
+        const inSeconds = summary.first_pass?.aos_in
+        this.$notify.normal({
+          title: 'Demo loaded',
+          body: `${summary.flows} flows, ${summary.rule_activities} scheduled downlinks. ${
+            inSeconds
+              ? `DEMOSAT-1 rises over the Demo Pass Site in ${Math.round(inSeconds / 60)} min; its downlink starts a minute before.`
+              : ''
+          }${summary.script_problem ? ` ${summary.script_problem}` : ''}`,
+        })
+        this.view = 'contacts'
+      } catch (error) {
+        this.$notify.serious({
+          title: 'Demo not loaded',
+          body: errorInfo(error).message,
+        })
+      } finally {
+        this.demoLoading = false
+      }
+    },
+    async clearDemo() {
+      if (!window.confirm('Remove everything the demo added?')) return
+      const removed = await flowApi.clearDemo()
+      if (this.flowSettings.name?.startsWith('Demo: ')) this.loadFlow(null)
+      await this.refreshFlows()
+      this.$notify.normal({
+        title: 'Demo removed',
+        body: `${removed.flows} flows, ${removed.satellites} satellites, ${removed.stations} stations`,
+      })
+    },
+    openHistory(version = null) {
+      this.historyVersion = typeof version === 'number' ? version : null
+      this.historyTab = 'versions'
+      this.conflict.show = false
+      this.showHistory = true
+    },
+    onRestored(flow) {
+      this.dirty = false
+      this.loadFlow(flow)
+      this.refreshFlows()
+      this.$notify.normal({
+        title: `Restored as v${flow.version}`,
+        body: `'${flow.name}' is open. Arm it again if it should run on its triggers.`,
+      })
+    },
     async saveCopy() {
       this.flowId = null
+      this.flowVersion = null
       this.armed = false
       this.flowSettings.name = `${this.flowSettings.name} (copy)`
       await this.save()
@@ -810,7 +1176,12 @@ export default {
     async deleteFlow() {
       if (!this.flowId) return
 
-      if (!window.confirm(`Delete flow '${this.flowSettings.name}'?`)) return
+      if (
+        !window.confirm(
+          `Delete flow '${this.flowSettings.name}'? You can restore it from File > Restore Deleted Flow.`,
+        )
+      )
+        return
       await flowApi.deleteFlow(this.flowId)
       this.dirty = false
       this.loadFlow(null)
@@ -878,18 +1249,21 @@ export default {
         this.$notify.caution({ title: 'Not armed', body: info.message })
       }
     },
-    async runNow(triggerNode, variables = null) {
+    async runNow(triggerNode, variables = null, options = null) {
       if (!(await this.ensureSaved())) return
       const parameters = this.flowSettings.parameters || []
-      if (variables === null && parameters.length) {
-        this.paramDialog = { show: true, triggerNode, values: {} }
-        return
+      if (
+        options === null &&
+        (parameters.length || this.flowSettings.template)
+      ) {
+        return this.openRunDialog(triggerNode)
       }
       try {
         const result = await flowApi.run(
           this.flowId,
           triggerNode,
           variables || {},
+          options || {},
         )
         if (result.result === 'started') {
           this.selectRun(result.run.id)
@@ -909,9 +1283,56 @@ export default {
         this.$notify.caution({ title: 'Run not started', body: info.message })
       }
     },
-    runWithParams() {
-      this.paramDialog.show = false
-      this.runNow(this.paramDialog.triggerNode, this.paramDialog.values)
+    async openRunDialog(triggerNode, preset = {}) {
+      if (!(await this.ensureSaved())) return
+      this.runDialog = {
+        show: true,
+        triggerNode,
+        values: {},
+        dry_run: this.flowSettings.dry_run || !!preset.dry_run,
+        skip_waits: true,
+        mode: this.flowSettings.mode || 'run',
+        contactKind:
+          this.flowSettings.template || this.usesContact ? 'simulated' : 'none',
+        aos_in: 30,
+        duration: 300,
+        contact_id: null,
+      }
+      if (this.flowSettings.template || this.usesContact) {
+        const now = Date.now() / 1000
+        flowApi
+          .schedule(Math.floor(now), Math.ceil(now + 86400))
+          .then((s) => {
+            this.contactItems = s.contacts
+              .filter((c) => c.aos > now)
+              .map((c) => ({
+                value: c.id,
+                title: `${c.satellite} / ${c.station} · AOS ${new Date(c.aos * 1000).toISOString().slice(11, 19)} UTC · ${Math.round(c.duration / 60)} min`,
+              }))
+          })
+          .catch(() => {
+            this.contactItems = []
+          })
+      }
+    },
+    runFromDialog() {
+      const d = this.runDialog
+      d.show = false
+      const options = {
+        mode: d.mode,
+        dry_run: d.dry_run,
+        skip_waits: d.dry_run && d.skip_waits,
+      }
+      if (d.contactKind === 'simulated') {
+        options.contact = { aos_in: d.aos_in, duration: d.duration }
+      } else if (d.contactKind === 'predicted' && d.contact_id) {
+        options.contact = { contact_id: d.contact_id }
+      }
+      this.runNow(d.triggerNode, d.values, options)
+    },
+    openRunFromHistory(flowId, runId) {
+      this.showRunHistory = false
+      this.openActivityRun(flowId, runId)
     },
     viewChanged(view) {
       if (view === 'contacts') this.refreshFlows()
@@ -919,14 +1340,14 @@ export default {
     openActivityRun(flowId, runId) {
       this.view = 'flows'
       if (flowId === this.flowId) {
-        this.selectRun(runId)
+        if (runId) this.selectRun(runId)
         return
       }
       this.guardUnsaved(async () => {
         try {
           const { flow } = await flowApi.getFlow(flowId)
           this.loadFlow(flow)
-          this.selectRun(runId)
+          if (runId) this.selectRun(runId)
         } catch (error) {
           this.$notify.caution({
             title: 'Could not open the template',
@@ -1115,10 +1536,8 @@ export default {
       this.addNode(type, { x: position.x - 115, y: position.y - 20 })
     },
     addNode(type, position) {
-      if (!position) {
-        const offset = (this.nodes.length % 8) * 30
-        position = { x: 200 + offset, y: 100 + offset }
-      }
+      const placed = !position
+      if (placed) position = this.freeSpotNear(this.selectedNode)
       const id = `${type}_${Math.random().toString(36).slice(2, 8)}`
       this.nodes = [
         ...this.nodes,
@@ -1131,6 +1550,31 @@ export default {
       ]
       this.selectedNodeId = id
       this.changed()
+      if (placed && this.nodes.length > 1) {
+        // Bring the new node into view at the current zoom
+        this.$nextTick(() =>
+          this.setCenter(position.x + 115, position.y + 40, {
+            zoom: this.viewport?.zoom || 1,
+            duration: 200,
+          }),
+        )
+      }
+    },
+    // Where a double-clicked node goes: right of the selected (or last) node, moving down past
+    // any node already there, so new nodes never land on top of each other
+    freeSpotNear(anchor) {
+      const near = anchor || this.nodes[this.nodes.length - 1]
+      const spot = near
+        ? { x: near.position.x + 280, y: near.position.y }
+        : { x: 200, y: 100 }
+      const taken = (p) =>
+        this.nodes.some(
+          (n) =>
+            Math.abs(n.position.x - p.x) < 240 &&
+            Math.abs(n.position.y - p.y) < 110,
+        )
+      for (let i = 0; i < 50 && taken(spot); i++) spot.y += 120
+      return spot
     },
     makeEdge(edge) {
       const handle = edge.sourceHandle || 'out'

@@ -63,12 +63,27 @@
                 >
                   {{ r.status }}
                 </v-chip>
+                <v-chip
+                  v-if="r.dry_run"
+                  size="x-small"
+                  label
+                  color="info"
+                  class="ml-1"
+                >
+                  dry run
+                </v-chip>
                 <span v-if="r.parent_id" class="text-caption ml-1">
                   sub-flow
                 </span>
               </td>
               <td>{{ duration(r) }}</td>
-              <td class="text-caption">{{ r.reason }}</td>
+              <td class="text-caption fa-run-trigger">
+                <v-icon size="14" class="mr-1">{{ triggerIcon(r) }}</v-icon
+                >{{ triggerText(r) }}
+                <span v-if="r.flow_version" class="text-medium-emphasis">
+                  · v{{ r.flow_version }}
+                </span>
+              </td>
               <td class="text-caption fa-message">{{ r.message }}</td>
               <td>
                 <v-btn
@@ -97,9 +112,28 @@
             >
               {{ run.status }}
             </v-chip>
+            <v-chip
+              v-if="run.dry_run"
+              size="small"
+              label
+              color="info"
+              class="ml-1"
+            >
+              DRY RUN{{ run.skip_waits ? ', waits skipped' : '' }}
+            </v-chip>
             <span class="ml-2 text-caption">
-              {{ run.flow_name }} · {{ run.reason }} ·
-              {{ run.step_count }} steps · {{ run.mode }} mode
+              {{ run.flow_name }}
+              <a
+                v-if="run.flow_version"
+                href="#"
+                class="fa-version-link"
+                title="Show this version in the flow's history"
+                @click.prevent="$emit('open-version', run.flow_version)"
+                >v{{ run.flow_version }}</a
+              >
+              · <v-icon size="14">{{ triggerIcon(run) }}</v-icon>
+              {{ triggerText(run) }} · {{ run.step_count }} steps ·
+              {{ run.mode }} mode
               <span v-if="run.auto_approve">(running the rest)</span>
               <span v-if="run.steps_dropped">
                 ({{ run.steps_dropped }} oldest not shown)
@@ -182,7 +216,7 @@ export default {
     problems: { type: Array, default: () => [] },
     nodeLabel: { type: Function, default: (id) => id },
   },
-  emits: ['select-run', 'stop-run', 'focus-node'],
+  emits: ['select-run', 'stop-run', 'focus-node', 'open-version'],
   data() {
     return { tab: 'runs' }
   },
@@ -194,6 +228,39 @@ export default {
   methods: {
     show(tab) {
       this.tab = tab
+    },
+    triggerIcon(r) {
+      const kind = (r.trigger || {}).kind || 'manual'
+      return (
+        {
+          manual: 'mdi-account',
+          activity: 'mdi-satellite-uplink',
+          rehearsal: 'mdi-satellite-uplink',
+          subflow: 'mdi-sitemap',
+          trigger_tlm: 'mdi-flash',
+          trigger_schedule: 'mdi-clock-outline',
+          trigger_packet: 'mdi-package-down',
+          trigger_limits: 'mdi-alert-octagon',
+        }[kind] || 'mdi-play'
+      )
+    },
+    // What started a run, from its trigger record (engine: FlowRun.trigger_info)
+    triggerText(r) {
+      const t = r.trigger || {}
+      switch (t.kind) {
+        case 'manual':
+          return `${r.dry_run ? 'Dry run' : 'Run'} by ${t.user || 'someone'}${t.simulated_contact ? ' (simulated contact)' : ''}`
+        case 'activity':
+          return `Activity '${t.activity_label}' · ${t.satellite} over ${t.station}${t.rule_name ? ` · rule '${t.rule_name}'` : ''}${t.started_late ? ` · ${Math.round(t.started_late)}s late` : ''}`
+        case 'rehearsal':
+          return `Rehearsal of '${t.activity_label}' by ${t.user || 'someone'}`
+        case 'subflow':
+          return `Called by '${t.parent_flow}'`
+        case undefined:
+          return r.reason
+        default:
+          return `${t.node_label || t.kind}: ${t.detail || ''}${t.queued_at ? ' (queued)' : ''}`
+      }
     },
     statusColor(status) {
       return (

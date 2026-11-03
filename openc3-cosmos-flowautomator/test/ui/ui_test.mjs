@@ -56,7 +56,7 @@ try {
   const engineChip = await page.locator('.fa-toolbar .v-chip').first().innerText()
   check('tool loads with engine online', engineChip.includes('armed'), engineChip.replace(/\s+/g, ' '))
   const paletteCount = await page.locator('.fa-palette-item').count()
-  check('palette shows all 22 node types', paletteCount === 22, `${paletteCount}`)
+  check('palette shows all 26 node types', paletteCount === 26, `${paletteCount}`)
   await shot(page, '01_empty')
 
   // ---- build a flow in the editor ----

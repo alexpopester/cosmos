@@ -217,7 +217,9 @@ def test_run_script_waits_and_reports(engine, backend):
     )
     run = run_to_end(engine, flow)
     assert run["status"] == "success"
-    assert backend.started_scripts == [("INST/procedures/checkout.py", {"N": "6"})]
+    ((filename, environment),) = backend.started_scripts
+    assert filename == "INST/procedures/checkout.py" and environment["N"] == "6"
+    assert environment["FLOW_RESULT_KEY"].startswith("flow_automator__") and environment["FLOW_NAME"] == "Test flow"
     assert run["variables"]["script_state"] == "completed"
 
     backend.scripts[2] = ["running", "crashed"]

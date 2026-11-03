@@ -144,6 +144,11 @@ class ContactPlanner:
 
     # ---- lifecycle ---------------------------------------------------------
 
+    def alert(self, event, title, message="", key=None, path="/tools/flowautomator?view=contacts", **extra):
+        alerts = getattr(self.engine, "alerts", None)
+        if alerts is not None:
+            alerts.emit(event, title, message, path=path, key=key, **extra)
+
     def audit(self, user, action, kind, target_id=None, target_name=None, detail=""):
         audit = getattr(self.engine, "audit", None)
         if audit is not None:
@@ -279,6 +284,13 @@ class ContactPlanner:
                         continue
                     self.pair_contacts[(sat_id, station["id"])] = contacts.get(station["id"], [])
                 if problem:
+                    if problem.startswith("Prediction failed") and self.problems.get(sat_id) != problem:
+                        self.alert(
+                            "prediction_failed",
+                            f"Pass prediction failed for '{sat['name']}'",
+                            problem,
+                            key=f"prediction:{sat_id}:{problem}",
+                        )
                     self.problems[sat_id] = problem
                 else:
                     self.problems.pop(sat_id, None)
@@ -545,6 +557,12 @@ class ContactPlanner:
             self.audit(
                 SCHEDULER, "flagged for review", "activity", activity["id"], activity["label"], activity["message"]
             )
+            self.alert(
+                "activity_needs_review",
+                f"Activity '{activity['label']}' needs review",
+                activity["message"],
+                key=f"review:{activity['id']}:{activity.get('suggested_contact_id')}",
+            )
 
     @staticmethod
     def _contact_ref(contact):
@@ -809,6 +827,8 @@ class ContactPlanner:
         result["parameters"] = copy.deepcopy(activity["flow"].get("parameters") or [])
         current = self.engine.flows.get(activity["template_id"])
         result["template_missing"] = current is None
+        result["template_version"] = activity["flow"].get("version")
+        result["template_current_version"] = current.get("version") if current else None
         result["template_changed"] = current is not None and current.get("updated_at") != activity.get(
             "template_updated_at"
         )
@@ -997,6 +1017,12 @@ class ContactPlanner:
             self.settings["paused_reason"] = reason if paused else ""
             self.store.save_record("planner_settings", "settings", self.settings)
         self.engine.log("warn" if paused else "info", f"Contact scheduler {'paused' if paused else 'resumed'}")
+        self.alert(
+            "scheduler_paused",
+            f"Contact scheduler {'paused' if paused else 'resumed'}",
+            reason if paused else "",
+            key=f"paused:{paused}:{self.clock()}",
+        )
         return dict(self.settings)
 
     def tick(self):
@@ -1008,6 +1034,7 @@ class ContactPlanner:
         self._poll_sources(now)
         if now - self.last_pruned >= 300:
             self.prune(now)
+            self._check_stale_tles(now)
         if now - self.last_rules >= 60:
             self.last_rules = now
             with self.lock:
@@ -1051,6 +1078,23 @@ class ContactPlanner:
                 run.message = "Stopped at LOS"
                 run.stop()
 
+    def _check_stale_tles(self, now):
+        """Alert once per TLE when it goes stale."""
+        with self.lock:
+            stale = [
+                s
+                for s in self.satellites.values()
+                if s.get("enabled", True) and s.get("tle") and (now - s["tle"]["epoch"]) / 86400 > self.stale_tle_days
+            ]
+        for sat in stale:
+            age = (now - sat["tle"]["epoch"]) / 86400
+            self.alert(
+                "tle_stale",
+                f"TLE for '{sat['name']}' is {age:.1f} days old",
+                "Its predicted passes are getting less accurate; paste a newer TLE",
+                key=f"tle_stale:{sat['id']}:{sat['tle']['epoch']}",
+            )
+
     def prune(self, now=None):
         """Delete finished activities whose contact ended more than the retention period ago."""
         now = self.clock() if now is None else now
@@ -1088,22 +1132,91 @@ class ContactPlanner:
                 self.problems[sat["id"]] = f"TLE source {source.kind}: {error}"
 
     def run_variables(self, activity, now):
-        contact = activity["contact"]
         variables, _problems = fill_parameters(activity["flow"].get("parameters"), activity["params"])
-        variables.update(
-            contact_id=contact["id"],
-            contact_satellite=contact["satellite"],
-            contact_target=contact.get("target", ""),
-            contact_station=contact["station"],
-            contact_aos=contact["aos"],
-            contact_tca=contact["tca"],
-            contact_los=contact["los"],
-            contact_duration=contact["duration"],
-            contact_max_elevation=contact["max_elevation"],
-            activity_id=activity["id"],
-            activity_label=activity["label"],
-        )
+        variables.update(self._contact_variables(activity["contact"]))
+        variables.update(activity_id=activity["id"], activity_label=activity["label"])
         return variables
+
+    @staticmethod
+    def _contact_variables(contact):
+        return {
+            "contact_id": contact["id"],
+            "contact_satellite": contact["satellite"],
+            "contact_target": contact.get("target", ""),
+            "contact_station": contact["station"],
+            "contact_aos": contact["aos"],
+            "contact_tca": contact["tca"],
+            "contact_los": contact["los"],
+            "contact_duration": contact["duration"],
+            "contact_max_elevation": contact["max_elevation"],
+        }
+
+    def contact_variables(self, spec):
+        """Contact variables for a manual run: a predicted contact ({"contact_id"}) or a simulated one.
+
+        A simulated contact starts ``aos_in`` seconds from now (default 60) and lasts ``duration`` (300).
+        """
+        if not isinstance(spec, dict):
+            raise PlannerError("contact must be an object")
+        if spec.get("contact_id"):
+            with self.lock:
+                contact = self.contacts_by_id.get(spec["contact_id"])
+            if contact is None:
+                raise PlannerNotFoundError(f"Contact '{spec['contact_id']}' is not predicted")
+            return self._contact_variables(contact)
+        now = self.clock()
+        aos = now + _number(spec.get("aos_in", 60), "AOS in", -86400, 86400)
+        duration = _number(spec.get("duration", 300), "Duration", 1, 86400)
+        return self._contact_variables(
+            {
+                "id": f"simulated-{int(aos)}",
+                "satellite": str(spec.get("satellite") or "SIMULATED"),
+                "target": str(spec.get("target") or ""),
+                "station": str(spec.get("station") or "SIMULATED"),
+                "aos": aos,
+                "tca": aos + duration / 2,
+                "los": aos + duration,
+                "duration": duration,
+                "max_elevation": _number(spec.get("max_elevation", 45), "Max elevation", 0, 90),
+            }
+        )
+
+    def rehearse(self, activity_id, user=None, skip_waits=True):
+        """Dry run an activity's flow with its parameters and real contact, without touching the activity."""
+        with self.lock:
+            activity = self._activity(activity_id)
+            flow = copy.deepcopy(activity["flow"])
+            variables = self.run_variables(activity, self.clock())
+            info = self._trigger_info(activity) | {"kind": "rehearsal", "user": user_name(user)}
+        return self.engine.start_scheduled_run(
+            flow,
+            f"Rehearsal of '{activity['label']}' by {user_name(user)}",
+            variables,
+            activity["mode"],
+            trigger_info=info,
+            dry_run=True,
+            skip_waits=bool(skip_waits),
+        )
+
+    def _trigger_info(self, activity):
+        contact = activity["contact"]
+        rule = self.rules.get(activity.get("rule_id")) if activity.get("rule_id") else None
+        return {
+            "kind": "activity",
+            "activity_id": activity["id"],
+            "activity_label": activity["label"],
+            "scheduled_by": activity.get("created_by"),
+            "rule_id": activity.get("rule_id"),
+            "rule_name": rule["name"] if rule else None,
+            "contact_id": contact["id"],
+            "satellite": contact["satellite"],
+            "station": contact["station"],
+            "aos": contact["aos"],
+            "los": contact["los"],
+            "scheduled_start": activity_start(activity),
+            "template_version": activity["flow"].get("version"),
+            "detail": f"Scheduled: {self._when(activity)}",
+        }
 
     def _launch(self, activity, now):
         contact = activity["contact"]
@@ -1120,6 +1233,8 @@ class ContactPlanner:
                     activity["mode"],
                     approval_deadline=contact["los"] - activity["approval_margin"],
                     activity_id=activity["id"],
+                    trigger_info=self._trigger_info(activity)
+                    | {"started_late": max(0.0, now - activity_start(activity))},
                 )
             except Exception as error:  # noqa: BLE001
                 self._finish(activity, "failed", f"Could not start: {error}", now)
@@ -1133,6 +1248,13 @@ class ContactPlanner:
             activity["runs"] = (list(activity.get("runs") or []) + [run.id])[-10:]
             self._save("activities", activity)
         self.audit(SCHEDULER, "started", "activity", activity["id"], activity["label"], f"run {run.id}")
+        self.alert(
+            "activity_started",
+            f"Activity '{activity['label']}' started",
+            self._when(activity),
+            key=f"activity_started:{activity['id']}:{run.id}",
+            path=f"/tools/flowautomator?flow={activity['template_id']}&run={run.id}",
+        )
 
     def on_run_finished(self, run):
         """Called by the engine when a run that belongs to an activity ends."""
@@ -1153,6 +1275,18 @@ class ContactPlanner:
         self._save("activities", activity)
         if status in ("missed", "failed", "done", "stopped"):
             self.audit(SCHEDULER, status, "activity", activity.get("id"), activity.get("label"), activity["message"])
+        event = {"missed": "activity_missed", "failed": "activity_failed", "done": "activity_done"}.get(status)
+        if event:
+            path = "/tools/flowautomator?view=contacts"
+            if activity.get("run_id") and status != "missed":
+                path = f"/tools/flowautomator?flow={activity.get('template_id')}&run={activity['run_id']}"
+            self.alert(
+                event,
+                f"Activity '{activity.get('label')}' {status}",
+                f"{activity['message']} ({activity['contact']['satellite']} over {activity['contact']['station']})",
+                key=f"{event}:{activity.get('id')}",
+                path=path,
+            )
 
     # ---- overview ----------------------------------------------------------
 

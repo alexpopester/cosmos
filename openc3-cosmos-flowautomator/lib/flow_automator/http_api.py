@@ -9,21 +9,39 @@ which every write records in the audit log.
     GET    <prefix>/api/health
     GET    <prefix>/api/status
     GET    <prefix>/api/whoami                   the user the token belongs to
+    POST   <prefix>/api/demo                     reset and load the demo (needs the COSMOS demo plugin's INST)
+    DELETE <prefix>/api/demo                     remove the demo
     GET    <prefix>/api/audit?limit=&kind=&user=&target_id=&search=   who did what, newest first
     GET    <prefix>/api/flows
     POST   <prefix>/api/flows                 create
     POST   <prefix>/api/validate              check a flow without saving
     GET    <prefix>/api/flows/<id>
-    PUT    <prefix>/api/flows/<id>            replace (never changes armed)
+    PUT    <prefix>/api/flows/<id>            replace (never changes armed); {"note", "base_version", "force"}
+                                               409 if someone saved a newer version since base_version
     DELETE <prefix>/api/flows/<id>
     POST   <prefix>/api/flows/<id>/arm
     POST   <prefix>/api/flows/<id>/disarm
-    POST   <prefix>/api/flows/<id>/run        {"trigger_node": id?, "variables": {}?, "mode": mode?}
+    POST   <prefix>/api/flows/<id>/run        {"trigger_node"?, "variables"?, "mode"?, "dry_run"?, "skip_waits"?,
+                                               "contact"?: {"contact_id"} or {"aos_in", "duration", ...}}
     GET    <prefix>/api/runs?flow_id=&limit=
     GET    <prefix>/api/runs/<id>
     POST   <prefix>/api/runs/<id>/stop
     POST   <prefix>/api/runs/<id>/approve     {"approval_id": id, "decision": "go" | "run" | "abort"}
     POST   <prefix>/api/stop_all                 also pauses the contact scheduler
+
+  History:
+    GET    <prefix>/api/flows/<id>/versions      every saved version (who, when, note, what changed)
+    GET    <prefix>/api/flows/<id>/versions/<n>  one version, with the whole flow
+    GET    <prefix>/api/flows/<id>/diff?from=<n>&to=<m|current>
+    POST   <prefix>/api/flows/<id>/versions/<n>/restore   saves version n as a new version
+    GET    <prefix>/api/flows/deleted
+    POST   <prefix>/api/flows/<id>/undelete
+    GET    <prefix>/api/runs?flow_id=&status=&trigger=&user=&activity_id=&dry_run=&since=&until=&search=
+
+  Alerts:
+    GET    <prefix>/api/alerts                   settings (webhook URLs masked)
+    PUT    <prefix>/api/alerts
+    POST   <prefix>/api/alerts/test              {"webhook_id"?}: none tests COSMOS notifications
 
   Contacts (see contacts.py):
     GET    <prefix>/api/schedule                 satellites, stations, contacts, activities
@@ -56,6 +74,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+from .alerts import AlertError
 from .audit import user_name
 from .contacts import PlannerError
 from .engine import EngineError
@@ -77,10 +96,18 @@ def _routes():
         ("GET", r"/api/health", "health", None),
         ("GET", r"/api/status", "status", False),
         ("GET", r"/api/whoami", "whoami", False),
+        ("POST", r"/api/demo", "load_demo", True),
+        ("DELETE", r"/api/demo", "clear_demo", True),
         ("GET", r"/api/audit", "audit_log", False),
         ("GET", r"/api/flows", "list_flows", False),
         ("POST", r"/api/flows", "create_flow", True),
         ("POST", r"/api/validate", "validate", False),
+        ("GET", r"/api/flows/deleted", "list_deleted", False),
+        ("POST", r"/api/flows/(?P<flow_id>[\w-]+)/undelete", "undelete_flow", True),
+        ("GET", r"/api/flows/(?P<flow_id>[\w-]+)/versions", "list_versions", False),
+        ("GET", r"/api/flows/(?P<flow_id>[\w-]+)/versions/(?P<version>\d+)", "get_version", False),
+        ("GET", r"/api/flows/(?P<flow_id>[\w-]+)/diff", "diff_versions", False),
+        ("POST", r"/api/flows/(?P<flow_id>[\w-]+)/versions/(?P<version>\d+)/restore", "restore_version", True),
         ("GET", r"/api/flows/(?P<flow_id>[\w-]+)", "get_flow", False),
         ("PUT", r"/api/flows/(?P<flow_id>[\w-]+)", "update_flow", True),
         ("DELETE", r"/api/flows/(?P<flow_id>[\w-]+)", "delete_flow", True),
@@ -108,6 +135,10 @@ def _routes():
         ("DELETE", r"/api/activities/(?P<item_id>[\w-]+)", "delete_activity", True),
         ("POST", r"/api/activities/(?P<item_id>[\w-]+)/accept", "accept_activity", True),
         ("POST", r"/api/activities/(?P<item_id>[\w-]+)/refresh_template", "refresh_template", True),
+        ("POST", r"/api/activities/(?P<item_id>[\w-]+)/rehearse", "rehearse_activity", True),
+        ("GET", r"/api/alerts", "get_alerts", False),
+        ("PUT", r"/api/alerts", "save_alerts", True),
+        ("POST", r"/api/alerts/test", "test_alert", True),
         ("GET", r"/api/rules", "list_rules", False),
         ("POST", r"/api/rules", "create_rule", True),
         ("PUT", r"/api/rules/(?P<item_id>[\w-]+)", "update_rule", True),
@@ -141,8 +172,12 @@ class FlowApi:
             except AuthError as error:
                 return error.status, {"error": str(error)}
             except EngineError as error:
-                return error.status, {"error": str(error), "problems": error.problems}
+                body = {"error": str(error), "problems": error.problems}
+                body.update(getattr(error, "details", {}))
+                return error.status, body
             except PlannerError as error:
+                return error.status, {"error": str(error), "problems": []}
+            except AlertError as error:
                 return error.status, {"error": str(error), "problems": []}
             except json.JSONDecodeError as error:
                 return 400, {"error": f"Invalid JSON: {error}"}
@@ -172,9 +207,17 @@ class FlowApi:
     def list_flows(self, **_):
         return self.engine.list_flows()
 
+    @staticmethod
+    def _save_options(payload):
+        flow = {k: v for k, v in payload.items() if k not in ("note", "base_version", "force")}
+        return flow, payload.get("note") or "", payload.get("base_version"), bool(payload.get("force"))
+
     def create_flow(self, payload, user, **_):
-        flow, problems = self.engine.save_flow(payload)
-        self._audit(user, "created", "flow", flow["id"], flow["name"], f"{len(flow['nodes'])} nodes")
+        flow, note, _base, _force = self._save_options(payload)
+        flow, problems = self.engine.save_flow(flow, user=user, note=note)
+        self._audit(
+            user, "created", "flow", flow["id"], flow["name"], f"v{flow['version']}, {len(flow['nodes'])} nodes"
+        )
         return {"flow": flow, "problems": problems}
 
     def validate(self, payload, **_):
@@ -185,17 +228,54 @@ class FlowApi:
         return {"flow": flow, "problems": validate_flow(flow)}
 
     def update_flow(self, flow_id, payload, user, **_):
-        flow, problems = self.engine.save_flow(payload, flow_id)
-        detail = f"{len(flow['nodes'])} nodes, mode {flow['mode']}" + (
-            f", {len(problems)} problems" if problems else ""
-        )
-        self._audit(user, "saved", "flow", flow_id, flow["name"], detail)
+        body, note, base, force = self._save_options(payload)
+        before = self.engine.flows.get(flow_id, {}).get("version")
+        flow, problems = self.engine.save_flow(body, flow_id, user=user, note=note, base_version=base, force=force)
+        if flow.get("version") != before:
+            latest = self.engine.versions.latest(flow_id) or {}
+            detail = f"v{flow['version']}: {latest.get('summary', '')}" + (f" ({note})" if note else "")
+            if force and base is not None and int(base) != int(before or 0):
+                detail += f" (overwrote v{before} from v{base})"
+            self._audit(user, "saved", "flow", flow_id, flow["name"], detail)
+        return {"flow": flow, "problems": problems}
+
+    def list_versions(self, flow_id, **_):
+        return self.engine.list_versions(flow_id)
+
+    def get_version(self, flow_id, version, **_):
+        return self.engine.get_version(flow_id, int(version))
+
+    def diff_versions(self, flow_id, query, **_):
+        def number(name):
+            value = (query.get(name) or [None])[0]
+            if value in (None, "", "current"):
+                return None
+            try:
+                return int(value)
+            except ValueError:
+                raise EngineError(f"{name} must be a version number") from None
+
+        old = number("from")
+        if old is None:
+            raise EngineError("from is required")
+        return self.engine.diff_versions(flow_id, old, number("to"))
+
+    def restore_version(self, flow_id, version, payload, user, **_):
+        flow, problems = self.engine.restore_version(flow_id, int(version), user, payload.get("note") or "")
+        self._audit(user, "restored", "flow", flow_id, flow["name"], f"v{version} as v{flow['version']}")
+        return {"flow": flow, "problems": problems}
+
+    def list_deleted(self, **_):
+        return self.engine.list_deleted()
+
+    def undelete_flow(self, flow_id, user, **_):
+        flow, problems = self.engine.restore_deleted(flow_id, user)
+        self._audit(user, "restored deleted", "flow", flow_id, flow["name"], f"as v{flow['version']}")
         return {"flow": flow, "problems": problems}
 
     def delete_flow(self, flow_id, user, **_):
-        name = self._flow_name(flow_id)
-        self.engine.delete_flow(flow_id)
-        self._audit(user, "deleted", "flow", flow_id, name)
+        flow = self.engine.delete_flow(flow_id, user)
+        self._audit(user, "deleted", "flow", flow_id, flow.get("name"), f"last version v{flow.get('version')}")
         return {"deleted": flow_id}
 
     def arm(self, flow_id, user, **_):
@@ -212,28 +292,58 @@ class FlowApi:
         variables = payload.get("variables") or {}
         if not isinstance(variables, dict):
             raise EngineError("variables must be an object")
+        dry_run = bool(payload.get("dry_run"))
+        info = {"kind": "manual", "user": user_name(user)}
+        contact = payload.get("contact")
+        if contact:
+            variables = {**self.engine.planner.contact_variables(contact), **variables}
+            info["simulated_contact"] = variables.get("contact_id")
+        kind = "Dry run" if dry_run else "Manual run"
         result = self.engine.trigger(
             flow_id,
             payload.get("trigger_node"),
-            payload.get("reason") or f"Manual run by {user_name(user)}",
+            payload.get("reason") or f"{kind} by {user_name(user)}",
             variables,
             manual=True,
             mode=payload.get("mode"),
+            trigger_info=info,
+            dry_run=dry_run,
+            skip_waits=bool(payload.get("skip_waits")),
         )
         run = result.get("run") or {}
-        detail = f"run {run['id']} ({run.get('mode')})" if run else result.get("message", result["result"])
-        self._audit(
-            user, "ran" if run else f"run {result['result']}", "flow", flow_id, self._flow_name(flow_id), detail
-        )
+        if run:
+            extra = ", dry run" if run.get("dry_run") else ""
+            detail = f"run {run['id']} ({run.get('mode')}{extra}, v{run.get('flow_version')})"
+            action = "dry ran" if run.get("dry_run") else "ran"
+        else:
+            detail = result.get("message", result["result"])
+            action = f"run {result['result']}"
+        self._audit(user, action, "flow", flow_id, self._flow_name(flow_id), detail)
         return result
 
     def list_runs(self, query, **_):
-        flow_id = (query.get("flow_id") or [None])[0]
+        def arg(name):
+            return (query.get(name) or [None])[0]
+
         try:
-            limit = max(1, min(500, int((query.get("limit") or [50])[0])))
+            limit = max(1, min(2000, int(arg("limit") or 50)))
+            since = float(arg("since")) if arg("since") else None
+            until = float(arg("until")) if arg("until") else None
         except ValueError:
-            raise EngineError("limit must be a number") from None
-        return self.engine.list_runs(flow_id, limit)
+            raise EngineError("limit, since and until must be numbers") from None
+        dry = arg("dry_run")
+        return self.engine.list_runs(
+            arg("flow_id"),
+            limit,
+            status=arg("status"),
+            trigger=arg("trigger"),
+            user=arg("user"),
+            activity_id=arg("activity_id"),
+            dry_run=None if dry in (None, "") else dry.lower() in ("1", "true", "yes"),
+            since=since,
+            until=until,
+            search=arg("search"),
+        )
 
     def get_run(self, run_id, **_):
         return self.engine.get_run(run_id)
@@ -241,7 +351,9 @@ class FlowApi:
     def approve(self, run_id, payload, user, **_):
         run = self.engine.runs.get(run_id)
         pending = {a["id"]: a for a in run.pending_approvals()} if run else {}
-        result = self.engine.approve(run_id, payload.get("approval_id"), payload.get("decision"), user)
+        result = self.engine.approve(
+            run_id, payload.get("approval_id"), payload.get("decision"), user, payload.get("value")
+        )
         approval = pending.get(payload.get("approval_id")) or {}
         detail = f"'{payload.get('decision')}' at '{approval.get('label', '?')}' in run {run_id}"
         if approval.get("reason"):
@@ -270,7 +382,7 @@ class FlowApi:
         return {"stopping": run_id}
 
     def stop_all(self, user, **_):
-        result = self.engine.stop_all()
+        result = self.engine.stop_all(user)
         self._audit(
             user, "STOP ALL", "engine", detail=f"disarmed {result['disarmed']}, stopped {result['stopped']} runs"
         )
@@ -404,6 +516,44 @@ class FlowApi:
         activity = self.planner.refresh_template(item_id, user=user)
         self._audit(user, "updated from template", "activity", item_id, activity["label"])
         return {"activity": activity}
+
+    def rehearse_activity(self, item_id, payload, user, **_):
+        run = self.planner.rehearse(item_id, user=user, skip_waits=payload.get("skip_waits", True))
+        activity = self.planner.activities.get(item_id) or {}
+        self._audit(user, "rehearsed", "activity", item_id, activity.get("label"), f"dry run {run.id}")
+        return {"run": run.as_json(include_steps=False)}
+
+    def load_demo(self, user, **_):
+        from .demo import load_demo
+
+        try:
+            summary = load_demo(self.engine, user=user_name(user))
+        except RuntimeError as error:
+            raise EngineError(str(error)) from None
+        self._audit(user, "loaded the demo", "engine", detail=str(summary["first_pass"]))
+        return summary
+
+    def clear_demo(self, user, **_):
+        from .demo import clear_demo
+
+        removed = clear_demo(self.engine)
+        self._audit(user, "removed the demo", "engine", detail=str(removed))
+        return removed
+
+    def get_alerts(self, **_):
+        return self.engine.alerts.settings_json()
+
+    def save_alerts(self, payload, user, **_):
+        result = self.engine.alerts.save_settings(payload)
+        hooks = ", ".join(h["name"] for h in result["webhooks"]) or "no webhooks"
+        cosmos = "COSMOS notifications " + ("on" if result["cosmos"]["enabled"] else "off")
+        self._audit(user, "saved", "alerts", detail=f"{cosmos}; {hooks}")
+        return result
+
+    def test_alert(self, payload, user, **_):
+        result = self.engine.alerts.test(payload.get("webhook_id"))
+        self._audit(user, "tested", "alerts", detail=str(payload.get("webhook_id") or "COSMOS notifications"))
+        return result
 
     def list_rules(self, **_):
         return self.planner.list_rules()

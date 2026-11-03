@@ -9,9 +9,27 @@ A template is an ordinary flow with ``"template": true`` and a parameter list::
 
 Each parameter becomes a run variable of the same name, so nodes use it as
 ``{{ rate }}`` in templates or ``rate`` in expressions.
+
+Constraints, checked whenever a run or activity is started or scheduled:
+
+* string: ``pattern`` (a regular expression the whole value must match) and
+  ``max_length``
+* number: ``min``, ``max`` and ``integer``
+
+The ``item`` type is a telemetry item ("TGT PKT ITEM", picked in the tool),
+``command`` a whole command ("TGT CMD with ..."), and ``list`` a list of
+strings (entered comma separated). Use an item parameter in a condition as
+``tlm(item)``, a command parameter in a Send command node as
+``{{ command }}`` with Allow raw values on.
+
+Prefer choice or number parameters for anything that goes into a command; a
+command also refuses values that would change it (see runner.render_command).
 """
 
-PARAM_TYPES = ("string", "number", "boolean", "choice")
+import re
+
+
+PARAM_TYPES = ("string", "number", "boolean", "choice", "item", "command", "list")
 # Set by the contact planner for runs of scheduled activities. Other runs of a
 # template get them as None, so templates fail with "this run has no contact"
 # rather than "unknown variable".
@@ -57,6 +75,23 @@ def check_parameters(parameters):
             continue
         if kind == "choice" and not [c for c in param.get("choices") or [] if str(c) != ""]:
             messages.append(f"{label}: a choice needs at least one option")
+        if param.get("pattern") not in (None, ""):
+            try:
+                re.compile(str(param["pattern"]))
+            except re.error as error:
+                messages.append(f"{label}: pattern is not a valid regular expression ({error})")
+        for key in ("min", "max", "max_length"):
+            if param.get(key) not in (None, ""):
+                try:
+                    float(param[key])
+                except (TypeError, ValueError):
+                    messages.append(f"{label}: {key} must be a number")
+        try:
+            low, high = param.get("min"), param.get("max")
+            if low not in (None, "") and high not in (None, "") and float(low) > float(high):
+                messages.append(f"{label}: min is more than max")
+        except (TypeError, ValueError):
+            pass
         if param.get("default") not in (None, ""):
             try:
                 coerce_value(param, param["default"])
@@ -65,18 +100,37 @@ def check_parameters(parameters):
     return messages
 
 
+def _limit(param, key):
+    value = param.get(key)
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def coerce_value(param, value):
     kind = param.get("type", "string")
     if kind == "number":
         if isinstance(value, bool):
             raise ValueError("must be a number")
-        if isinstance(value, (int, float)):
-            return value
-        try:
-            text = str(value).strip()
-            return int(text) if text.lstrip("+-").isdigit() else float(text)
-        except ValueError:
-            raise ValueError(f"'{value}' is not a number") from None
+        if not isinstance(value, (int, float)):
+            try:
+                text = str(value).strip()
+                value = int(text) if text.lstrip("+-").isdigit() else float(text)
+            except ValueError:
+                raise ValueError(f"'{value}' is not a number") from None
+        if value != value or value in (float("inf"), float("-inf")):
+            raise ValueError("must be a finite number")
+        if param.get("integer") and float(value) != int(value):
+            raise ValueError(f"{value} must be a whole number")
+        low, high = _limit(param, "min"), _limit(param, "max")
+        if low is not None and value < low:
+            raise ValueError(f"{value} is below the minimum {low:g}")
+        if high is not None and value > high:
+            raise ValueError(f"{value} is above the maximum {high:g}")
+        return int(value) if param.get("integer") else value
     if kind == "boolean":
         if isinstance(value, bool):
             return value
@@ -86,12 +140,31 @@ def coerce_value(param, value):
         if text in ("false", "no", "0", "off"):
             return False
         raise ValueError(f"'{value}' is not true or false")
+    if kind == "item":
+        parts = str(value).replace("__", " ").split()
+        if len(parts) != 3:
+            raise ValueError(f"'{value}' is not a telemetry item (TARGET PACKET ITEM)")
+        return " ".join(p.upper() for p in parts)
+    if kind == "command":
+        text = str(value).strip()
+        if len(text.split()) < 2 or "\n" in text:
+            raise ValueError(f"'{value}' is not a command (TARGET COMMAND with ...)")
+        return text
+    if kind == "list":
+        items = value if isinstance(value, list) else str(value).split(",")
+        return [str(v).strip() for v in items if str(v).strip() != ""]
     if kind == "choice":
         choices = [str(c) for c in param.get("choices") or []]
         if str(value) not in choices:
             raise ValueError(f"'{value}' is not one of {', '.join(choices)}")
         return str(value)
-    return str(value)
+    text = str(value)
+    max_length = _limit(param, "max_length")
+    if max_length is not None and len(text) > max_length:
+        raise ValueError(f"is longer than {max_length:g} characters")
+    if param.get("pattern") not in (None, "") and not re.fullmatch(str(param["pattern"]), text):
+        raise ValueError(f"'{text}' doesn't match the pattern {param['pattern']}")
+    return text
 
 
 def fill_parameters(parameters, values):

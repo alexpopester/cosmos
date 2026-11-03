@@ -11,6 +11,13 @@ const check = (name, ok, detail = '') => {
 const n = (id, type, x, y, data = {}) => ({ id, type, position: { x, y }, data })
 const e = (s, t, h = 'out') => ({ id: `${s}-${h}-${t}`, source: s, sourceHandle: h, target: t })
 
+// COSMOS alert toasts (the engine's alerts) sit over the toolbar until acknowledged, like an operator would
+const ackToasts = async (page) => {
+  for (const button of await page.locator('button:has-text("Acknowledge")').all()) {
+    await button.click().catch(() => {})
+  }
+}
+
 const browser = await chromium.launch()
 const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } })
 const consoleErrors = []
@@ -57,6 +64,12 @@ const chain = (count, name) => {
   }
   return { name, variables: { c: 0 }, nodes, edges }
 }
+
+// This test isn't about alerts (history_test.mjs is): keep COSMOS alert toasts from covering the toolbar
+const [, savedAlerts] = await api('GET', '/alerts')
+await api('PUT', '/alerts', { ...savedAlerts, cosmos: { ...savedAlerts.cosmos, enabled: false } })
+await page.waitForTimeout(1500)
+await ackToasts(page)
 
 try {
   // ---- engine: big chains ----
@@ -150,6 +163,8 @@ try {
     check('list 200+ flows', listMs < 3000, `${listMs.toFixed(0)} ms`)
     const t0 = performance.now()
     const [, stop] = await api('POST', '/stop_all', {})
+    await page.waitForTimeout(1500)
+    await ackToasts(page)
     check('STOP ALL with 200 armed', stop.disarmed === 200, `${(performance.now() - t0).toFixed(0)} ms`)
   }
 
@@ -190,7 +205,8 @@ try {
     )
     // Run from the UI and wait for the run log to show success
     const t4 = performance.now()
-    await page.getByRole('button', { name: 'Run now' }).click()
+    await ackToasts(page)
+  await page.getByRole('button', { name: 'Run now' }).click()
     await page.locator('.fa-steps .v-chip:has-text("success")').first().waitFor({ timeout: 60000 })
     const done = await page.locator('.fa-node.fa-status-done').count()
     check(`UI run + highlight ${size}-node flow`, done >= Math.min(size, 999), `${(performance.now() - t4).toFixed(0)} ms, ${done} nodes highlighted`)
@@ -199,6 +215,7 @@ try {
   check('unexpected error', false, error.message.split('\n')[0])
   await page.screenshot({ path: `${SHOTS}/large_error.png` }).catch(() => {})
 } finally {
+  await api('PUT', '/alerts', savedAlerts).catch(() => {})
   await api('POST', '/stop_all', {}).catch(() => {})
   for (const id of created) await api('DELETE', `/flows/${id}`).catch(() => {})
   await browser.close()

@@ -61,6 +61,57 @@
           @update:model-value="changed"
         />
       </div>
+      <div v-if="p.type === 'string'" class="d-flex mt-1">
+        <v-text-field
+          v-model="p.pattern"
+          placeholder="pattern (regex), e.g. [A-Z0-9_]+"
+          density="compact"
+          variant="outlined"
+          hide-details
+          class="mr-1 fa-mono"
+          @update:model-value="changed"
+        />
+        <v-text-field
+          v-model="p.max_length"
+          placeholder="max length"
+          type="number"
+          density="compact"
+          variant="outlined"
+          hide-details
+          class="fa-param-small"
+          @update:model-value="changed"
+        />
+      </div>
+      <div v-if="p.type === 'number'" class="d-flex align-center mt-1">
+        <v-text-field
+          v-model="p.min"
+          placeholder="min"
+          type="number"
+          density="compact"
+          variant="outlined"
+          hide-details
+          class="mr-1 fa-param-small"
+          @update:model-value="changed"
+        />
+        <v-text-field
+          v-model="p.max"
+          placeholder="max"
+          type="number"
+          density="compact"
+          variant="outlined"
+          hide-details
+          class="mr-1 fa-param-small"
+          @update:model-value="changed"
+        />
+        <v-checkbox
+          v-model="p.integer"
+          label="Whole"
+          density="compact"
+          hide-details
+          class="flex-grow-0"
+          @update:model-value="changed"
+        />
+      </div>
       <v-text-field
         v-model="p.description"
         placeholder="description (shown when scheduling)"
@@ -88,7 +139,17 @@ export default {
   },
   emits: ['update:modelValue'],
   data() {
-    return { types: ['string', 'number', 'boolean', 'choice'] }
+    return {
+      types: [
+        { title: 'text', value: 'string' },
+        { title: 'number', value: 'number' },
+        { title: 'yes/no', value: 'boolean' },
+        { title: 'choice', value: 'choice' },
+        { title: 'telemetry item', value: 'item' },
+        { title: 'command', value: 'command' },
+        { title: 'list', value: 'list' },
+      ],
+    }
   },
   methods: {
     changed() {
@@ -127,6 +188,9 @@ export default {
 .fa-param {
   border-left: 2px solid rgba(224, 123, 57, 0.6);
   padding-left: 6px;
+}
+.fa-param-small {
+  max-width: 110px;
 }
 .fa-param-type {
   max-width: 110px;

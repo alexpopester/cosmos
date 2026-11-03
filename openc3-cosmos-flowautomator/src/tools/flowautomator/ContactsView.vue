@@ -358,7 +358,9 @@
                     class="ml-1"
                     title="The template was edited after this was scheduled. Update copies the current version."
                   >
-                    template changed
+                    template v{{ a.template_version }} → v{{
+                      a.template_current_version
+                    }}
                   </v-chip>
                   <v-chip
                     v-if="a.template_missing"
@@ -455,6 +457,15 @@
                 >
                   Update
                 </v-btn>
+                <v-btn
+                  v-if="editable(a)"
+                  icon="mdi-test-tube"
+                  size="x-small"
+                  variant="text"
+                  title="Rehearse: dry run with this pass and these parameters (nothing is sent)"
+                  class="fa-rehearse"
+                  @click.stop="rehearse(a)"
+                />
                 <v-btn
                   v-if="a.run_id"
                   icon="mdi-open-in-app"
@@ -1623,6 +1634,18 @@ export default {
         await this.refresh()
       } catch (error) {
         this.notifyError('Could not accept', error)
+      }
+    },
+    async rehearse(a) {
+      try {
+        const { run } = await flowApi.rehearseActivity(a.id)
+        this.$notify.normal({
+          title: `Rehearsing '${a.label}'`,
+          body: 'Dry run with its pass and parameters; nothing is sent.',
+        })
+        this.$emit('open-run', a.template_id, run.id)
+      } catch (error) {
+        this.notifyError('Could not rehearse', error)
       }
     },
     async refreshTemplate(a) {

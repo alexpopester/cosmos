@@ -24,6 +24,7 @@ from flow_automator.store import FlowStore
 
 from openc3.environment import OPENC3_API_HOSTNAME, OPENC3_API_PORT, OPENC3_API_SCHEMA
 from openc3.microservices.microservice import Microservice
+from openc3.utilities.logger import Logger
 from openc3.utilities.sleeper import Sleeper
 from openc3.utilities.store import Store
 
@@ -32,7 +33,7 @@ class FlowEngineMicroservice(Microservice):
     def __init__(self, name):
         super().__init__(name)
         self.trigger_period = 0.25
-        self.history = 50
+        self.history = 200
         self.planner_options = {}
         planner_keys = {
             "CONTACT_HORIZON_DAYS": "horizon_days",
@@ -58,11 +59,23 @@ class FlowEngineMicroservice(Microservice):
 
         store = FlowStore(Store.instance(), self.scope, history_limit=self.history)
         self.engine = FlowEngine(
-            store, CosmosBackend(self.scope, self.logger), self.logger, self.trigger_period, self.planner_options
+            store,
+            CosmosBackend(self.scope, self.logger),
+            self.logger,
+            self.trigger_period,
+            self.planner_options,
+            notify=self.notify,
         )
         api_url = f"{OPENC3_API_SCHEMA}://{OPENC3_API_HOSTNAME}:{OPENC3_API_PORT}"
         api = FlowApi(self.engine, TokenAuthorizer(self.scope, api_url), self.prefix)
         self.http = FlowHttpServer(api, self.port, self.logger)
+
+    def notify(self, level, message, url=None):
+        """Post to the COSMOS notification bell (alerts also pop up as toasts in every tool)."""
+        if level == "alert":
+            self.logger.warn(message, scope=self.scope, type=Logger.ALERT, url=url)
+        else:
+            self.logger.info(message, scope=self.scope, type=Logger.NOTIFICATION, url=url)
 
     def run(self):
         self.engine.start()

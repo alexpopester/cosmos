@@ -55,19 +55,73 @@
         @update:model-value="changed"
       />
       <template v-for="field in visibleFields" :key="field.key">
-        <v-textarea
+        <template
           v-if="field.type === 'condition' || field.type === 'template'"
+        >
+          <v-textarea
+            v-model="config[field.key]"
+            :label="field.label"
+            :hint="field.hint"
+            persistent-hint
+            density="compact"
+            variant="outlined"
+            rows="2"
+            auto-grow
+            append-inner-icon="mdi-satellite-variant"
+            class="mb-1 fa-mono"
+            :class="`fa-field-${field.key}`"
+            @click:append-inner="pickTlm(field)"
+            @update:model-value="changed"
+          />
+          <div v-if="field.builder" class="mb-3">
+            <v-btn
+              size="small"
+              variant="tonal"
+              prepend-icon="mdi-console-line"
+              class="fa-build-command"
+              @click="builder = { show: true, key: field.key }"
+            >
+              Build command…
+            </v-btn>
+          </div>
+          <div v-else class="mb-2" />
+        </template>
+        <v-text-field
+          v-else-if="field.type === 'item'"
           v-model="config[field.key]"
           :label="field.label"
           :hint="field.hint"
-          persistent-hint
+          :persistent-hint="!!field.hint"
           density="compact"
           variant="outlined"
-          rows="2"
-          auto-grow
+          append-inner-icon="mdi-satellite-variant"
           class="mb-3 fa-mono"
+          :class="`fa-field-${field.key}`"
+          @click:append-inner="pickTlm(field)"
           @update:model-value="changed"
         />
+        <div v-else-if="field.type === 'packet'" class="d-flex mb-3">
+          <v-text-field
+            v-model="config[field.key]"
+            label="Target"
+            density="compact"
+            variant="outlined"
+            hide-details
+            class="mr-1 fa-mono"
+            @update:model-value="changed"
+          />
+          <v-text-field
+            v-model="config[field.packetKey]"
+            label="Packet"
+            density="compact"
+            variant="outlined"
+            hide-details
+            append-inner-icon="mdi-package-variant"
+            class="fa-mono fa-field-packet"
+            @click:append-inner="pickTlm(field)"
+            @update:model-value="changed"
+          />
+        </div>
         <v-text-field
           v-else-if="field.type === 'text'"
           v-model="config[field.key]"
@@ -275,6 +329,16 @@
         class="mb-3 fa-template-switch"
         @update:model-value="changed"
       />
+      <v-switch
+        v-model="settings.dry_run"
+        label="Dry-run mode"
+        hint="Every run of this flow is a dry run, triggers included: commands are checked but not sent. Use it to commission triggers on live telemetry."
+        persistent-hint
+        color="info"
+        density="compact"
+        class="mb-3 fa-dry-run-switch"
+        @update:model-value="changed"
+      />
       <div v-if="settings.template" class="mb-4">
         <div class="text-caption mb-1">Parameters</div>
         <parameter-editor
@@ -294,6 +358,18 @@
         input to wire them. Select a node or wire and press Delete to remove it.
       </div>
     </template>
+    <tlm-picker
+      v-model="picker.show"
+      :choose-item="picker.chooseItem"
+      :insert-as="picker.insertAs"
+      :current="picker.current"
+      @pick="onPick"
+    />
+    <command-builder
+      v-model="builder.show"
+      :current="node && builder.key ? config[builder.key] : ''"
+      @pick="onBuild"
+    />
   </div>
 </template>
 
@@ -301,9 +377,11 @@
 import { MODES, NODE_TYPES, categoryColor } from './nodeTypes'
 import KeyValueEditor from './KeyValueEditor.vue'
 import ParameterEditor from './ParameterEditor.vue'
+import TlmPicker from './TlmPicker.vue'
+import CommandBuilder from './CommandBuilder.vue'
 
 export default {
-  components: { KeyValueEditor, ParameterEditor },
+  components: { KeyValueEditor, ParameterEditor, TlmPicker, CommandBuilder },
   props: {
     node: { type: Object, default: null },
     flow: { type: Object, default: null },
@@ -314,6 +392,14 @@ export default {
   emits: ['changed', 'delete-node'],
   data() {
     return {
+      picker: {
+        show: false,
+        key: null,
+        chooseItem: true,
+        insertAs: 'item',
+        current: '',
+      },
+      builder: { show: false, key: null },
       modes: MODES,
       policies: [
         { title: 'Skip the new trigger', value: 'skip' },
@@ -357,6 +443,41 @@ export default {
   methods: {
     changed() {
       this.$emit('changed')
+    },
+    // Telemetry picker: insert into a condition/template, or set an item or packet field
+    pickTlm(field) {
+      const packetOnly = field.type === 'packet'
+      this.picker = {
+        show: true,
+        key: field.key,
+        packetKey: field.packetKey,
+        chooseItem: !packetOnly,
+        insertAs: field.type === 'item' || packetOnly ? 'item' : field.type,
+        current: packetOnly
+          ? `${this.config[field.key] || ''} ${this.config[field.packetKey] || ''}`
+          : field.type === 'item'
+            ? this.config[field.key]
+            : '',
+      }
+    },
+    onPick(selection) {
+      const { key, packetKey, insertAs } = this.picker
+      if (packetKey) {
+        this.config[key] = selection.target
+        this.config[packetKey] = selection.packet
+      } else if (insertAs === 'item') {
+        this.config[key] = selection.text
+      } else {
+        const existing = String(this.config[key] || '')
+        this.config[key] = existing.trim()
+          ? `${existing.replace(/\s+$/, '')} ${selection.text}`
+          : selection.text
+      }
+      this.changed()
+    },
+    onBuild(command) {
+      this.config[this.builder.key] = command
+      this.changed()
     },
     addItem(key) {
       if (!Array.isArray(this.config[key])) this.config[key] = []

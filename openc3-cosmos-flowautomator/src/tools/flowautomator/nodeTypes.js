@@ -131,8 +131,14 @@ export const NODE_TYPES = {
     trigger: true,
     outputs: ['out'],
     fields: [
-      { key: 'target', label: 'Target', type: 'text', default: 'INST' },
-      { key: 'packet', label: 'Packet', type: 'text', default: 'ADCS' },
+      {
+        key: 'target',
+        packetKey: 'packet',
+        label: 'Packet',
+        type: 'packet',
+        default: 'INST',
+      },
+      { key: 'packet', type: 'hidden', default: 'ADCS' },
     ],
     summary: (d) => `${d.target} ${d.packet}`,
   },
@@ -148,7 +154,7 @@ export const NODE_TYPES = {
       {
         key: 'item',
         label: 'Item',
-        type: 'text',
+        type: 'item',
         default: 'INST HEALTH_STATUS TEMP1',
         hint: 'TARGET PACKET ITEM',
       },
@@ -262,8 +268,19 @@ export const NODE_TYPES = {
     description:
       'Run every outgoing wire at the same time. Bring the branches back together with a Join.',
     outputs: ['out'],
-    fields: [],
-    summary: () => 'branches run together',
+    fields: [
+      {
+        key: 'isolate',
+        label: 'Separate variables per branch',
+        type: 'boolean',
+        default: false,
+        hint: "Each branch works on its own copy; at the Join their changes merge in wire order and branch_results lists each branch's changes",
+      },
+    ],
+    summary: (d) =>
+      d.isolate
+        ? 'branches run together, own variables'
+        : 'branches run together',
   },
   join: {
     category: 'logic',
@@ -288,9 +305,46 @@ export const NODE_TYPES = {
         label: 'Value',
         type: 'condition',
         default: 'INST HEALTH_STATUS TEMP1',
+        hint: 'An expression: telemetry, other variables, functions like round(), upper(), format(x, ".2f")',
+      },
+      {
+        key: 'more',
+        label: 'More variables (in order)',
+        type: 'keyvalue',
+        default: {},
+        hint: 'name = expression; each can use the ones before it',
       },
     ],
-    summary: (d) => `${d.name} = ${d.expression}`,
+    summary: (d) =>
+      `${d.name} = ${d.expression}${Object.keys(d.more || {}).length ? ` +${Object.keys(d.more).length}` : ''}`,
+  },
+  read_packet: {
+    category: 'logic',
+    label: 'Read packet',
+    icon: 'mdi-package-variant',
+    description:
+      "Read every item of a packet into one variable: hs['TEMP1'], hs['TEMP2'] ...",
+    outputs: ['out'],
+    errors: true,
+    fields: [
+      {
+        key: 'target',
+        packetKey: 'packet',
+        label: 'Packet',
+        type: 'packet',
+        default: 'INST',
+      },
+      { key: 'packet', type: 'hidden', default: 'HEALTH_STATUS' },
+      { key: 'variable', label: 'Variable', type: 'text', default: 'hs' },
+      {
+        key: 'value_type',
+        label: 'Type',
+        type: 'select',
+        options: ['CONVERTED', 'RAW', 'FORMATTED', 'WITH_UNITS'],
+        default: 'CONVERTED',
+      },
+    ],
+    summary: (d) => `${d.variable} = ${d.target} ${d.packet}`,
   },
   send_cmd: {
     category: 'action',
@@ -306,6 +360,7 @@ export const NODE_TYPES = {
         type: 'template',
         default: 'INST COLLECT with TYPE NORMAL, DURATION 1',
         hint: `TARGET COMMAND with PARAM value, ... ${TEMPLATE_HINT}`,
+        builder: true,
       },
       {
         key: 'allow_hazardous',
@@ -313,6 +368,13 @@ export const NODE_TYPES = {
         type: 'boolean',
         default: false,
         hint: 'Hazardous commands are blocked unless this is on',
+      },
+      {
+        key: 'allow_raw_values',
+        label: 'Allow raw values',
+        type: 'boolean',
+        default: false,
+        hint: "Off: a {{ }} value can't add parameters or break out of quotes (a comma or quote in it fails the step). Only turn on if the value is meant to be command text.",
       },
     ],
     summary: (d) => d.command,
@@ -359,6 +421,14 @@ export const NODE_TYPES = {
         default: {},
         hint: TEMPLATE_HINT,
       },
+      {
+        key: 'result_variable',
+        label: 'Result variable',
+        type: 'text',
+        default: 'script_result',
+        hint: "The script hands back a value with stash_set(os.environ['FLOW_RESULT_KEY'], value) (Ruby: ENV['FLOW_RESULT_KEY'])",
+        show: (d) => d.wait !== false,
+      },
     ],
     summary: (d) => d.filename || '(no script)',
   },
@@ -373,7 +443,7 @@ export const NODE_TYPES = {
       {
         key: 'item',
         label: 'Item',
-        type: 'text',
+        type: 'item',
         default: 'INST HEALTH_STATUS TEMP1',
         hint: 'TARGET PACKET ITEM',
       },
@@ -417,6 +487,39 @@ export const NODE_TYPES = {
       },
     ],
     summary: (d) => d.message,
+  },
+  notify: {
+    category: 'action',
+    label: 'Notify',
+    icon: 'mdi-bell-ring',
+    description:
+      'Alert operators: the COSMOS notification bell and any webhooks set up in View > Alerts',
+    outputs: ['out'],
+    fields: [
+      {
+        key: 'title',
+        label: 'Title',
+        type: 'template',
+        default: '',
+        hint: "Defaults to the flow's name",
+      },
+      {
+        key: 'message',
+        label: 'Message',
+        type: 'template',
+        default: 'Pass complete for {{ contact_satellite }}',
+        hint: TEMPLATE_HINT,
+      },
+      {
+        key: 'level',
+        label: 'Level',
+        type: 'select',
+        options: ['notification', 'alert'],
+        default: 'notification',
+        hint: 'Alerts also pop up in every COSMOS tool until read',
+      },
+    ],
+    summary: (d) => `${d.level === 'alert' ? '🔴 ' : ''}${d.message}`,
   },
   wait_time: {
     category: 'wait',
@@ -467,6 +570,28 @@ export const NODE_TYPES = {
     ],
     summary: (d) => `${d.condition} (${d.timeout}s)`,
   },
+  wait_packet: {
+    category: 'wait',
+    label: 'Wait for packet',
+    icon: 'mdi-package-down',
+    description:
+      'Wait until a new packet arrives (its count goes up), e.g. the first telemetry after AOS',
+    outputs: ['received', 'timeout'],
+    errors: true,
+    fields: [
+      {
+        key: 'target',
+        packetKey: 'packet',
+        label: 'Packet',
+        type: 'packet',
+        default: 'INST',
+      },
+      { key: 'packet', type: 'hidden', default: 'HEALTH_STATUS' },
+      { key: 'count', label: 'New packets', type: 'number', default: 1 },
+      { key: 'timeout', label: 'Timeout (s)', type: 'number', default: 60 },
+    ],
+    summary: (d) => `${d.target} ${d.packet} (${d.timeout}s)`,
+  },
   wait_contact: {
     category: 'contact',
     label: 'Wait for contact',
@@ -514,6 +639,67 @@ export const NODE_TYPES = {
       },
     ],
     summary: (d) => `needs ${d.min_remaining}s before LOS`,
+  },
+  ask: {
+    category: 'flow',
+    label: 'Ask operator',
+    icon: 'mdi-account-question',
+    description:
+      'Pause and ask the operator for a value (or yes/no); the answer goes into a variable',
+    outputs: ['answered', 'timeout'],
+    errors: true,
+    fields: [
+      {
+        key: 'prompt',
+        label: 'Question',
+        type: 'template',
+        default: 'How many frames to dump?',
+        hint: TEMPLATE_HINT,
+      },
+      {
+        key: 'kind',
+        label: 'Answer',
+        type: 'select',
+        options: ['text', 'number', 'choice', 'confirm'],
+        default: 'number',
+      },
+      {
+        key: 'choices',
+        label: 'Choices',
+        type: 'list',
+        default: [],
+        show: (d) => d.kind === 'choice',
+      },
+      {
+        key: 'min',
+        label: 'Minimum',
+        type: 'number',
+        default: '',
+        show: (d) => d.kind === 'number',
+      },
+      {
+        key: 'max',
+        label: 'Maximum',
+        type: 'number',
+        default: '',
+        show: (d) => d.kind === 'number',
+      },
+      { key: 'variable', label: 'Variable', type: 'text', default: 'answer' },
+      {
+        key: 'default',
+        label: 'Default',
+        type: 'text',
+        default: '',
+        hint: 'Used on timeout, and in dry runs that skip waits',
+      },
+      {
+        key: 'timeout',
+        label: 'Timeout (s, 0 = none)',
+        type: 'number',
+        default: 0,
+      },
+    ],
+    summary: (d) => d.prompt,
   },
   subflow: {
     category: 'flow',

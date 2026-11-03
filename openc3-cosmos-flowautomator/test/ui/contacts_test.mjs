@@ -17,6 +17,13 @@ const e = (s, t, h = 'out') => ({ id: `${s}-${h}-${t}`, source: s, sourceHandle:
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const shot = (page, name) => page.screenshot({ path: `${SHOTS}/contacts_${name}.png` })
 
+// COSMOS alert toasts (the engine's alerts) sit over the toolbar until acknowledged, like an operator would
+const ackToasts = async (page) => {
+  for (const button of await page.locator('button:has-text("Acknowledge")').all()) {
+    await button.click().catch(() => {})
+  }
+}
+
 const browser = await chromium.launch()
 const page = await browser.newPage({ viewport: { width: 1700, height: 1050 } })
 const consoleErrors = []
@@ -55,6 +62,12 @@ const waitFor = async (predicate, timeout, label) => {
   throw new Error(`timed out: ${label}`)
 }
 const flows = []
+
+// This test isn't about alerts (history_test.mjs is): keep COSMOS alert toasts from covering the toolbar
+const [, savedAlerts] = await api('GET', '/alerts')
+await api('PUT', '/alerts', { ...savedAlerts, cosmos: { ...savedAlerts.cosmos, enabled: false } })
+await page.waitForTimeout(1500)
+await ackToasts(page)
 
 try {
   // ---- templates (made through the API; the template settings UI is checked below) ----
@@ -123,6 +136,8 @@ try {
   await page.locator('.fa-station-dialog button:has-text("Save")').click()
   await page.locator('.fa-station', { hasText: 'Test Site' }).waitFor()
 
+  // Passes are predicted in the background
+  await waitFor(async () => (await api('GET', '/schedule'))[1].status.predicting === 0, 30000, 'prediction')
   const [, schedule] = await api('GET', '/schedule')
   const sat = schedule.satellites.find((s) => s.name === 'FA-TEST')
   const contact = schedule.contacts.find((c) => c.satellite_id === sat.id && c.aos > Date.now() / 1000)
@@ -190,11 +205,11 @@ try {
   // ---- the template is edited after scheduling ----
   const [, current] = await api('GET', `/flows/${pass.flow.id}`)
   await api('PUT', `/flows/${pass.flow.id}`, { ...current.flow, description: 'edited after scheduling' })
-  await page.locator('.fa-activities tr', { hasText: 'template changed' }).waitFor({ timeout: 6000 })
+  await page.locator('.fa-activities tr', { hasText: /template v\d+ → v\d+/ }).waitFor({ timeout: 6000 })
   check('template edits are flagged on the activity', true)
-  await page.locator('.fa-activities tr', { hasText: 'template changed' }).locator('button:has-text("Update")').click()
+  await page.locator('.fa-activities tr', { hasText: /template v\d+ → v\d+/ }).locator('button:has-text("Update")').click()
   await page.waitForTimeout(2500)
-  check('Update pulls in the template', (await page.locator('.fa-activities tr', { hasText: 'template changed' }).count()) === 0)
+  check('Update pulls in the template', (await page.locator('.fa-activities tr', { hasText: /template v\d+ → v\d+/ }).count()) === 0)
 
   // ---- pause and resume ----
   await page.getByRole('button', { name: 'Pause scheduler' }).click()
@@ -265,10 +280,12 @@ try {
   const switchOn = await page.locator('.fa-template-switch input').isChecked()
   const paramRows = await page.locator('.fa-inspector .fa-param').count()
   check('flow settings show the template switch and parameters', switchOn && paramRows === 2, `${paramRows} parameters`)
+  await ackToasts(page)
   await page.getByRole('button', { name: 'Run now' }).click()
-  await page.locator('.fa-param-dialog').waitFor()
-  await page.locator('.fa-param-dialog [data-param="duration"] input').fill('0.3')
-  await page.locator('.fa-param-dialog button:has-text("Run")').click()
+  await page.locator('.fa-run-dialog').waitFor()
+  await page.locator('.fa-run-dialog [data-param="duration"] input').fill('0.3')
+  await page.locator('.fa-run-contact button', { hasText: 'None' }).click()
+  await page.locator('.fa-run-go').click()
   await page.locator('.fa-steps', { hasText: 'no contact' }).waitFor({ timeout: 10000 })
   check('Run now asks for parameters; contact nodes explain a manual run has no contact', true)
   await shot(page, '08_manual')
@@ -276,6 +293,7 @@ try {
   check('unexpected error', false, error.message.split('\n')[0])
   await shot(page, 'error').catch(() => {})
 } finally {
+  await api('PUT', '/alerts', savedAlerts).catch(() => {})
   for (const a of await activities().catch(() => [])) await api('DELETE', `/activities/${a.id}`).catch(() => {})
   const [, schedule] = await api('GET', '/schedule').catch(() => [0, { satellites: [], stations: [] }])
   for (const s of schedule.satellites.filter((x) => x.name === 'FA-TEST')) await api('DELETE', `/satellites/${s.id}`)

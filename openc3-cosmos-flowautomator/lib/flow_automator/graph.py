@@ -51,15 +51,19 @@ NODE_TYPES = {
     "parallel": {"outputs": ["out"]},
     "join": {"outputs": ["out"]},
     "set_var": {"outputs": ["out"], "expressions": ["expression"], "required": ["name"], "errors": True},
+    "read_packet": {"outputs": ["out"], "required": ["target", "packet"], "errors": True},
+    "ask": {"outputs": ["answered", "timeout"], "templates": ["prompt"], "errors": True},
     # Actions
     "send_cmd": {"outputs": ["out"], "templates": ["command"], "required": ["command"], "errors": True},
     "run_script": {"outputs": ["out"], "templates": ["filename"], "required": ["filename"], "errors": True},
     "set_tlm": {"outputs": ["out"], "templates": ["value"], "required": ["item"], "errors": True},
     "log": {"outputs": ["out"], "templates": ["message"]},
+    "notify": {"outputs": ["out"], "templates": ["title", "message"], "required": ["message"]},
     # Waits
     "wait_time": {"outputs": ["out"]},
     "wait_tlm": {"outputs": ["ok", "timeout"], "expressions": ["condition"], "errors": True},
     "wait_check": {"outputs": ["out"], "expressions": ["condition"], "errors": True},
+    "wait_packet": {"outputs": ["received", "timeout"], "required": ["target", "packet"], "errors": True},
     # Contacts (runs started by a scheduled activity know their pass)
     "wait_contact": {"outputs": ["out"], "errors": True},
     "contact_check": {"outputs": ["ok", "short"], "errors": True},
@@ -192,6 +196,27 @@ def _validate_node_data(node):
     elif node_type == "set_var":
         if data.get("name") and not str(data["name"]).isidentifier():
             messages.append("Variable name must be a valid identifier")
+        for name, expression in (data.get("more") or {}).items():
+            if not str(name).isidentifier():
+                messages.append(f"Variable name '{name}' must be a valid identifier")
+            error = check_syntax(str(expression))
+            if error:
+                messages.append(f"{name}: {error}")
+    elif node_type == "read_packet":
+        if data.get("variable") and not str(data["variable"]).isidentifier():
+            messages.append("Variable name must be a valid identifier")
+    elif node_type == "wait_packet":
+        if not _positive(data.get("timeout", 60)):
+            messages.append("Timeout must be a positive number of seconds")
+    elif node_type == "ask":
+        if data.get("kind", "text") not in ("text", "number", "choice", "confirm"):
+            messages.append("Answer type must be text, number, choice or confirm")
+        if data.get("kind") == "choice" and not data.get("choices"):
+            messages.append("A choice question needs choices")
+        if not str(data.get("variable") or "answer").isidentifier():
+            messages.append("Variable name must be a valid identifier")
+        if not _non_negative(data.get("timeout") or 0):
+            messages.append("Timeout must be zero (wait for the run's approval limits) or more seconds")
     elif node_type == "switch":
         for case in data.get("cases") or []:
             error = check_syntax(str(case))

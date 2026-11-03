@@ -20,7 +20,7 @@
 VARIABLE flow_engine_port 7790
 VARIABLE flow_route_prefix /flow-automator
 VARIABLE trigger_period 0.25
-VARIABLE run_history 50
+VARIABLE run_history 200
 VARIABLE contact_horizon_days 7
 VARIABLE retime_tolerance 120
 VARIABLE stale_tle_days 3

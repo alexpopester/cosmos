@@ -9,6 +9,7 @@ the UT1-UTC difference are ignored; for pass times that's well under a second.
 Times are Unix seconds (UTC) everywhere.
 """
 
+import datetime
 import math
 
 import numpy as np
@@ -308,3 +309,38 @@ def find_passes_for_stations(propagator, stations, start, end, step=COARSE_STEP_
         elevations = np.where(ok, station.look(ecef)[1], -90.0)
         results.append(passes_from_samples(propagator, station, times, elevations))
     return results
+
+
+def make_tle(
+    epoch,
+    inclination,
+    raan,
+    mean_anomaly,
+    mean_motion=15.5,
+    eccentricity=0.0006703,
+    arg_perigee=130.0,
+    catalog=99999,
+    name="",
+):
+    """A TLE for a circular-ish orbit at an epoch (Unix seconds), e.g. for demos and tests.
+
+    mean_motion is revolutions per day (15.5 is about 420 km). Returns 'name\\nline1\\nline2'.
+    """
+    moment = datetime.datetime.fromtimestamp(epoch, tz=datetime.timezone.utc)
+    day = (
+        moment.timetuple().tm_yday
+        + (moment.hour * 3600 + moment.minute * 60 + moment.second + moment.microsecond / 1e6) / 86400
+    )
+
+    def with_checksum(text):
+        return text + str(_checksum(text + "0"))
+
+    ecc = f"{eccentricity:.7f}"[2:]
+    line1 = with_checksum(
+        f"1 {catalog:05d}U 26001A   {moment.year % 100:02d}{day:012.8f}  .00000000  00000-0  00000-0 0  999"
+    )
+    line2 = with_checksum(
+        f"2 {catalog:05d} {inclination:8.4f} {raan % 360:8.4f} {ecc} {arg_perigee % 360:8.4f} "
+        f"{mean_anomaly % 360:8.4f} {mean_motion:11.8f}{1:5d}"
+    )
+    return f"{name}\n{line1}\n{line2}" if name else f"{line1}\n{line2}"

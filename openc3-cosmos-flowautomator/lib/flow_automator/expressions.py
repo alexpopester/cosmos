@@ -7,6 +7,12 @@ Expressions are a small, side-effect free subset of Python:
 * whitelisted functions: ``tlm('INST HEALTH_STATUS TEMP1')``, ``tlm_raw``,
   ``tlm_formatted``, ``abs``, ``min``, ``max``, ``round``, ``int``, ``float``,
   ``str``, ``bool``, ``len``, ``now``, ``var('name', default)``
+* text: ``upper``, ``lower``, ``strip``, ``replace``, ``split``, ``join(sep, list)``,
+  ``startswith``, ``endswith``, ``contains``, ``format(value, '.2f')``, ``hex``,
+  ``utc(seconds)`` (ISO time)
+* collections and math: ``sum``, ``any``, ``all``, ``sorted``, ``reversed``,
+  ``range`` (up to 10,000), ``list``, ``keys``, ``values``, ``get(container, key, default)``,
+  ``sqrt``, ``floor``, ``ceil``, ``log10``
 * in runs of scheduled activities: ``time_to_aos()``, ``time_to_tca()``,
   ``time_to_los()`` (seconds, negative once passed)
 
@@ -19,6 +25,8 @@ comprehensions, so a condition can never run arbitrary code in the engine.
 """
 
 import ast
+import datetime
+import math
 import operator
 import re
 import time
@@ -71,6 +79,47 @@ _CMP_OPS = {
 # Seconds until a point of the run's contact, from the contact_* run variables
 CONTACT_FUNCTIONS = {"time_to_aos": "contact_aos", "time_to_tca": "contact_tca", "time_to_los": "contact_los"}
 
+MAX_RANGE = 10_000
+
+
+def _text(value):
+    if not isinstance(value, str):
+        raise ExpressionError(f"expected text, got {type(value).__name__}")
+    return value
+
+
+def _format(value, spec=""):
+    # Only format specs, never format strings with fields: '.2f', '>8', '04d', ',', 'x'
+    spec = str(spec)
+    if len(spec) > 20 or "{" in spec or "}" in spec:
+        raise ExpressionError("format() takes a short format spec like '.2f' or '04d'")
+    return format(value, spec)
+
+
+def _range(*args):
+    span = range(*[int(a) for a in args])
+    if len(span) > MAX_RANGE:
+        raise ExpressionError(f"range() is limited to {MAX_RANGE} values")
+    return list(span)
+
+
+def _join(separator, values):
+    return _text(separator).join(str(v) for v in values)
+
+
+def _get(container, key, default=None):
+    try:
+        return container[key]
+    except (KeyError, IndexError, TypeError):
+        return default
+
+
+def _utc(seconds=None, fmt="%Y-%m-%dT%H:%M:%S.%fZ"):
+    moment = time.time() if seconds is None else float(seconds)
+    text = datetime.datetime.fromtimestamp(moment, tz=datetime.timezone.utc).strftime(str(fmt))
+    return text[:-4] + "Z" if fmt.endswith(".%fZ") else text
+
+
 _SAFE_FUNCTIONS = {
     "abs": abs,
     "min": min,
@@ -82,6 +131,35 @@ _SAFE_FUNCTIONS = {
     "bool": bool,
     "len": len,
     "now": time.time,
+    # text
+    "upper": lambda s: _text(s).upper(),
+    "lower": lambda s: _text(s).lower(),
+    "strip": lambda s, chars=None: _text(s).strip(chars),
+    "replace": lambda s, old, new: _text(s).replace(str(old), str(new)),
+    "split": lambda s, sep=None, limit=-1: _text(s).split(sep, int(limit)),
+    "join": _join,
+    "startswith": lambda s, prefix: _text(s).startswith(prefix),
+    "endswith": lambda s, suffix: _text(s).endswith(suffix),
+    "contains": lambda container, item: item in container,
+    "format": _format,
+    "hex": hex,
+    "utc": _utc,
+    # collections
+    "sum": sum,
+    "any": any,
+    "all": all,
+    "sorted": sorted,
+    "reversed": lambda values: list(reversed(values)),
+    "range": _range,
+    "list": list,
+    "keys": lambda d: list(d.keys()),
+    "values": lambda d: list(d.values()),
+    "get": _get,
+    # math
+    "sqrt": math.sqrt,
+    "floor": math.floor,
+    "ceil": math.ceil,
+    "log10": math.log10,
 }
 
 
@@ -308,7 +386,7 @@ class Evaluator:
             result = _SAFE_FUNCTIONS[name](*args)
         except Exception as error:
             raise ExpressionError(f"{name}(): {error}") from None
-        if isinstance(result, str) and len(result) > MAX_RESULT_LENGTH:
+        if isinstance(result, (str, list)) and len(result) > MAX_RESULT_LENGTH:
             raise ExpressionError("Result too large")
         return result
 

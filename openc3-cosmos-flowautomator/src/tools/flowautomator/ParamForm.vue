@@ -38,10 +38,28 @@
         @update:model-value="set(p.name, $event)"
       />
       <v-text-field
-        v-else
+        v-else-if="p.type === 'item' || p.type === 'command'"
         :model-value="modelValue[p.name] ?? ''"
-        :type="p.type === 'number' ? 'number' : 'text'"
         :label="label(p)"
+        :placeholder="p.default != null ? String(p.default) : ''"
+        persistent-placeholder
+        :hint="p.description"
+        persistent-hint
+        :append-inner-icon="
+          p.type === 'item' ? 'mdi-satellite-variant' : 'mdi-console-line'
+        "
+        density="compact"
+        variant="outlined"
+        class="mb-3 fa-mono"
+        :data-param="p.name"
+        @click:append-inner="openPicker(p)"
+        @update:model-value="set(p.name, $event)"
+      />
+      <v-text-field
+        v-else
+        :model-value="listText(p, modelValue[p.name])"
+        :type="p.type === 'number' ? 'number' : 'text'"
+        :label="p.type === 'list' ? `${label(p)} (comma separated)` : label(p)"
         :placeholder="p.default != null ? String(p.default) : ''"
         persistent-placeholder
         :hint="p.description"
@@ -54,17 +72,49 @@
         @update:model-value="set(p.name, $event)"
       />
     </template>
+    <tlm-picker
+      v-model="picking.item"
+      :current="picking.current"
+      @pick="picked"
+    />
+    <command-builder
+      v-model="picking.command"
+      :current="picking.current"
+      @pick="picked"
+    />
   </div>
 </template>
 
 <script>
+import TlmPicker from './TlmPicker.vue'
+import CommandBuilder from './CommandBuilder.vue'
+
 export default {
+  components: { TlmPicker, CommandBuilder },
   props: {
     parameters: { type: Array, default: () => [] },
     modelValue: { type: Object, default: () => ({}) },
   },
   emits: ['update:modelValue'],
+  data() {
+    return { picking: { item: false, command: false, name: null, current: '' } }
+  },
   methods: {
+    listText(p, value) {
+      return Array.isArray(value) ? value.join(', ') : (value ?? '')
+    },
+    openPicker(p) {
+      this.picking = {
+        item: p.type === 'item',
+        command: p.type === 'command',
+        name: p.name,
+        current: this.modelValue[p.name] ?? p.default ?? '',
+      }
+    },
+    picked(selection) {
+      const text = typeof selection === 'string' ? selection : selection.text
+      this.set(this.picking.name, text)
+    },
     label(p) {
       return `${p.name}${p.required ? ' *' : ''}`
     },

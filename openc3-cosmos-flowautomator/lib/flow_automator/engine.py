@@ -6,12 +6,14 @@ import threading
 import time
 import uuid
 
+from .alerts import Alerter
 from .audit import AuditLog, user_name
 from .contacts import ContactPlanner
 from .graph import MODES, POLICIES, is_trigger, validate_flow
 from .runner import FlowRun
 from .templates import CONTACT_VARIABLES, fill_parameters
 from .triggers import TriggerManager
+from .versions import FlowVersions, content, diff_flows
 
 
 MAX_ACTIVE_RUNS = 50
@@ -31,8 +33,19 @@ class NotFoundError(EngineError):
     status = 404
 
 
+class ConflictError(EngineError):
+    """Saving over a version someone else saved after you opened the flow."""
+
+    status = 409
+
+    def __init__(self, message, **details):
+        super().__init__(message)
+        self.details = details
+
+
 class FlowEngine:
-    def __init__(self, store, backend, logger=None, trigger_period=0.25, planner_options=None):
+    def __init__(self, store, backend, logger=None, trigger_period=0.25, planner_options=None, notify=None):
+        """notify(level, message, url) posts a COSMOS notification (see alerts.py)."""
         self.store = store
         self.backend = backend
         self.logger = logger
@@ -42,11 +55,15 @@ class FlowEngine:
         self.lock = threading.RLock()
         self.triggers = TriggerManager(self, period=trigger_period)
         self.audit = AuditLog(store, self.log)
+        self.versions = FlowVersions(store)
+        self.alerts = Alerter(store, notify, self.log)
         self.planner = ContactPlanner(self, store, **(planner_options or {}))
 
     def start(self, start_triggers=True):
         with self.lock:
             self.flows = self.store.all_flows()
+            self._ensure_versions()
+        self.alerts.load()
         armed = [flow["name"] for flow in self.flows.values() if flow.get("armed")]
         self.log("info", f"Flow engine loaded {len(self.flows)} flows ({len(armed)} armed)")
         try:
@@ -56,10 +73,12 @@ class FlowEngine:
         if start_triggers:
             self.triggers.start()
             self.planner.start()
+            self.alerts.start()
 
     def shutdown(self):
         self.triggers.stop()
         self.planner.stop()
+        self.alerts.stop()
         with self.lock:
             runs = list(self.runs.values())
         for run in runs:
@@ -90,6 +109,9 @@ class FlowEngine:
                     "policy": flow.get("policy", "skip"),
                     "mode": flow.get("mode", "run"),
                     "template": bool(flow.get("template")),
+                    "dry_run": bool(flow.get("dry_run")),
+                    "version": flow.get("version"),
+                    "saved_by": flow.get("saved_by"),
                     "parameters": copy.deepcopy(flow.get("parameters") or []),
                     "node_count": len(flow.get("nodes") or []),
                     "triggers": [n["type"] for n in flow.get("nodes") or [] if is_trigger(n)],
@@ -111,18 +133,34 @@ class FlowEngine:
                 raise NotFoundError(f"Flow '{flow_id}' not found")
             return copy.deepcopy(flow)
 
-    def save_flow(self, flow, flow_id=None):
-        """Create (flow_id None) or replace a flow. Returns (flow, problems). Saving never arms a flow."""
+    def save_flow(self, flow, flow_id=None, user=None, note="", base_version=None, force=False, restored_from=None):
+        """Create (flow_id None) or replace a flow, recording a new version. Returns (flow, problems).
+
+        Saving never arms a flow. With ``base_version`` (the version the editor opened), saving over a newer
+        version someone else saved raises ConflictError unless ``force``. Saving unchanged content keeps the
+        version.
+        """
         if not isinstance(flow, dict):
             raise EngineError("Flow must be a JSON object")
         flow = copy.deepcopy(flow)
         with self.lock:
+            existing = None
             if flow_id is not None:
                 existing = self.flows.get(flow_id)
                 if existing is None:
                     raise NotFoundError(f"Flow '{flow_id}' not found")
+                current = int(existing.get("version") or 0)
+                if base_version is not None and int(base_version) != current and not force:
+                    raise ConflictError(
+                        f"'{existing['name']}' was saved by {existing.get('saved_by') or 'someone'} "
+                        f"(version {current}) after you opened version {base_version}",
+                        current_version=current,
+                        saved_by=existing.get("saved_by"),
+                        saved_at=existing.get("updated_at"),
+                    )
                 flow["id"] = flow_id
                 flow["armed"] = bool(existing.get("armed"))
+                flow["created_at"] = existing.get("created_at")
             else:
                 flow["id"] = uuid.uuid4().hex[:12]
                 flow["armed"] = False
@@ -135,6 +173,7 @@ class FlowEngine:
                 flow["policy"] = "skip"
             flow.setdefault("variables", {})
             flow["template"] = bool(flow.get("template"))
+            flow["dry_run"] = bool(flow.get("dry_run"))
             flow["parameters"] = list(flow.get("parameters") or []) if isinstance(flow.get("parameters"), list) else []
             flow["nodes"] = list(flow.get("nodes") or [])
             flow["edges"] = list(flow.get("edges") or [])
@@ -142,12 +181,77 @@ class FlowEngine:
             if flow["armed"] and problems:
                 flow["armed"] = False
                 self.log("warn", f"Flow '{flow['name']}' was disarmed because it no longer validates")
+            if existing is not None and content(existing) == content(flow):
+                existing["armed"] = flow["armed"]
+                return copy.deepcopy(existing), problems  # nothing changed: no new version
+            latest = self.versions.latest(flow["id"]) if existing is not None or restored_from else None
+            flow["version"] = (
+                int(existing.get("version") or 0) if existing else int((latest or {}).get("version") or 0)
+            ) + 1
             flow["updated_at"] = time.time()
+            flow["saved_by"] = user_name(user)
+            flow["saved_note"] = note or ""
             self.store.save_flow(flow)
             self.flows[flow["id"]] = flow
+            self.versions.record(
+                flow, flow["saved_by"], note, previous=(latest or {}).get("flow"), restored_from=restored_from
+            )
+            self.store.delete_record("deleted_flows", flow["id"])
             return copy.deepcopy(flow), problems
 
-    def delete_flow(self, flow_id):
+    def _ensure_versions(self):
+        """Flows saved before version history get their current state as version 1."""
+        for flow in self.flows.values():
+            if self.versions.latest(flow["id"]) is None:
+                flow["version"] = int(flow.get("version") or 1)
+                flow.setdefault("updated_at", time.time())
+                flow.setdefault("saved_by", "unknown")
+                self.store.save_flow(flow)
+                self.versions.record(flow, flow["saved_by"], "Saved before version history")
+
+    def list_versions(self, flow_id):
+        versions = self.versions.list(flow_id)
+        if not versions and flow_id not in self.flows:
+            raise NotFoundError(f"Flow '{flow_id}' not found")
+        return versions
+
+    def get_version(self, flow_id, version):
+        entry = self.versions.get(flow_id, int(version))
+        if entry is None:
+            raise NotFoundError(f"Flow '{flow_id}' has no version {version}")
+        return entry
+
+    def diff_versions(self, flow_id, old, new=None):
+        """What changed from version old to version new (default: the current flow)."""
+        before = self.get_version(flow_id, old)["flow"]
+        after = self.get_version(flow_id, new)["flow"] if new is not None else self.get_flow(flow_id)
+        return diff_flows(before, after)
+
+    def restore_version(self, flow_id, version, user=None, note=""):
+        """Save an old version as a new version (history is never rewritten)."""
+        entry = self.get_version(flow_id, version)
+        snapshot = copy.deepcopy(entry["flow"])
+        with self.lock:
+            exists = flow_id in self.flows
+        note = note or f"Restored version {version}"
+        if exists:
+            return self.save_flow(snapshot, flow_id, user, note, force=True, restored_from=int(version))
+        return self._recreate(flow_id, snapshot, user, note, int(version))
+
+    def _recreate(self, flow_id, snapshot, user, note, restored_from):
+        latest = self.versions.latest(flow_id) or {}
+        with self.lock:
+            # A placeholder for save_flow to replace; the version number carries on from the history
+            self.flows[flow_id] = {
+                "id": flow_id,
+                "name": snapshot.get("name"),
+                "armed": False,
+                "version": int(latest.get("version") or 0),
+                "created_at": time.time(),
+            }
+        return self.save_flow(snapshot, flow_id, user, note, force=True, restored_from=restored_from)
+
+    def delete_flow(self, flow_id, user=None):
         with self.lock:
             flow = self.flows.pop(flow_id, None)
             if flow is None:
@@ -155,9 +259,33 @@ class FlowEngine:
             self.queues.pop(flow_id, None)
             runs = [run for run in self.runs.values() if run.flow.get("id") == flow_id]
             self.store.delete_flow(flow_id)
+            self.store.save_record(
+                "deleted_flows",
+                flow_id,
+                {
+                    "id": flow_id,
+                    "name": flow.get("name"),
+                    "version": flow.get("version"),
+                    "deleted_at": time.time(),
+                    "deleted_by": user_name(user),
+                    "template": bool(flow.get("template")),
+                },
+            )
         for run in runs:
             run.stop()
         self.log("info", f"Flow '{flow.get('name')}' deleted")
+        return flow
+
+    def list_deleted(self):
+        deleted = list(self.store.records("deleted_flows").values())
+        return sorted(deleted, key=lambda d: -(d.get("deleted_at") or 0))
+
+    def restore_deleted(self, flow_id, user=None):
+        record = self.store.records("deleted_flows").get(flow_id)
+        latest = self.versions.latest(flow_id)
+        if record is None or latest is None:
+            raise NotFoundError(f"No deleted flow '{flow_id}' to restore")
+        return self._recreate(flow_id, copy.deepcopy(latest["flow"]), user, "Restored after delete", latest["version"])
 
     def set_armed(self, flow_id, armed):
         with self.lock:
@@ -179,11 +307,23 @@ class FlowEngine:
 
     # ---- runs ------------------------------------------------------------
 
-    def trigger(self, flow_id, node_id=None, reason="", variables=None, manual=False, mode=None):
+    def trigger(
+        self,
+        flow_id,
+        node_id=None,
+        reason="",
+        variables=None,
+        manual=False,
+        mode=None,
+        trigger_info=None,
+        dry_run=False,
+        skip_waits=False,
+    ):
         """Start a run of a flow from a trigger node, applying the flow's re-trigger policy.
 
         Returns {"result": "started" | "queued" | "skipped", "run": run json or None}.
         Automatic triggers only start armed flows; manual runs work while disarmed (for testing).
+        ``trigger_info`` says what started it (kept with the run); ``dry_run`` sends nothing.
         """
         with self.lock:
             flow = self.flows.get(flow_id)
@@ -212,6 +352,14 @@ class FlowEngine:
             if flow.get("template"):
                 for name in CONTACT_VARIABLES:
                     variables.setdefault(name, None)
+            trigger_info = dict(trigger_info or {})
+            trigger_info.setdefault("kind", "manual" if manual else nodes[node_id]["type"])
+            trigger_info.setdefault("node", node_id)
+            trigger_info.setdefault(
+                "node_label", (nodes[node_id].get("data") or {}).get("label") or nodes[node_id]["type"]
+            )
+            trigger_info.setdefault("detail", reason)
+            options = {"mode": mode, "trigger_info": trigger_info, "dry_run": dry_run, "skip_waits": skip_waits}
             running = [r for r in self.runs.values() if r.flow.get("id") == flow_id and r.parent is None]
             if running:
                 policy = flow.get("policy", "skip")
@@ -226,37 +374,68 @@ class FlowEngine:
                         message = f"Queue full ({MAX_QUEUED_PER_FLOW}), trigger dropped"
                         self.log("warn", f"Flow '{flow['name']}': {message}")
                         return {"result": "skipped", "run": None, "message": message}
-                    queue.append((node_id, reason, variables, mode))
+                    options["trigger_info"] = {**trigger_info, "queued_at": time.time()}
+                    queue.append((node_id, reason, variables, options))
                     return {"result": "queued", "run": None, "message": f"Queued ({len(queue)} waiting)"}
-            return self._start_run(flow, node_id, reason, variables, mode)
+            return self._start_run(flow, node_id, reason, variables, options)
 
-    def _start_run(self, flow, node_id, reason, variables, mode=None):
+    def _start_run(self, flow, node_id, reason, variables, options=None):
         if len(self.runs) >= MAX_ACTIVE_RUNS:
             message = f"Too many active runs ({MAX_ACTIVE_RUNS}), run not started"
             self.log("error", f"Flow '{flow['name']}': {message}")
             return {"result": "skipped", "run": None, "message": message}
-        run = FlowRun(self, flow, node_id, reason, variables, mode=mode)
+        run = FlowRun(self, flow, node_id, reason, variables, **(options or {}))
         self.runs[run.id] = run
-        self.log("info", f"Flow '{flow['name']}' run {run.id} started: {reason}")
+        self.log("info", f"Flow '{flow['name']}' run {run.id} started{' (dry run)' if run.dry_run else ''}: {reason}")
         run.start_thread()
         return {"result": "started", "run": run.as_json(include_steps=False), "message": ""}
 
-    def start_scheduled_run(self, flow, reason, variables, mode, approval_deadline=None, activity_id=None):
-        """Start a run of a flow snapshot for a scheduled activity. Re-trigger policies don't apply."""
+    def start_scheduled_run(
+        self,
+        flow,
+        reason,
+        variables,
+        mode,
+        approval_deadline=None,
+        activity_id=None,
+        trigger_info=None,
+        dry_run=False,
+        skip_waits=False,
+    ):
+        """Start a run of a flow snapshot for a scheduled activity (or a rehearsal). Policies don't apply."""
         problems = validate_flow(flow)
         if problems:
             raise EngineError(f"The flow has problems: {problems[0]['message']}")
         entry = next((n for n in flow.get("nodes") or [] if n["type"] == "trigger_manual"), None)
         if entry is None:
             raise EngineError("The flow needs a Manual trigger to be scheduled")
+        info = {
+            "kind": "activity",
+            "node": entry["id"],
+            "node_label": "Manual",
+            "detail": reason,
+            **(trigger_info or {}),
+        }
         with self.lock:
             if len(self.runs) >= MAX_ACTIVE_RUNS:
                 raise EngineError(f"Too many active runs ({MAX_ACTIVE_RUNS})")
-            run = FlowRun(self, flow, entry["id"], reason, variables, mode=mode)
+            run = FlowRun(
+                self,
+                flow,
+                entry["id"],
+                reason,
+                variables,
+                mode=mode,
+                trigger_info=info,
+                dry_run=dry_run,
+                skip_waits=skip_waits,
+            )
             run.approval_deadline = approval_deadline
             run.activity_id = activity_id
             self.runs[run.id] = run
-        self.log("info", f"Flow '{flow.get('name')}' run {run.id} started: {reason}")
+        self.log(
+            "info", f"Flow '{flow.get('name')}' run {run.id} started{' (dry run)' if run.dry_run else ''}: {reason}"
+        )
         run.start_thread()
         return run
 
@@ -273,7 +452,24 @@ class FlowEngine:
             problems = validate_flow(flow)
             if problems:
                 raise RuntimeError(f"Sub-flow '{flow.get('name')}' has problems: {problems[0]['message']}")
-            child = FlowRun(self, flow, entry["id"], f"Called from '{parent.flow.get('name')}'", variables, parent)
+            info = {
+                "kind": "subflow",
+                "node": entry["id"],
+                "node_label": "Manual",
+                "parent_run_id": parent.id,
+                "parent_flow_id": parent.flow.get("id"),
+                "parent_flow": parent.flow.get("name"),
+                "detail": f"Called from '{parent.flow.get('name')}'",
+            }
+            child = FlowRun(
+                self,
+                flow,
+                entry["id"],
+                f"Called from '{parent.flow.get('name')}'",
+                variables,
+                parent,
+                trigger_info=info,
+            )
             self.runs[child.id] = child
             parent.children.append(child.id)
         child.execute()  # synchronous: the parent's step waits for it
@@ -295,6 +491,17 @@ class FlowEngine:
         level = {"success": "info", "stopped": "warn"}.get(run.status, "error")
         detail = f": {run.message}" if run.message else ""
         self.log(level, f"Flow '{run.flow.get('name')}' run {run.id} {run.status}{detail}")
+        if run.parent is None and run.status in ("failed", "stopped"):
+            event = "run_failed" if run.status == "failed" else "run_stopped"
+            self.alerts.emit(
+                event,
+                f"'{run.flow.get('name')}' {run.status}",
+                run.message,
+                path=run_path(run.flow.get("id"), run.id),
+                key=f"{event}:{run.id}",
+                data={"run_id": run.id, "flow_id": run.flow.get("id"), "trigger": run.trigger_info},
+                dry_run=run.dry_run,
+            )
         if getattr(run, "activity_id", None):
             try:
                 self.planner.on_run_finished(run)
@@ -304,14 +511,29 @@ class FlowEngine:
             with self.lock:
                 self._start_run(*next_start)
 
-    def approve(self, run_id, approval_id, decision, user=None):
+    def on_approval_requested(self, run, approval):
+        """A run is waiting for an operator: tell them wherever they are."""
+        root = run
+        while root.parent is not None:
+            root = root.parent
+        self.alerts.emit(
+            "approval_waiting",
+            f"'{run.flow.get('name')}' is waiting for approval",
+            f"{approval['label']}: {approval['preview'][:200]} ({approval['reason']})",
+            path=run_path(root.flow.get("id"), root.id),
+            key=f"approval:{approval['id']}",
+            data={"run_id": run.id, "approval_id": approval["id"], "deadline": approval.get("deadline")},
+            dry_run=run.dry_run,
+        )
+
+    def approve(self, run_id, approval_id, decision, user=None, value=None):
         """An operator answers a run's pending approval (crawl/walk modes)."""
         with self.lock:
             run = self.runs.get(run_id)
         if run is None:
             raise NotFoundError(f"Run '{run_id}' is not active")
         try:
-            answered = run.approve(approval_id, decision, user_name(user))
+            answered = run.approve(approval_id, decision, user_name(user), value)
         except ValueError as error:
             raise EngineError(str(error)) from None
         if not answered:
@@ -326,7 +548,7 @@ class FlowEngine:
             raise NotFoundError(f"Run '{run_id}' is not active")
         run.stop()
 
-    def stop_all(self):
+    def stop_all(self, user=None):
         """Safety stop: disarm every flow, drop queued triggers, pause scheduled activities, stop every run."""
         with self.lock:
             disarmed = 0
@@ -341,33 +563,48 @@ class FlowEngine:
             run.stop()
         self.planner.set_paused(True, "STOP ALL")
         self.log("warn", f"STOP ALL: disarmed {disarmed} flows, paused the contact scheduler, stopped {len(runs)} runs")
+        self.alerts.emit(
+            "stop_all",
+            f"STOP ALL by {user_name(user)}",
+            f"Disarmed {disarmed} flows, stopped {len(runs)} runs, paused the contact scheduler",
+            path="/tools/flowautomator",
+        )
         return {"disarmed": disarmed, "stopped": len(runs), "scheduler_paused": True}
+
+    def _history_flow_ids(self):
+        with self.lock:
+            ids = list(self.flows.keys())
+        return ids + [d["id"] for d in self.list_deleted() if d["id"] not in ids]
 
     def get_run(self, run_id):
         with self.lock:
             run = self.runs.get(run_id)
-            flow_ids = list(self.flows.keys())
         if run is not None:
             return run.as_json()
-        for flow_id in flow_ids:
+        for flow_id in self._history_flow_ids():
             for record in self.store.runs(flow_id):
                 if record.get("id") == run_id:
                     return record
         raise NotFoundError(f"Run '{run_id}' not found")
 
-    def list_runs(self, flow_id=None, limit=50):
+    def list_runs(self, flow_id=None, limit=50, **filters):
+        """Runs, newest first, across flows (including deleted ones).
+
+        Filters: status, trigger (kind), user (who started it), activity_id, dry_run (bool),
+        since / until (Unix seconds), search (text anywhere in the summary).
+        """
         with self.lock:
             active = [r.as_json(include_steps=False) for r in self.runs.values()]
-            flow_ids = [flow_id] if flow_id else list(self.flows.keys())
+        flow_ids = [flow_id] if flow_id else self._history_flow_ids()
         if flow_id:
             active = [r for r in active if r["flow_id"] == flow_id]
         history = []
         for fid in flow_ids:
-            for record in self.store.runs(fid, limit):
+            for record in self.store.runs(fid):
                 record.pop("steps", None)
                 history.append(record)
         active_ids = {r["id"] for r in active}
-        runs = active + [r for r in history if r["id"] not in active_ids]
+        runs = [r for r in active + [r for r in history if r["id"] not in active_ids] if _run_matches(r, filters)]
         runs.sort(key=lambda r: r.get("started_at") or 0, reverse=True)
         return runs[:limit]
 
@@ -384,3 +621,33 @@ class FlowEngine:
                 "contacts": contacts,
                 "time": time.time(),
             }
+
+
+def run_path(flow_id, run_id=None):
+    """The tool URL that opens a flow (and a run of it)."""
+    return f"/tools/flowautomator?flow={flow_id}" + (f"&run={run_id}" if run_id else "")
+
+
+def _run_matches(run, filters):
+    info = run.get("trigger") or {}
+    if filters.get("status") and run.get("status") != filters["status"]:
+        return False
+    if filters.get("trigger") and info.get("kind") != filters["trigger"]:
+        return False
+    if filters.get("user") and info.get("user") != filters["user"]:
+        return False
+    if filters.get("activity_id") and info.get("activity_id") != filters["activity_id"]:
+        return False
+    if filters.get("dry_run") is not None and bool(run.get("dry_run")) != filters["dry_run"]:
+        return False
+    started = run.get("started_at") or 0
+    if filters.get("since") and started < filters["since"]:
+        return False
+    if filters.get("until") and started > filters["until"]:
+        return False
+    if filters.get("search"):
+        text = " ".join(str(run.get(k) or "") for k in ("flow_name", "reason", "message", "status", "id"))
+        text += " " + " ".join(str(v) for v in info.values())
+        if filters["search"].lower() not in text.lower():
+            return False
+    return True

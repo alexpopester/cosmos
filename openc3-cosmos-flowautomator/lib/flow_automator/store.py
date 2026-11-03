@@ -3,6 +3,7 @@
 Keys (per scope):
     flow_automator__<scope>__flows            hash: flow id -> flow JSON
     flow_automator__<scope>__runs__<flow id>  list: newest first, run JSON
+    flow_automator__<scope>__versions__<flow id>  list: newest first, saved versions
     flow_automator__<scope>__<kind>           hash: id -> record JSON, for the contact
                                               planner's satellites, stations,
                                               activities and settings
@@ -33,8 +34,20 @@ class FlowStore:
         self.redis.hset(self.flows_key, flow["id"], json.dumps(flow))
 
     def delete_flow(self, flow_id):
+        # Run history and versions stay, so a deleted flow can be restored and its runs looked up
         self.redis.hdel(self.flows_key, flow_id)
-        self.redis.delete(self._runs_key(flow_id))
+
+    def _versions_key(self, flow_id):
+        return f"flow_automator__{self.scope}__versions__{flow_id}"
+
+    def add_version(self, flow_id, entry, limit):
+        key = self._versions_key(flow_id)
+        self.redis.lpush(key, json.dumps(entry))
+        self.redis.ltrim(key, 0, limit - 1)
+
+    def versions(self, flow_id, limit=None):
+        end = (limit - 1) if limit else -1
+        return [json.loads(_text(item)) for item in self.redis.lrange(self._versions_key(flow_id), 0, end) or []]
 
     def add_run(self, flow_id, run_json):
         key = self._runs_key(flow_id)

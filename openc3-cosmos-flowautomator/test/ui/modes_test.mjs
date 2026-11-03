@@ -12,6 +12,13 @@ const n = (id, type, x, y, data = {}) => ({ id, type, position: { x, y }, data }
 const e = (s, t, h = 'out') => ({ id: `${s}-${h}-${t}`, source: s, sourceHandle: h, target: t })
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
+// COSMOS alert toasts (the engine's alerts) sit over the toolbar until acknowledged, like an operator would
+const ackToasts = async (page) => {
+  for (const button of await page.locator('button:has-text("Acknowledge")').all()) {
+    await button.click().catch(() => {})
+  }
+}
+
 const browser = await chromium.launch()
 const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } })
 const consoleErrors = []
@@ -66,6 +73,12 @@ const make = async (name, nodes, edges, extra = {}) => {
   created.push(body.flow.id)
   return body.flow.id
 }
+
+// This test isn't about alerts (history_test.mjs is): keep COSMOS alert toasts from covering the toolbar
+const [, savedAlerts] = await api('GET', '/alerts')
+await api('PUT', '/alerts', { ...savedAlerts, cosmos: { ...savedAlerts.cosmos, enabled: false } })
+await page.waitForTimeout(1500)
+await ackToasts(page)
 
 try {
   // ---- engine with real COSMOS commands ----
@@ -132,6 +145,7 @@ try {
   const crawlActive = await page.locator('.fa-mode-toggle .v-btn--active').innerText()
   check('toolbar shows the flow mode', crawlActive.includes('Crawl'), crawlActive)
 
+  await ackToasts(page)
   await page.getByRole('button', { name: 'Run now' }).click()
   await page.locator('.fa-approval').first().waitFor({ timeout: 10000 })
   await page.waitForTimeout(600)
@@ -161,6 +175,7 @@ try {
   await page.screenshot({ path: `${SHOTS}/modes_03_done.png` })
 
   // Go & run rest from the UI: routine steps stop asking, the hazardous one still asks
+  await ackToasts(page)
   await page.getByRole('button', { name: 'Run now' }).click()
   await page.locator('.fa-approval').first().waitFor({ timeout: 10000 })
   await page.locator('.fa-approval button:has-text("run rest")').first().click()
@@ -172,6 +187,8 @@ try {
   check('Go & run rest skips routine prompts but still asks for hazardous', onlyHazard === 1)
 
   // Mode toggle + per-node toggle save
+  await page.waitForTimeout(1000)
+  await ackToasts(page)
   await page.locator('.fa-mode-toggle button', { hasText: 'Walk' }).click()
   await page.locator('.vue-flow__node[data-id="w"] .fa-header').click()
   await page.locator('.fa-inspector .v-switch', { hasText: 'Ask operator first' }).locator('input').check()
@@ -187,6 +204,7 @@ try {
   check('unexpected error', false, error.message.split('\n')[0])
   await page.screenshot({ path: `${SHOTS}/modes_error.png` }).catch(() => {})
 } finally {
+  await api('PUT', '/alerts', savedAlerts).catch(() => {})
   await api('POST', '/stop_all', {}).catch(() => {})
   for (const id of created) await api('DELETE', `/flows/${id}`).catch(() => {})
   await browser.close()

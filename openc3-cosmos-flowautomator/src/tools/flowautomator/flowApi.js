@@ -47,28 +47,45 @@ export default {
       data: {},
       headers: handled,
     }).then(unwrap),
-  run: (id, triggerNode, variables, mode) =>
+  // options: { mode, dry_run, skip_waits, contact: {contact_id} | {aos_in, duration, ...} }
+  run: (id, triggerNode, variables, options = {}) =>
     Api.post(`${BASE}/flows/${id}/run`, {
-      data: { trigger_node: triggerNode, variables, mode },
+      data: { trigger_node: triggerNode, variables, ...options },
       headers: handled,
     }).then(unwrap),
   listRuns: (flowId, limit = 50) =>
     Api.get(`${BASE}/runs`, { params: { flow_id: flowId, limit } }).then(
       unwrap,
     ),
+  // filters: { flow_id, status, trigger, user, activity_id, dry_run, since, until, search, limit }
+  searchRuns: (filters) =>
+    Api.get(`${BASE}/runs`, { params: filters }).then(unwrap),
+
+  // Version history
+  versions: (id) => Api.get(`${BASE}/flows/${id}/versions`).then(unwrap),
+  version: (id, version) =>
+    Api.get(`${BASE}/flows/${id}/versions/${version}`).then(unwrap),
+  diff: (id, from, to = 'current') =>
+    Api.get(`${BASE}/flows/${id}/diff`, { params: { from, to } }).then(unwrap),
+  restoreVersion: (id, version, note) =>
+    post(`/flows/${id}/versions/${version}/restore`, { note }),
+  deletedFlows: () => Api.get(`${BASE}/flows/deleted`).then(unwrap),
+  undelete: (id) => post(`/flows/${id}/undelete`),
   getRun: (id) =>
     Api.get(`${BASE}/runs/${id}`, { headers: handled }).then(unwrap),
   stopRun: (id) =>
     Api.post(`${BASE}/runs/${id}/stop`, { data: {}, headers: handled }).then(
       unwrap,
     ),
-  approve: (runId, approvalId, decision) =>
+  approve: (runId, approvalId, decision, value) =>
     Api.post(`${BASE}/runs/${runId}/approve`, {
-      data: { approval_id: approvalId, decision },
+      data: { approval_id: approvalId, decision, value },
       headers: handled,
     }).then(unwrap),
   stopAll: () => Api.post(`${BASE}/stop_all`, { data: {} }).then(unwrap),
   whoami: () => Api.get(`${BASE}/whoami`).then(unwrap),
+  loadDemo: () => post('/demo'),
+  clearDemo: () => del('/demo'),
   audit: (params) => Api.get(`${BASE}/audit`, { params }).then(unwrap),
 
   // Contacts: satellites, stations, predicted passes and scheduled activities
@@ -87,6 +104,11 @@ export default {
   deleteActivity: (id) => del(`/activities/${id}`),
   acceptActivity: (id) => post(`/activities/${id}/accept`),
   refreshActivityTemplate: (id) => post(`/activities/${id}/refresh_template`),
+  rehearseActivity: (id, skipWaits = true) =>
+    post(`/activities/${id}/rehearse`, { skip_waits: skipWaits }),
+  alerts: () => Api.get(`${BASE}/alerts`).then(unwrap),
+  saveAlerts: (settings) => put('/alerts', settings),
+  testAlert: (webhookId) => post('/alerts/test', { webhook_id: webhookId }),
   saveRule: (id, rule) =>
     id ? put(`/rules/${id}`, rule) : post('/rules', rule),
   deleteRule: (id) => del(`/rules/${id}`),

@@ -67,6 +67,64 @@ class CosmosBackend:
                     return True
         return False
 
+    def tlm_packet(self, target, packet, value_type="CONVERTED"):
+        """Every item of a packet as {item: value}."""
+        from openc3.api.tlm_api import get_tlm_packet
+
+        return {
+            name: value for name, value, *_limits in get_tlm_packet(target, packet, type=value_type, scope=self.scope)
+        }
+
+    def put_script(self, path, text):
+        """Save a script file in the target's modified files (what Script Runner edits)."""
+        from openc3.script.storage import put_target_file
+
+        put_target_file(path, text, scope=self.scope)
+
+    def stash_take(self, key):
+        """Read and remove a value a script left in the COSMOS stash (None if there isn't one)."""
+        from openc3.api.stash_api import stash_delete, stash_get
+
+        value = stash_get(key, scope=self.scope)
+        if value is not None:
+            stash_delete(key, scope=self.scope)
+        return value
+
+    def check_cmd(self, command):
+        """Problems COSMOS would have with a command, without sending it (for dry runs)."""
+        from openc3.models.target_model import TargetModel
+        from openc3.utilities.extract import extract_fields_from_cmd_text
+
+        try:
+            target_name, cmd_name, params = extract_fields_from_cmd_text(command)
+        except Exception as error:  # noqa: BLE001
+            return [f"Can't parse the command: {error}"]
+        params = {k.upper(): v for k, v in params.items()}
+        try:
+            packet = TargetModel.packet(target_name.upper(), cmd_name.upper(), type="CMD", scope=self.scope)
+        except Exception:  # noqa: BLE001
+            return [f"Unknown command {target_name} {cmd_name}"]
+        items = {item["name"]: item for item in packet["items"]}
+        problems = [f"Unknown parameter {name}" for name in params if name not in items]
+        for name, item in items.items():
+            if item.get("required") and name not in params:
+                problems.append(f"Missing required parameter {name}")
+            if name not in params:
+                continue
+            value = params[name]
+            if isinstance(value, str):
+                value = value.strip("'\"")
+            states = item.get("states") or {}
+            if states and isinstance(value, str):
+                if value not in states:
+                    problems.append(f"{name} = {value!r} is not one of {', '.join(states)}")
+                continue
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                low, high = item.get("minimum"), item.get("maximum")
+                if low is not None and high is not None and not (low <= value <= high):
+                    problems.append(f"{name} = {value} is outside {low}..{high}")
+        return problems
+
     def send_cmd(self, command, allow_hazardous=False):
         from openc3.api.cmd_api import cmd, cmd_no_hazardous_check
         from openc3.top_level import HazardousError

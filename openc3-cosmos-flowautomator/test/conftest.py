@@ -26,6 +26,8 @@ class FakeBackend:
         self.started_scripts = []
         self.stopped_scripts = []
         self.set_calls = []
+        self.bad_commands = {}  # command name -> problems check_cmd reports
+        self.stash = {}  # what scripts stash_set
         self.lock = threading.Lock()
 
     def tlm(self, item, value_type="CONVERTED"):
@@ -42,6 +44,25 @@ class FakeBackend:
     def cmd_hazardous(self, command):
         parts = command.split()
         return len(parts) > 1 and parts[1] in self.hazardous
+
+    def tlm_packet(self, target, packet, value_type="CONVERTED"):
+        prefix = f"{target} {packet} "
+        values = {k[len(prefix) :]: v for k, v in self.values.items() if k.startswith(prefix)}
+        if not values:
+            raise RuntimeError(f"Packet '{target} {packet}' does not exist")
+        return values
+
+    def put_script(self, path, text):
+        self.scripts_saved = {**getattr(self, "scripts_saved", {}), path: text}
+
+    def stash_take(self, key):
+        return self.stash.pop(key, None)
+
+    def check_cmd(self, command):
+        parts = command.split()
+        if len(parts) < 2:
+            return ["Can't parse the command"]
+        return list(self.bad_commands.get(parts[1], []))
 
     def send_cmd(self, command, allow_hazardous=False):
         name = command.split()[1] if len(command.split()) > 1 else command

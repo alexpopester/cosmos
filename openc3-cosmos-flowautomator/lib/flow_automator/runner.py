@@ -9,6 +9,7 @@ node (or ends), then carries on from that join.
 
 import contextlib
 import copy
+import re
 import threading
 import time
 import uuid
@@ -36,6 +37,14 @@ class RunEndedError(Exception):
     """An End node finished the run successfully."""
 
 
+class InputTimeoutError(Exception):
+    """Nobody answered an Ask operator node in time."""
+
+
+ASK_KINDS = ("text", "number", "choice", "confirm")
+MAX_ANSWER_LENGTH = 1000
+
+
 def node_label(node):
     data = node.get("data") or {}
     return data.get("label") or node.get("type")
@@ -47,7 +56,19 @@ def strictest_mode(*modes):
 
 
 class FlowRun:
-    def __init__(self, engine, flow, trigger_node_id, reason="", variables=None, parent=None, mode=None):
+    def __init__(
+        self,
+        engine,
+        flow,
+        trigger_node_id,
+        reason="",
+        variables=None,
+        parent=None,
+        mode=None,
+        trigger_info=None,
+        dry_run=False,
+        skip_waits=False,
+    ):
         self.engine = engine
         self.flow = copy.deepcopy(flow)
         self.graph = Graph(self.flow)
@@ -56,8 +77,19 @@ class FlowRun:
         self.reason = reason
         self.parent = parent
         self.depth = parent.depth + 1 if parent else 0
+        # Branches of an isolated Parallel see their own copy of the variables (thread-local)
+        self._local = threading.local()
         self.variables = dict(self.flow.get("variables") or {})
         self.variables.update(variables or {})
+        self.start_variables = _json_safe(self.variables)
+        # What started this run, kept in its history: {"kind": "manual" | "trigger_tlm" | ... |
+        # "activity" | "rehearsal" | "subflow", "user", "node", "detail", ...}
+        self.trigger_info = dict(trigger_info or {"kind": "manual", "detail": reason})
+        self.flow_version = self.flow.get("version")
+        # A dry run sends nothing: commands are checked but not sent, scripts and telemetry writes are
+        # skipped. With skip_waits it doesn't wait either (waits assume their conditions come true).
+        self.dry_run = bool(dry_run or self.flow.get("dry_run") or (parent is not None and parent.dry_run))
+        self.skip_waits = self.dry_run and bool(skip_waits or (parent is not None and parent.skip_waits))
         self.status = "pending"
         self.message = ""
         self.started_at = None
@@ -86,6 +118,15 @@ class FlowRun:
         self._cancel = threading.Event()
         self._lock = threading.RLock()
         self.thread = None
+
+    @property
+    def variables(self):
+        local = getattr(self._local, "variables", None)
+        return local if local is not None else self._variables
+
+    @variables.setter
+    def variables(self, value):
+        self._variables = value
 
     # ---- control -------------------------------------------------------
 
@@ -169,8 +210,12 @@ class FlowRun:
         branches = self.graph.next_nodes(node["id"], "out")
         results = [None] * len(branches)
         errors = [None] * len(branches)
+        base = self.variables  # this thread's variables (a branch's own copy when nested)
+        isolate = bool((node.get("data") or {}).get("isolate"))
+        branch_vars = [copy.copy(base) if isolate else base for _ in branches]
 
         def run_branch(index, start):
+            self._local.variables = branch_vars[index]
             try:
                 results[index] = self._walk(start, in_parallel=True)
             except BaseException as error:  # noqa: BLE001 - collected and re-raised below
@@ -187,6 +232,16 @@ class FlowRun:
             thread.start()
         for thread in threads:
             thread.join()
+
+        if isolate:
+            # Merge each branch's changes back in wire order (later branches win) and keep them per branch
+            changes = []
+            for values in branch_vars:
+                changed = {k: v for k, v in values.items() if k not in base or base[k] is not v}
+                changes.append(_json_safe(changed))
+            for changed, values in zip(changes, branch_vars, strict=True):
+                base.update({k: values[k] for k in changed})
+            base["branch_results"] = changes
 
         # A real failure wins over an End node, which wins over the stops it caused
         for error in errors:
@@ -239,15 +294,15 @@ class FlowRun:
 
     def _gate(self, node, step):
         """Pause for operator approval if this run's mode requires it for this node."""
-        if is_trigger(node):
-            return
+        if is_trigger(node) or node["type"] == "ask":
+            return  # an Ask node is itself a question for the operator
         data = node.get("data") or {}
         hazardous = False
         preview = ""
         if node["type"] == "send_cmd":
             # Rendering or the hazard lookup may fail; the executor reports that
             try:
-                preview = self.evaluator().render(data.get("command"))
+                preview = render_command(self, data.get("command"), bool(data.get("allow_raw_values")))
                 hazardous = self.mode != "run" and bool(self.engine.backend.cmd_hazardous(preview))
             except Exception:  # noqa: BLE001
                 hazardous = False
@@ -262,7 +317,9 @@ class FlowRun:
             reasons.append("HAZARDOUS command")
         if not reasons:
             return
-        decision = self._wait_for_approval(node, step, "; ".join(reasons), preview or _preview(self, node, data))
+        decision, _approval = self._wait_for_approval(
+            node, step, "; ".join(reasons), preview or _preview(self, node, data)
+        )
         if hazardous:
             # The operator's approval is the hazardous acknowledgement
             step["approved_hazardous"] = True
@@ -270,7 +327,8 @@ class FlowRun:
             self.auto_approve = True
             self.log("info", "operator chose to run the rest (hazardous commands still ask)")
 
-    def _wait_for_approval(self, node, step, reason, preview):
+    def _wait_for_approval(self, node, step, reason, preview, ask=None, timeout=0):
+        """Wait for an operator. Returns (decision, approval). ``ask`` asks for a value (approval["value"])."""
         approval = {
             "id": uuid.uuid4().hex[:8],
             "run_id": self.id,
@@ -286,20 +344,29 @@ class FlowRun:
             "decided_by": None,
             "event": threading.Event(),
             "decision": None,
+            "ask": ask,
+            "value": None,
         }
         step["status"] = "waiting"
         step["message"] = f"Waiting for operator: {reason}"
         with self._lock:
             self.approvals[approval["id"]] = approval
         self.log("info", f"waiting for operator approval at '{approval['label']}' ({reason})")
+        try:
+            self.engine.on_approval_requested(self, {k: v for k, v in approval.items() if k != "event"})
+        except Exception as error:  # noqa: BLE001 - alerts are best effort
+            self.log("warn", f"approval alert failed: {error}")
         deadline = time.monotonic() + self.approval_timeout if self.approval_timeout > 0 else None
+        ask_deadline = time.monotonic() + timeout if ask is not None and timeout > 0 else None
         if self.approval_deadline is not None:
             approval["deadline"] = self.approval_deadline
         try:
             while not approval["event"].wait(0.1):
                 if self.cancelled():
                     raise RunStoppedError()
-                if deadline is not None and time.monotonic() > deadline:
+                if ask_deadline is not None and time.monotonic() > ask_deadline:
+                    raise InputTimeoutError()
+                if deadline is not None and time.monotonic() > deadline and ask is None:
                     raise RunFailedError(
                         f"No operator approval for '{approval['label']}' within {self.approval_timeout:g}s"
                     )
@@ -317,16 +384,19 @@ class FlowRun:
             self.message = f"Aborted by {approval['decided_by'] or 'operator'} at '{approval['label']}'"
             self._cancel.set()
             raise RunStoppedError()
-        return decision
+        return decision, approval
 
-    def approve(self, approval_id, decision, user=None):
-        """Answer a pending approval: 'go', 'run' (go, and stop asking) or 'abort'."""
+    def approve(self, approval_id, decision, user=None, value=None):
+        """Answer a pending approval: 'go', 'run' (go, and stop asking) or 'abort'. Ask nodes need a value."""
         if decision not in APPROVAL_DECISIONS:
             raise ValueError(f"Decision must be one of {', '.join(APPROVAL_DECISIONS)}")
         with self._lock:
             approval = self.approvals.get(approval_id)
         if approval is None or approval["decision"] is not None:
             return False
+        if approval.get("ask") and decision != "abort":
+            approval["value"] = _check_answer(approval["ask"], value)
+            decision = "go"
         approval["decided_by"] = user or "anonymous"
         approval["decision"] = decision
         if decision == "run":
@@ -336,7 +406,7 @@ class FlowRun:
                 others = [
                     a
                     for a in self.approvals.values()
-                    if a is not approval and a["decision"] is None and "HAZARDOUS" not in a["reason"]
+                    if a is not approval and a["decision"] is None and "HAZARDOUS" not in a["reason"] and not a["ask"]
                 ]
             for other in others:
                 other["decided_by"] = f"{user or 'anonymous'} (run the rest)"
@@ -416,6 +486,11 @@ class FlowRun:
                 "ended_at": self.ended_at,
                 "active_nodes": list(self.active.keys()),
                 "mode": self.mode,
+                "trigger": dict(self.trigger_info),
+                "flow_version": self.flow_version,
+                "dry_run": self.dry_run,
+                "skip_waits": self.skip_waits,
+                "start_variables": self.start_variables,
                 "activity_id": self.activity_id,
                 "approval_deadline": self.approval_deadline,
                 "auto_approve": self.auto_approve,
@@ -454,7 +529,7 @@ def _float(data, key, default):
 
 
 def exec_trigger(run, node, data, step):
-    step["message"] = run.reason
+    step["message"] = run.reason + (" (dry run)" if run.dry_run else "")
     return "out"
 
 
@@ -503,8 +578,116 @@ def exec_passthrough(run, node, data, step):
 def exec_set_var(run, node, data, step):
     value = run.evaluator().evaluate(data.get("expression"))
     run.variables[data["name"]] = value
-    step["message"] = f"{data['name']} = {value!r}"
+    parts = [f"{data['name']} = {value!r}"]
+    # More assignments, in order; each can use the ones before it
+    for name, expression in (data.get("more") or {}).items():
+        value = run.evaluator().evaluate(str(expression))
+        run.variables[name] = value
+        parts.append(f"{name} = {value!r}")
+    step["message"] = "; ".join(parts)[:2000]
     return "out"
+
+
+def exec_read_packet(run, node, data, step):
+    target = run.evaluator().render(data.get("target") or "").upper()
+    packet = run.evaluator().render(data.get("packet") or "").upper()
+    value_type = (data.get("value_type") or "CONVERTED").upper()
+    values = run.engine.backend.tlm_packet(target, packet, value_type)
+    name = data.get("variable") or "packet"
+    run.variables[name] = values
+    step["message"] = f"{name} = {target} {packet} ({len(values)} items)"
+    return "out"
+
+
+def exec_wait_packet(run, node, data, step):
+    """Wait until a new packet arrives (its received count goes up), e.g. the first telemetry after AOS."""
+    target = run.evaluator().render(data.get("target") or "").upper()
+    packet = run.evaluator().render(data.get("packet") or "").upper()
+    timeout = _float(data, "timeout", 60)
+    count = int(_float(data, "count", 1))
+    if run.skip_waits:
+        step["message"] = f"DRY RUN: assumed {count} {target} {packet} packet(s) arrive"
+        return "received"
+    backend = run.engine.backend
+    start = backend.tlm_counts([(target, packet)])[0]
+    started = time.monotonic()
+    deadline = started + timeout
+    while True:
+        now_count = backend.tlm_counts([(target, packet)])[0]
+        if now_count - start >= count:
+            run.variables["packet_count"] = now_count
+            step["message"] = f"{target} {packet} received after {time.monotonic() - started:.1f}s"
+            return "received"
+        if time.monotonic() >= deadline:
+            step["message"] = f"No new {target} {packet} within {timeout:g}s"
+            return "timeout"
+        run.sleep(min(max(0.05, _float(data, "poll", 0.25)), max(0.0, deadline - time.monotonic())))
+
+
+def _check_answer(ask, value):
+    kind = ask.get("kind", "text")
+    if kind == "confirm":
+        if isinstance(value, bool):
+            return value
+        if str(value).lower() in ("true", "yes", "1"):
+            return True
+        if str(value).lower() in ("false", "no", "0"):
+            return False
+        raise ValueError("Answer yes or no")
+    if value in (None, ""):
+        raise ValueError("An answer is required")
+    if kind == "number":
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"'{value}' is not a number") from None
+        for key, test, words in (("min", lambda n, m: n < m, "below"), ("max", lambda n, m: n > m, "above")):
+            if ask.get(key) not in (None, "") and test(number, float(ask[key])):
+                raise ValueError(f"{number:g} is {words} the {key} {float(ask[key]):g}")
+        return int(number) if number.is_integer() else number
+    if kind == "choice":
+        if str(value) not in [str(c) for c in ask.get("choices") or []]:
+            raise ValueError(f"'{value}' is not one of the choices")
+        return str(value)
+    text = str(value)
+    if len(text) > MAX_ANSWER_LENGTH:
+        raise ValueError(f"Answers are limited to {MAX_ANSWER_LENGTH} characters")
+    return text
+
+
+def exec_ask(run, node, data, step):
+    """Ask the operator for a value; it goes into a variable. Follows 'timeout' if nobody answers in time."""
+    kind = data.get("kind") or "text"
+    if kind not in ASK_KINDS:
+        raise RuntimeError(f"Answer type must be one of {', '.join(ASK_KINDS)}")
+    prompt = run.evaluator().render(data.get("prompt") or "")
+    variable = data.get("variable") or "answer"
+    default = data.get("default")
+    ask = {
+        "kind": kind,
+        "prompt": prompt,
+        "choices": [str(c) for c in data.get("choices") or []],
+        "default": default,
+        "min": data.get("min"),
+        "max": data.get("max"),
+    }
+    if run.skip_waits and default not in (None, ""):
+        run.variables[variable] = _check_answer(ask, default)
+        step["message"] = f"DRY RUN: used the default answer {run.variables[variable]!r}"
+        return "answered"
+    try:
+        _decision, approval = run._wait_for_approval(
+            node, step, "operator input", prompt, ask=ask, timeout=_float(data, "timeout", 0)
+        )
+    except InputTimeoutError:
+        if default not in (None, ""):
+            run.variables[variable] = _check_answer(ask, default)
+        step["message"] = f"No answer within {_float(data, 'timeout', 0):g}s"
+        return "timeout"
+    run.variables[variable] = approval["value"]
+    step["message"] = f"{approval['decided_by']} answered {approval['value']!r}"
+    step["answer"] = approval["value"]
+    return "answered"
 
 
 def _preview(run, node, data):
@@ -531,6 +714,14 @@ def _preview(run, node, data):
             return f"Wait until {anchor} {'+' if offset >= 0 else '-'} {abs(offset):g}s"
         if kind == "contact_check":
             return f"Need {_float(data, 'min_remaining', 0):g}s of contact left"
+        if kind == "ask":
+            return run.evaluator().render(data.get("prompt") or "")
+        if kind == "wait_packet":
+            return f"Wait for {data.get('target')} {data.get('packet')} (up to {data.get('timeout', 60)}s)"
+        if kind == "read_packet":
+            return f"Read {data.get('target')} {data.get('packet')} into {data.get('variable') or 'packet'}"
+        if kind == "notify":
+            return f"Notify: {run.evaluator().render(data.get('message') or '')}"
         if kind == "subflow":
             return f"Run sub-flow {data.get('flow_id')}"
         if kind == "end":
@@ -540,9 +731,64 @@ def _preview(run, node, data):
     return node_label(node)
 
 
+# Outside quotes a value mustn't add parameters (comma), open a quote, or start the parameter list
+_UNQUOTED_UNSAFE = re.compile(r"[,'\"\x00-\x1f]|\bwith\b", re.IGNORECASE)
+_CONTROL = re.compile(r"[\x00-\x1f]")
+
+
+def _quote_state(text, quote):
+    for char in text:
+        if quote is None and char in "'\"":
+            quote = char
+        elif char == quote:
+            quote = None
+    return quote
+
+
+def render_command(run, template, allow_raw=False):
+    """Render a command template so values from {{ }} can only fill in a value, never change the command.
+
+    A value outside quotes can't contain commas, quotes, control characters or the word 'with'; inside
+    quotes it can't contain that quote. So a parameter set to "NORMAL, DURATION 99" fails the step
+    instead of sending an extra parameter. ``allow_raw`` (the node's Allow raw values) turns this off.
+    """
+    evaluator = run.evaluator()
+    if allow_raw or not isinstance(template, str):
+        return evaluator.render(template)
+    out = []
+    position = 0
+    quote = None
+    for match in _TEMPLATE_RE.finditer(template):
+        literal = template[position : match.start()]
+        quote = _quote_state(literal, quote)
+        out.append(literal)
+        value = evaluator.evaluate(match.group(1))
+        text = "" if value is None else str(value)
+        bad = _UNQUOTED_UNSAFE.search(text) if quote is None else (quote in text or _CONTROL.search(text))
+        if bad:
+            where = "outside quotes" if quote is None else "inside quotes"
+            raise RuntimeError(
+                f"{{{{{match.group(1)}}}}} is {text!r}, which can't go into a command {where} "
+                "(it could change the command). Check the value, quote it in the command, or turn on "
+                "Allow raw values for this node"
+            )
+        out.append(text)
+        position = match.end()
+    out.append(template[position:])
+    return "".join(out)
+
+
 def exec_send_cmd(run, node, data, step):
-    command = run.evaluator().render(data.get("command"))
+    command = render_command(run, data.get("command"), bool(data.get("allow_raw_values")))
     step["message"] = command
+    if run.dry_run:
+        problems = run.engine.backend.check_cmd(command)
+        if problems:
+            raise RuntimeError(f"Command check failed: {'; '.join(problems)}")
+        step["message"] = f"DRY RUN: would send {command}"
+        step["dry_run"] = True
+        run.variables["last_command"] = command
+        return "out"
     allow = bool(data.get("allow_hazardous")) or bool(step.get("approved_hazardous"))
     run.engine.backend.send_cmd(command, allow_hazardous=allow)
     run.variables["last_command"] = command
@@ -553,6 +799,16 @@ def exec_run_script(run, node, data, step):
     backend = run.engine.backend
     filename = run.evaluator().render(data.get("filename"))
     environment = {str(k): str(run.render_value(v)) for k, v in (data.get("environment") or {}).items()}
+    if run.dry_run:
+        step["message"] = f"DRY RUN: would run {filename}" + (f" with {environment}" if environment else "")
+        step["dry_run"] = True
+        run.variables["script_state"] = "completed"
+        return "out"
+    # A script can hand a value back: stash_set(os.environ["FLOW_RESULT_KEY"], value)
+    result_key = f"flow_automator__{run.id}__{node['id']}"
+    environment.setdefault("FLOW_RESULT_KEY", result_key)
+    environment.setdefault("FLOW_RUN_ID", run.id)
+    environment.setdefault("FLOW_NAME", str(run.flow.get("name") or ""))
     script_id = backend.script_start(filename, environment)
     run.variables["script_id"] = script_id
     step["message"] = f"Started {filename} as script {script_id}"
@@ -574,6 +830,15 @@ def exec_run_script(run, node, data, step):
             raise RuntimeError(f"Script {filename} ({script_id}) timed out after {timeout:g}s")
     run.variables["script_state"] = state
     step["message"] = f"{filename} ({script_id}) {state}"
+    try:
+        result = backend.stash_take(environment["FLOW_RESULT_KEY"])
+    except Exception as error:  # noqa: BLE001 - a missing result isn't a failure
+        result = None
+        run.log("warn", f"could not read the result of {filename}: {error}")
+    if result is not None:
+        name = data.get("result_variable") or "script_result"
+        run.variables[name] = result
+        step["message"] += f", {name} = {str(result)[:200]}"
     if state == "completed" or (state == "completed_errors" and data.get("allow_errors")):
         return "out"
     raise RuntimeError(f"Script {filename} ({script_id}) finished as {state}")
@@ -589,6 +854,10 @@ def exec_set_tlm(run, node, data, step):
     item = normalize_item(run.evaluator().render(data.get("item")))
     value = run.render_value(data.get("value"))
     value_type = (data.get("value_type") or "CONVERTED").upper()
+    if run.dry_run:
+        step["message"] = f"DRY RUN: would set {item} = {value!r} ({value_type})"
+        step["dry_run"] = True
+        return "out"
     run.engine.backend.set_tlm(item, value, value_type)
     step["message"] = f"{item} = {value!r} ({value_type})"
     return "out"
@@ -604,6 +873,9 @@ def exec_log(run, node, data, step):
 
 def exec_wait_time(run, node, data, step):
     seconds = _float(data, "seconds", 0)
+    if run.skip_waits:
+        step["message"] = f"DRY RUN: skipped a {seconds:g}s wait"
+        return "out"
     step["message"] = f"{seconds:g}s"
     run.sleep(seconds)
     return "out"
@@ -616,6 +888,10 @@ def _wait_for(run, data, step):
     poll = max(0.05, _float(data, "poll", 0.25))
     deadline = time.monotonic() + timeout
     start = time.monotonic()
+    if run.skip_waits:
+        now_true = run.evaluator().truthy(condition)
+        step["message"] = f"DRY RUN: {condition} is {now_true}" + ("" if now_true else ", assumed it comes true")
+        return True
     while True:
         if run.evaluator().truthy(condition):
             step["message"] = f"{condition} true after {time.monotonic() - start:.2f}s"
@@ -653,6 +929,9 @@ def exec_wait_contact(run, node, data, step):
     target = _contact_time(run, CONTACT_ANCHORS[anchor]) + _float(data, "offset", 0)
     remaining = target - time.time()
     label = f"{anchor.upper()} {'+' if _float(data, 'offset', 0) >= 0 else '-'} {abs(_float(data, 'offset', 0)):g}s"
+    if run.skip_waits and remaining > 0:
+        step["message"] = f"DRY RUN: skipped {remaining:.0f}s wait for {label}"
+        return "out"
     if remaining <= 0:
         step["message"] = f"{label} was {-remaining:.1f}s ago, continuing"
         return "out"
@@ -684,6 +963,31 @@ def exec_subflow(run, node, data, step):
     return "out"
 
 
+def exec_notify(run, node, data, step):
+    message = run.evaluator().render(data.get("message") or "")
+    level = data.get("level") or "notification"
+    title = run.evaluator().render(data.get("title") or "") or f"'{run.flow.get('name')}'"
+    step["message"] = f"{'DRY RUN: would notify' if run.dry_run else 'Notified'}: {title}: {message}"
+    if run.dry_run:
+        step["dry_run"] = True
+        return "out"
+    root = run
+    while root.parent is not None:
+        root = root.parent
+    from .engine import run_path  # local: engine imports this module
+
+    run.engine.alerts.emit(
+        "flow_notify",
+        title,
+        message,
+        path=run_path(root.flow.get("id"), root.id),
+        level="alert" if level == "alert" else "notification",
+        key=f"notify:{run.id}:{node['id']}:{message}",
+        data={"run_id": run.id, "flow_id": run.flow.get("id")},
+    )
+    return "out"
+
+
 def exec_end(run, node, data, step):
     message = run.evaluator().render(data.get("message") or "")
     step["message"] = message
@@ -711,8 +1015,12 @@ EXECUTORS = {
     "wait_time": exec_wait_time,
     "wait_tlm": exec_wait_tlm,
     "wait_check": exec_wait_check,
+    "read_packet": exec_read_packet,
+    "wait_packet": exec_wait_packet,
+    "ask": exec_ask,
     "wait_contact": exec_wait_contact,
     "contact_check": exec_contact_check,
+    "notify": exec_notify,
     "subflow": exec_subflow,
     "end": exec_end,
 }

@@ -14,10 +14,30 @@ cd "$(dirname "$0")"
 : "${COSMOS_PASSWORD:?set COSMOS_PASSWORD}"
 IMAGE=mcr.microsoft.com/playwright:v1.63.0-noble
 TESTS=("$@")
-[ ${#TESTS[@]} -gt 0 ] || TESTS=(ui_test.mjs modes_test.mjs large_test.mjs rules_test.mjs contacts_test.mjs)
+[ ${#TESTS[@]} -gt 0 ] || TESTS=(ui_test.mjs modes_test.mjs large_test.mjs history_test.mjs pickers_test.mjs rules_test.mjs contacts_test.mjs)
+OPERATOR=${OPERATOR_CONTAINER:-cosmos-openc3-operator-1}
+
+# history_test.mjs sends alerts to a webhook: a tiny receiver inside the operator container (where the
+# engine runs) that appends each POST body to /tmp/flow_hooks.log
+start_webhook_receiver() {
+  docker exec "$OPERATOR" sh -c ': > /tmp/flow_hooks.log'
+  docker exec -d "$OPERATOR" /openc3/python/.venv/bin/python -c "
+import http.server
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        open('/tmp/flow_hooks.log', 'ab').write(self.rfile.read(int(self.headers.get('Content-Length') or 0)) + b'\n')
+        self.send_response(200); self.end_headers()
+    def log_message(self, *a): pass
+try:
+    http.server.HTTPServer(('127.0.0.1', 7799), H).serve_forever()
+except OSError:
+    pass  # already running
+"
+  sleep 1
+}
 docker_run() {
   docker run --rm --network host --user "$(id -u):$(id -g)" -e HOME=/tmp \
-    -e COSMOS_PASSWORD -e COSMOS_URL -e CONTACT_JSON -e SHOTS=shots \
+    -e COSMOS_PASSWORD -e COSMOS_URL -e CONTACT_JSON -e WEBHOOK_URL -e SHOTS=shots \
     -v "$PWD:/work" -w /work "$IMAGE" "$@"
 }
 [ -d node_modules/playwright ] || docker_run npm install --no-audit --no-fund
@@ -32,6 +52,19 @@ for test in "${TESTS[@]}"; do
       ;;
   esac
   export CONTACT_JSON
+  WEBHOOK_URL=""
+  if [ "$test" = history_test.mjs ]; then
+    start_webhook_receiver
+    WEBHOOK_URL=http://127.0.0.1:7799/hook
+  fi
+  export WEBHOOK_URL
   docker_run node "$test" || failed=1
+  if [ "$test" = history_test.mjs ]; then
+    if docker exec "$OPERATOR" grep -q '"approval_waiting"' /tmp/flow_hooks.log; then
+      echo "PASS  the webhook received the approval event"
+    else
+      echo "FAIL  the webhook received the approval event"; failed=1
+    fi
+  fi
 done
 exit $failed

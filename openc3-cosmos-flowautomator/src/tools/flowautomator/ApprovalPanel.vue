@@ -22,7 +22,8 @@
           }}
         </v-icon>
         <span class="text-subtitle-2">
-          Waiting for approval: <b>{{ a.label }}</b>
+          {{ a.ask ? 'Question' : 'Waiting for approval' }}:
+          <b>{{ a.label }}</b>
         </span>
         <v-spacer />
         <span class="text-caption text-medium-emphasis">
@@ -33,8 +34,81 @@
         <span v-if="showFlow">{{ a.flow_name }} · </span>run {{ a.run_id }} ·
         {{ a.reason }}
       </div>
-      <pre class="fa-approval-preview mx-3 my-2">{{ a.preview }}</pre>
-      <div class="d-flex px-3 pb-2">
+      <pre v-if="!a.ask" class="fa-approval-preview mx-3 my-2">{{
+        a.preview
+      }}</pre>
+      <div v-else class="px-3 pt-2 fa-ask">
+        <div class="text-body-1 mb-2">{{ a.ask.prompt || a.preview }}</div>
+        <div class="d-flex align-center pb-2">
+          <v-select
+            v-if="a.ask.kind === 'choice'"
+            v-model="answers[a.id]"
+            :items="a.ask.choices"
+            label="Answer"
+            density="compact"
+            variant="outlined"
+            hide-details
+            class="mr-2"
+          />
+          <v-text-field
+            v-else-if="a.ask.kind !== 'confirm'"
+            v-model="answers[a.id]"
+            :type="a.ask.kind === 'number' ? 'number' : 'text'"
+            :placeholder="a.ask.default != null ? String(a.ask.default) : ''"
+            label="Answer"
+            density="compact"
+            variant="outlined"
+            hide-details
+            autofocus
+            class="mr-2 fa-ask-input"
+            @keyup.enter="answer(a, answers[a.id])"
+          />
+          <template v-if="a.ask.kind === 'confirm'">
+            <v-btn
+              size="small"
+              color="success"
+              variant="flat"
+              class="mr-2"
+              :loading="busy === a.id"
+              @click="answer(a, true)"
+            >
+              Yes
+            </v-btn>
+            <v-btn
+              size="small"
+              variant="tonal"
+              class="mr-2"
+              :disabled="busy === a.id"
+              @click="answer(a, false)"
+            >
+              No
+            </v-btn>
+          </template>
+          <v-btn
+            v-else
+            size="small"
+            color="primary"
+            variant="flat"
+            class="mr-2 fa-ask-submit"
+            :loading="busy === a.id"
+            @click="answer(a, answers[a.id])"
+          >
+            Answer
+          </v-btn>
+          <v-spacer />
+          <v-btn
+            size="small"
+            color="warning"
+            variant="tonal"
+            prepend-icon="mdi-stop"
+            :disabled="busy === a.id"
+            @click="decide(a, 'abort')"
+          >
+            Abort run
+          </v-btn>
+        </div>
+      </div>
+      <div v-if="!a.ask" class="d-flex px-3 pb-2">
         <v-btn
           size="small"
           :color="a.reason.includes('HAZARDOUS') ? 'error' : 'success'"
@@ -84,13 +158,22 @@ export default {
   },
   emits: ['decided'],
   data() {
-    return { busy: null }
+    return { busy: null, answers: {} }
   },
   methods: {
-    async decide(approval, decision) {
+    answer(approval, value) {
+      const empty = value === undefined || value === null || value === ''
+      const fallback = approval.ask.default
+      return this.decide(
+        approval,
+        'go',
+        empty && fallback != null ? fallback : value,
+      )
+    },
+    async decide(approval, decision, value) {
       this.busy = approval.id
       try {
-        await flowApi.approve(approval.run_id, approval.id, decision)
+        await flowApi.approve(approval.run_id, approval.id, decision, value)
         this.$emit('decided', approval, decision)
       } catch (error) {
         this.$notify.caution({

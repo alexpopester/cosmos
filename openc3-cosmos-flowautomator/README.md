@@ -41,6 +41,58 @@ sgp4 flows still work and the Contacts view says why passes are missing.
 | `stale_tle_days` | 3 | TLEs older than this are flagged |
 | `activity_retention_days` | 7 | Finished activities are deleted this long after their pass |
 
+## Demo
+
+One command puts a local COSMOS (docker, started with `openc3.sh`) in a state
+to demo everything:
+
+```
+COSMOS_PASSWORD=... demo/setup_demo.sh            # add --reinstall to load the newest local gem
+```
+
+It installs the COSMOS demo plugin (the INST target) if it's missing, installs
+the Flow Automator if it isn't running, waits for INST telemetry, then loads
+the demo. **File → Load Demo** in the tool does the last step on any COSMOS
+that has the INST target. Loading again resets the demo; it only replaces
+items named for it (flows and rules starting "Demo: ", DEMOSAT satellites, the
+demo stations), and **File → Remove Demo** takes it all out.
+
+What it sets up:
+
+| | |
+| --- | --- |
+| Satellites | DEMOSAT-1 (ISS-like) and DEMOSAT-2 (polar), TLEs with epoch now |
+| Stations | **Demo Pass Site**, under DEMOSAT-1's track so a pass starts ~5 minutes after loading; Wallops; Svalbard (capacity 2) |
+| Template | **Demo: Pass downlink**: parameters (choice, number, telemetry item), wait for AOS, wait for the first packet, collect, check, report with Notify; alerts if telemetry doesn't arrive or the pass is short |
+| Rule | **Demo: DEMOSAT-1 downlinks**: Pass downlink at AOS − 60s in every DEMOSAT-1 pass above 20°, stop at LOS |
+| Activity | Health check over Svalbard on DEMOSAT-2's next pass |
+| Flows | **Health check** (Read packet, functions, If, a step that asks first), **Collect with approvals** (crawl, hazardous state and command, Ask operator), **Parallel checks** (separate variables per branch), **Script result** (a script hands a value back), **Hot temperature watch** (armed in dry-run mode on live telemetry) |
+
+A walkthrough:
+
+1. **Contacts** (it opens there): the timeline, the DEMOSAT passes, the rule's
+   activities. The first downlink starts a minute before the Demo Pass Site
+   AOS. Watch it go *running* → *done*; open its run to see it wait for AOS,
+   wait for the first packet, send the collect and report. The bell shows its
+   Notify.
+2. Click **Schedule** on another pass, pick *Demo: Pass downlink*, fill in the
+   parameters (the sensor has a telemetry picker), see the start time preview.
+   Schedule two in one pass to see the overlap warning. Try **Rehearse** on an
+   activity: a dry run with the real pass and parameters.
+3. **Flows → Demo: Collect with approvals → Run now**: crawl mode asks before
+   every step, the hazardous ones in red, then *Ask operator* asks whether to
+   clear the counters. Meanwhile the COSMOS bell gets the approval alert.
+4. **Demo: Health check → Dry run**: commands are checked against the COSMOS
+   definitions but not sent; the run log shows the values that flowed in from
+   the packet. Open a Send command node and try **Build command…** and the
+   telemetry picker.
+5. **Demo: Hot temperature watch** is armed in dry-run mode: its dry runs show
+   up in **View → Run History** (filter *Only dry runs*) whenever TEMP1 goes
+   over 40.
+6. Edit a flow and **File → Save With Note**, then **File → History** to
+   compare versions and restore one; **View → Audit Log** shows who did what.
+7. **View → Alerts** to add a Slack or Teams webhook and send a test.
+
 ## Flows
 
 A flow starts at a **trigger** and follows wires: each node finishes, then the
@@ -74,15 +126,54 @@ A sub-flow runs at least as cautiously as the run that called it.
 ### Expressions and templates
 
 Conditions are a safe subset of Python: arithmetic, comparisons, `and`/`or`,
-`x if c else y`, variables by name, and the functions `tlm`, `tlm_raw`,
-`tlm_formatted`, `tlm_with_units`, `var(name, default)`, `abs`, `min`, `max`,
-`round`, `int`, `float`, `str`, `bool`, `len`, `now`, and in scheduled runs
-`time_to_aos()`, `time_to_tca()`, `time_to_los()`. COSMOS check syntax works
-too: `INST HEALTH_STATUS TEMP1 > 50`. There's no attribute access, import or
-lambda, so a condition can't run arbitrary code.
+`x if c else y`, lists, dicts and indexing (`hs['TEMP1']`, `items[0]`,
+`name[0:3]`), variables by name, and functions:
+
+| | |
+| --- | --- |
+| Telemetry | `tlm`, `tlm_raw`, `tlm_formatted`, `tlm_with_units` (or COSMOS check syntax: `INST HEALTH_STATUS TEMP1 > 50`) |
+| Numbers | `abs`, `min`, `max`, `round`, `int`, `float`, `sqrt`, `floor`, `ceil`, `log10`, `sum`, `hex`, `format(x, '.2f')` |
+| Text | `str`, `upper`, `lower`, `strip`, `replace`, `split`, `join(sep, list)`, `startswith`, `endswith`, `contains`, `len` |
+| Lists, dicts | `list`, `sorted`, `reversed`, `range` (up to 10,000), `any`, `all`, `keys`, `values`, `get(container, key, default)` |
+| Time | `now()`, `utc(seconds)`; in scheduled runs `time_to_aos()`, `time_to_tca()`, `time_to_los()` |
+| Variables | `var(name, default)` |
+
+There's no attribute access (`x.upper()`), import or lambda, so a condition
+can't run arbitrary code; the functions above cover what methods would.
 
 Text fields (commands, script names, log messages) take `{{ expression }}`:
-`INST COLLECT with TYPE {{ collect_type }}, DURATION {{ duration }}`.
+`INST COLLECT with TYPE {{ collect_type }}, DURATION {{ round(tlm('INST HEALTH_STATUS TEMP1') / 10, 1) }}`.
+A value inserted into a command can't change it: outside quotes it can't
+contain commas, quotes or `with`, inside quotes it can't contain that quote,
+or the step fails. Quote string values in the command (`NOTE '{{ note }}'`),
+or turn on the node's *Allow raw values* when the value is meant to be command
+text (a command parameter).
+
+Every condition and text field has a telemetry picker (the satellite icon),
+and Send command has **Build command…**, which opens COSMOS's Command Sender
+form (states, ranges, required and hazardous checks come from the command
+definition).
+
+### Variables
+
+A run's variables start from the flow's *starting variables* and template
+parameters, and nodes add to them:
+
+- **Set variable** sets one or more variables from expressions, in order.
+- **Read packet** reads a whole packet into one variable (`hs['TEMP1']`).
+- **Ask operator** stores the operator's answer.
+- **Run script** sets `script_state`, and `script_result` (or the name you
+  choose) if the script hands a value back:
+  `stash_set(os.environ['FLOW_RESULT_KEY'], {'ok': True, 'temp': 21.5})`
+  (Ruby: `stash_set(ENV['FLOW_RESULT_KEY'], ...)`). Scripts also get
+  `FLOW_RUN_ID` and `FLOW_NAME`.
+- Loops set their counter; an error output sets `error`; Send command sets
+  `last_command`; triggers set `packet_count`, `limits_state`,
+  `trigger_value`; scheduled runs get the `contact_*` variables.
+- A **Sub-flow** gets the caller's variables and can copy its own back.
+- **Parallel** branches share variables unless *Separate variables per branch*
+  is on: then each branch works on a copy, their changes merge at the Join in
+  wire order, and `branch_results` lists each branch's changes.
 
 ### Node reference
 
@@ -100,22 +191,78 @@ Text fields (commands, script names, log messages) take `{{ expression }}`:
 | Loop | body, done, error | count or while condition, variable, max | Repeat the body; wire the body's end back into the loop |
 | Parallel | out (many) | | Run every wire at once |
 | Join | out | | Wait for all parallel branches |
-| Set variable | out, error | name, expression | Store a value |
+| Set variable | out, error | name, expression, more | Store one or more values |
+| Read packet | out, error | packet, variable, type | Read every item of a packet into a variable |
 | **Actions** | | | |
 | Send command | out, error | command, allow hazardous | Send a command (checked and logged by COSMOS like any other) |
 | Run script | out, error | file, wait, timeout, allow errors, environment | Start a script in Script Runner, optionally wait for it |
 | Set telemetry | out, error | item, value, type | Set a current value |
 | Log | out | message, level | Write to the COSMOS log |
+| Notify | out | title, message, level | Alert operators (COSMOS bell, webhooks) |
 | **Waits** | | | |
 | Wait | out | seconds | Pause |
 | Wait for telemetry | ok, timeout, error | condition, timeout, poll | Wait for a condition, or time out |
 | Wait check | out, error | condition, timeout, poll | Wait for a condition; fail on timeout |
+| Wait for packet | received, timeout, error | packet, count, timeout | Wait until new packets arrive (first telemetry after AOS) |
 | **Contacts** | | | |
 | Wait for contact | out, error | AOS/TCA/LOS, offset | Wait until a time relative to the run's pass |
 | Contact time left | ok, short, error | seconds | Branch on whether that much of the pass is left |
 | **Flow control** | | | |
+| Ask operator | answered, timeout, error | question, answer type, choices, variable, default, timeout | Ask for a value or yes/no |
 | Sub-flow | out, error | flow, copy variables back | Run another flow from its Manual trigger and wait |
 | End | | success/failed, message | Finish the whole run |
+
+## Dry runs
+
+**Dry run** (toolbar, or a scheduled activity's *Rehearse*) runs a flow
+without sending anything:
+
+- Commands are checked against the COSMOS command definitions (unknown
+  commands or parameters, required parameters, states, ranges) but not sent.
+- Scripts, telemetry writes and Notify nodes are recorded, not done.
+- *Skip waits* makes waits instant; Wait for telemetry, Wait check and Wait
+  for packet assume their condition comes true, Ask operator uses its default.
+- Approvals still ask, so a crawl or walk rehearsal walks through them.
+- A run can use a **simulated contact** (AOS in N seconds, lasting M) or a
+  real predicted pass, so contact templates can be rehearsed any time.
+
+A flow's *Dry-run mode* setting makes every run of it a dry run, triggers
+included: arm it to watch what it would do on live telemetry before it's
+allowed to command. Dry runs are marked in every run list and never ring the
+COSMOS bell.
+
+## Version history
+
+Every save is a numbered version with who saved it, an optional note
+(**File → Save With Note**) and a summary of what changed. **File → History**
+lists versions, shows how any version differs from the current flow (settings,
+nodes added, removed and changed field by field), exports one, or restores
+it, which saves it again as a new version, so nothing is lost. If someone else
+saved the flow after you opened it, saving asks whether to reload theirs or
+save yours over it (theirs stays in the history). Deleted flows keep their
+history and runs: **File → Restore Deleted Flow**.
+
+Every run records what started it (who pressed Run, which trigger and why,
+which activity, rule and pass, or which flow called it), the version that ran,
+its starting variables and whether it was a dry run. **View → Run History**
+searches runs across every flow, including deleted ones. A run's version links
+to that version in the history. Activities say when their template has changed
+since they were scheduled (*template v3 → v5*).
+
+## Alerts
+
+**View → Alerts** sets where events go:
+
+- **COSMOS notifications**, the bell in every COSMOS tool; alert-level events
+  pop up until acknowledged and link back to the run.
+- **Webhooks**: Slack or Teams incoming webhooks, or generic JSON for
+  anything else. URLs are shown masked once saved. Set the COSMOS address so
+  links in messages open the tool.
+
+Events: approval waiting, run failed or stopped, activity missed, failed,
+needing review, started or done, Stop all, scheduler paused, TLE stale,
+prediction failed, and Notify nodes. Each destination picks its own events;
+**Send test** checks a destination.
 
 ## Contacts
 
@@ -137,8 +284,11 @@ CelesTrak, telemetry) plug into `lib/flow_automator/tle_sources.py`.
 
 Any flow with a Manual trigger can be scheduled. Turn on **Template for
 scheduled activities** in its flow settings to list it first and declare
-**parameters** (string, number, boolean or choice, with defaults). Parameters
-become run variables of the same name. Runs started by an activity also get:
+**parameters**: text (with an optional pattern and maximum length), number
+(minimum, maximum, whole numbers), yes/no, choice, telemetry item, command or
+list, each with a default and a description. Item and command parameters get
+the pickers in the Run and Schedule dialogs. Parameters become run variables
+of the same name. Runs started by an activity also get:
 
 `contact_satellite`, `contact_target`, `contact_station`, `contact_aos`,
 `contact_tca`, `contact_los`, `contact_duration`, `contact_max_elevation`,
@@ -255,7 +405,6 @@ AOS; it takes about five minutes.
 
 - A run that's in progress when the engine restarts fails; it isn't resumed.
 - Each run keeps its last 1,000 steps; each flow its last `run_history` runs.
-- Saving the same flow from two places at once: the last save wins.
 - Predicting 50 satellites × 20 stations for 7 days takes about a minute in
   the background after a restart or a full recompute.
 - TLEs come from the dialog only; times are UTC; stations have one elevation
