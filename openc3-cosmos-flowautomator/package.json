@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "serve": "vite build --watch --mode dev-server",
-    "build": "vite build",
+    "build": "vite build && node scripts/source-hash.mjs > tools/flowautomator/.source-hash",
     "lint": "eslint src",
     "serve:standalone": "vite preview --mode standalone"
   },

@@ -2,3 +2,4 @@ tools/*
 node_modules
 *.gem
 __pycache__/
+.pnpm-store/

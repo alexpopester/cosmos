@@ -383,8 +383,19 @@ Layout:
 - `microservices/FLOW_ENGINE/flow_engine.py`: the COSMOS microservice
 - `src/tools/flowautomator/`: the Vue tool
 
-Build: `pnpm install --frozen-lockfile --ignore-scripts`, then
-`rake build VERSION=X.Y.Z`.
+Build the gem either way:
+
+```
+rake build VERSION=X.Y.Z                    # with local Node, pnpm and Ruby: builds the tool, then the gem
+./build_tool.sh                             # without them: builds the tool (local pnpm, or the openc3-node container)
+/path/to/cosmos/openc3.sh cli rake build VERSION=X.Y.Z   # then packages it in the COSMOS container
+```
+
+`openc3.sh cli` runs rake in the cmd-tlm-api container, which has no Node, so it
+packages the tool already built in `tools/flowautomator` instead of building
+it. It checks the build matches the current source (`pnpm run build` writes a
+hash of it to `tools/flowautomator/.source-hash`) and stops with a message if
+the tool hasn't been built or the source changed since.
 
 Engine tests (no COSMOS needed):
 
