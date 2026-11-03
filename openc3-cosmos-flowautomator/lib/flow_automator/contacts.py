@@ -1,19 +1,32 @@
 """Contact planning: satellites, ground stations, predicted passes and scheduled activities.
 
-* Satellites carry a TLE (see ``tle_sources``); stations a location and an
-  elevation mask. Contacts (passes) are predicted for every enabled
-  satellite x station pair from ``lookback`` ago to ``horizon`` ahead, kept in
-  memory and recomputed when a TLE or station changes and every few hours.
+* Satellites carry a TLE (see ``tle_sources``); stations a location, an
+  elevation mask and a capacity (how many satellites they can work at once).
+  Contacts (passes) are predicted for every enabled satellite x station pair
+  from ``lookback`` ago to ``horizon`` ahead and kept in memory.
+* Prediction runs in a background thread, one satellite at a time, and only
+  for what changed: a new TLE recomputes that satellite, a station edit that
+  station. Everything is refreshed every ``recompute_hours`` so the window
+  rolls forward. API calls never wait for it; ``status()["predicting"]``
+  says how many satellites are queued. (Without the thread, as in tests and
+  before ``start()``, prediction runs inline.)
 * An activity is a snapshot of a flow (usually a template), its parameter
   values, a contact and a start time relative to it: ``AOS - 120`` or
   ``LOS - 90``. The planner starts it as a run at that time with the contact's
   details as run variables (``contact_aos``, ``contact_los`` ...).
+* A rule schedules a template into every matching contact (satellites,
+  stations, minimum elevation and duration) as contacts are predicted.
+  Deleting an activity a rule made cancels it, so the rule won't put it back.
+  Higher priority rules claim contacts first, and a rule can skip contacts
+  whose station is already at capacity.
 * When contacts are recomputed each scheduled activity follows its pass: the
   predicted pass of the same satellite and station whose TCA is closest, if it
   moved less than ``retime_tolerance`` seconds. Otherwise it needs review and
-  won't run until someone moves it.
+  won't run until someone moves it (a rule's activity is cancelled and the
+  rule schedules the new pass instead).
 * An activity that couldn't start on time (engine down, scheduler paused)
   starts late if it's within its ``late_tolerance``, else it's marked missed.
+* Finished activities are deleted ``retention_days`` after they end.
 """
 
 import contextlib
@@ -22,7 +35,15 @@ import threading
 import time
 import uuid
 
-from .orbit import SGP4_IMPORT_ERROR, OrbitError, Propagator, Station, find_passes, parse_tle
+from .audit import user_name
+from .orbit import (
+    SGP4_IMPORT_ERROR,
+    OrbitError,
+    Propagator,
+    Station,
+    find_passes_for_stations,
+    parse_tle,
+)
 from .templates import fill_parameters
 from .tle_sources import get_source
 
@@ -31,6 +52,8 @@ ANCHORS = ("aos", "tca", "los")
 WAITING = ("scheduled", "needs_review")
 FINISHED = ("done", "failed", "stopped", "missed", "cancelled")
 TLE_HISTORY = 5
+SCHEDULER = "scheduler"
+RULE_LEAD_SECONDS = 10  # a rule doesn't create activities that would start sooner than this
 DEFAULTS = {
     "late_tolerance": 30.0,
     "approval_margin": 30.0,
@@ -69,6 +92,10 @@ def activity_start(activity):
     return contact[activity.get("anchor", "aos")] + float(activity.get("offset") or 0)
 
 
+def _overlap(a, b):
+    return a["aos"] < b["los"] and b["aos"] < a["los"]
+
+
 class ContactPlanner:
     def __init__(
         self,
@@ -80,6 +107,7 @@ class ContactPlanner:
         recompute_hours=6.0,
         retime_tolerance=120.0,
         stale_tle_days=3.0,
+        retention_days=7.0,
         period=1.0,
     ):
         self.engine = engine
@@ -90,51 +118,75 @@ class ContactPlanner:
         self.recompute_every = recompute_hours * 3600
         self.retime_tolerance = retime_tolerance
         self.stale_tle_days = stale_tle_days
+        self.retention = retention_days * 86400
         self.period = period
         self.lock = threading.RLock()
         self.satellites = {}
         self.stations = {}
         self.activities = {}
+        self.rules = {}
         self.settings = {"paused": False, "paused_reason": ""}
+        self.pair_contacts = {}  # (satellite id, station id) -> contacts
         self.contacts = []
         self.contacts_by_id = {}
-        self.computed_at = None
+        self.pending = {}  # satellite id -> set of station ids to predict (None = all)
+        self.computed_at = None  # last time the whole window was refreshed
         self.compute_seconds = None
         self.problems = {}  # satellite id -> why it has no contacts
         self.last_polled = {}
+        self.last_pruned = 0.0
+        self.last_rules = 0.0
         self._stop = threading.Event()
+        self._wake = threading.Event()
         self._thread = None
+        self._worker = None
         self.last_error = None
 
     # ---- lifecycle ---------------------------------------------------------
+
+    def audit(self, user, action, kind, target_id=None, target_name=None, detail=""):
+        audit = getattr(self.engine, "audit", None)
+        if audit is not None:
+            audit.record(user, action, kind, target_id, target_name, detail)
 
     def load(self):
         with self.lock:
             self.satellites = self.store.records("satellites")
             self.stations = self.store.records("stations")
             self.activities = self.store.records("activities")
+            self.rules = self.store.records("rules")
             self.settings.update(self.store.records("planner_settings").get("settings", {}))
             now = self.clock()
             for activity in self.activities.values():
                 if activity["status"] == "running":
                     # The engine stopped in the middle of the run, which went with it
                     self._finish(activity, "failed", "The flow engine restarted during this activity's run", now)
-            self.recompute()
+            self.pair_contacts = {}
+            self.contacts = []
+            self.contacts_by_id = {}
+            self.pending = dict.fromkeys(self.satellites)
+            self.computed_at = None
         self.engine.log(
             "info",
             f"Contact planner loaded {len(self.satellites)} satellites, {len(self.stations)} stations, "
+            f"{len(self.rules)} rules, "
             f"{len([a for a in self.activities.values() if a['status'] in WAITING])} scheduled activities",
         )
 
     def start(self):
         self._stop.clear()
+        self._worker = threading.Thread(target=self._predict_loop, name="flow-predict", daemon=True)
+        self._worker.start()
+        self._wake.set()
         self._thread = threading.Thread(target=self._loop, name="flow-contacts", daemon=True)
         self._thread.start()
 
     def stop(self):
         self._stop.set()
-        if self._thread:
-            self._thread.join(timeout=5)
+        self._wake.set()
+        for thread in (self._thread, self._worker):
+            if thread:
+                thread.join(timeout=5)
 
     def _loop(self):
         while not self._stop.is_set():
@@ -147,6 +199,143 @@ class ContactPlanner:
                 self.last_error = str(error)
             self._stop.wait(self.period)
 
+    def _predict_loop(self):
+        while not self._stop.is_set():
+            self._wake.wait(5)
+            self._wake.clear()
+            try:
+                self.predict_pending()
+            except Exception as error:  # noqa: BLE001
+                self.engine.log("error", f"Pass prediction failed: {error}")
+
+    @property
+    def background(self):
+        return self._worker is not None and self._worker.is_alive()
+
+    # ---- prediction --------------------------------------------------------
+
+    def invalidate(self, satellite_ids=None, station_ids=None):
+        """Queue contacts for prediction: these satellites (default all) at these stations (default all)."""
+        with self.lock:
+            for sat_id in self.satellites if satellite_ids is None else satellite_ids:
+                if sat_id not in self.satellites:
+                    continue
+                if station_ids is None or self.pending.get(sat_id, ()) is None:
+                    self.pending[sat_id] = None
+                else:
+                    self.pending[sat_id] = set(self.pending.get(sat_id) or ()) | set(station_ids)
+        if self.background:
+            self._wake.set()
+        else:
+            self.predict_pending()
+
+    def recompute(self):
+        """Re-predict everything. Runs in the background when the planner is started."""
+        self.invalidate()
+
+    def predict_pending(self):
+        """Predict queued satellites one at a time, merging each as it finishes."""
+        while True:
+            with self.lock:
+                if not self.pending:
+                    if self.computed_at is None or self._batch_started is not None:
+                        self.computed_at = self.clock()
+                        self.compute_seconds = time.monotonic() - (self._batch_started or time.monotonic())
+                        self._batch_started = None
+                    return
+                if self._batch_started is None:
+                    self._batch_started = time.monotonic()
+                sat_id, station_ids = next(iter(self.pending.items()))
+                del self.pending[sat_id]
+                self.in_flight = sat_id
+                sat = copy.deepcopy(self.satellites.get(sat_id))
+                stations = [
+                    copy.deepcopy(s)
+                    for s in self.stations.values()
+                    if s.get("enabled", True) and (station_ids is None or s["id"] in station_ids)
+                ]
+                now = self.clock()
+            if sat is None:
+                continue
+            try:
+                contacts, problem = self._predict(sat, stations, now - self.lookback, now + self.horizon)
+            finally:
+                self.in_flight = None
+            with self.lock:
+                current = self.satellites.get(sat_id)
+                if (
+                    current is None
+                    or current.get("tle") != sat.get("tle")
+                    or current.get("enabled") != sat.get("enabled")
+                ):
+                    continue  # changed while predicting; it's queued again
+                station_set = {s["id"] for s in stations} if station_ids is not None else None
+                for key in list(self.pair_contacts):
+                    if key[0] == sat_id and (station_set is None or key[1] in station_set):
+                        del self.pair_contacts[key]
+                for station in stations:
+                    live = self.stations.get(station["id"])
+                    if live is None or not live.get("enabled", True):
+                        continue
+                    self.pair_contacts[(sat_id, station["id"])] = contacts.get(station["id"], [])
+                if problem:
+                    self.problems[sat_id] = problem
+                else:
+                    self.problems.pop(sat_id, None)
+                self._merge(now)
+
+    _batch_started = None
+    in_flight = None  # satellite being predicted right now (no longer in pending)
+
+    def predicting(self):
+        return len(self.pending) + (1 if self.in_flight and self.in_flight not in self.pending else 0)
+
+    def _predict(self, sat, stations, start, end):
+        """Returns ({station id: contacts}, problem or None). Runs without the lock."""
+        if not sat.get("enabled", True):
+            return {}, None
+        if not sat.get("tle"):
+            return {}, "No TLE yet"
+        if SGP4_IMPORT_ERROR:
+            return {}, SGP4_IMPORT_ERROR
+        if not stations:
+            return {}, None
+        try:
+            propagator = Propagator(sat["tle"]["line1"], sat["tle"]["line2"])
+            sites = [Station(s["latitude"], s["longitude"], s["altitude"], s["min_elevation"]) for s in stations]
+            found = find_passes_for_stations(propagator, sites, start, end)
+        except Exception as error:  # noqa: BLE001 - one bad orbit mustn't hide the rest
+            return {}, f"Prediction failed: {error}"
+        return {
+            station["id"]: [self._contact(sat, station, p) for p in passes]
+            for station, passes in zip(stations, found, strict=True)
+        }, None
+
+    def _drop_pairs(self, satellite_id=None, station_id=None):
+        for key in list(self.pair_contacts):
+            if (satellite_id and key[0] == satellite_id) or (station_id and key[1] == station_id):
+                del self.pair_contacts[key]
+
+    def _merge(self, now):
+        contacts = [c for pair in self.pair_contacts.values() for c in pair]
+        contacts.sort(key=lambda c: c["aos"])
+        self.contacts = contacts
+        self.contacts_by_id = {c["id"]: c for c in contacts}
+        self._retime(now)
+        self._apply_rules(now)
+
+    def _contact(self, sat, station, found):
+        contact = dict(found)
+        contact.update(
+            id=f"{sat['id']}-{station['id']}-{int(round(found['tca']))}",
+            satellite_id=sat["id"],
+            satellite=sat["name"],
+            target=sat.get("target", ""),
+            station_id=station["id"],
+            station=station["name"],
+        )
+        return contact
+
     # ---- satellites and stations -------------------------------------------
 
     def _save(self, kind, record):
@@ -158,9 +347,10 @@ class ContactPlanner:
         result["tle_age_days"] = (now - epoch) / 86400 if epoch else None
         result["tle_stale"] = bool(epoch) and result["tle_age_days"] > self.stale_tle_days
         result["problem"] = self.problems.get(sat["id"])
+        result["predicting"] = sat["id"] in self.pending or sat["id"] == self.in_flight
         return result
 
-    def save_satellite(self, payload, sat_id=None):
+    def save_satellite(self, payload, sat_id=None, user=None):
         if not isinstance(payload, dict):
             raise PlannerError("Satellite must be a JSON object")
         with self.lock:
@@ -170,7 +360,13 @@ class ContactPlanner:
                     raise PlannerNotFoundError(f"Satellite '{sat_id}' not found")
                 sat = copy.deepcopy(sat)
             else:
-                sat = {"id": _short_id(), "created_at": self.clock(), "tle": None, "tle_history": []}
+                sat = {
+                    "id": _short_id(),
+                    "created_at": self.clock(),
+                    "created_by": user_name(user),
+                    "tle": None,
+                    "tle_history": [],
+                }
             name = str(payload.get("name", sat.get("name")) or "").strip()
             if not name:
                 raise PlannerError("Satellite needs a name")
@@ -187,24 +383,29 @@ class ContactPlanner:
             sat["tle_source"] = source
             tle_text = payload.get("tle")
             if isinstance(tle_text, str) and tle_text.strip():
-                self._apply_tle(sat, tle_text, payload.get("source") or source.get("kind", "manual"))
+                self._apply_tle(sat, tle_text, payload.get("source") or source.get("kind", "manual"), user)
             self.satellites[sat["id"]] = sat
             self._save("satellites", sat)
-            self.recompute()
+            if not sat["enabled"]:
+                self._drop_pairs(satellite_id=sat["id"])
+                self._merge(self.clock())
+        self.invalidate([sat["id"]])
+        with self.lock:
             return self._satellite_json(sat, self.clock())
 
-    def set_tle(self, sat_id, text, source="manual"):
-        """Apply a new TLE to a satellite (from any TLE source) and recompute its contacts."""
+    def set_tle(self, sat_id, text, source="manual", user=None):
+        """Apply a new TLE to a satellite (from any TLE source) and queue its contacts for prediction."""
         with self.lock:
             sat = self.satellites.get(sat_id)
             if sat is None:
                 raise PlannerNotFoundError(f"Satellite '{sat_id}' not found")
-            self._apply_tle(sat, text, source)
+            self._apply_tle(sat, text, source, user)
             self._save("satellites", sat)
-            self.recompute()
+        self.invalidate([sat_id])
+        with self.lock:
             return self._satellite_json(sat, self.clock())
 
-    def _apply_tle(self, sat, text, source):
+    def _apply_tle(self, sat, text, source, user=None):
         try:
             tle = parse_tle(text)
         except OrbitError as error:
@@ -214,6 +415,7 @@ class ContactPlanner:
             return
         tle["source"] = source
         tle["applied_at"] = self.clock()
+        tle["applied_by"] = user_name(user) if user is not None else source
         if old:
             sat["tle_history"] = ([old] + list(sat.get("tle_history") or []))[:TLE_HISTORY]
         sat["tle"] = tle
@@ -221,12 +423,17 @@ class ContactPlanner:
 
     def delete_satellite(self, sat_id):
         with self.lock:
-            if self.satellites.pop(sat_id, None) is None:
+            sat = self.satellites.pop(sat_id, None)
+            if sat is None:
                 raise PlannerNotFoundError(f"Satellite '{sat_id}' not found")
             self.store.delete_record("satellites", sat_id)
-            self.recompute()
+            self.pending.pop(sat_id, None)
+            self.problems.pop(sat_id, None)
+            self._drop_pairs(satellite_id=sat_id)
+            self._merge(self.clock())
+            return sat
 
-    def save_station(self, payload, station_id=None):
+    def save_station(self, payload, station_id=None, user=None):
         if not isinstance(payload, dict):
             raise PlannerError("Station must be a JSON object")
         with self.lock:
@@ -236,90 +443,56 @@ class ContactPlanner:
                     raise PlannerNotFoundError(f"Station '{station_id}' not found")
                 station = copy.deepcopy(station)
             else:
-                station = {"id": _short_id(), "created_at": self.clock()}
+                station = {"id": _short_id(), "created_at": self.clock(), "created_by": user_name(user)}
             merged = {**station, **payload}
             name = str(merged.get("name") or "").strip()
             if not name:
                 raise PlannerError("Station needs a name")
+            previous = {k: station.get(k) for k in ("latitude", "longitude", "altitude", "min_elevation", "enabled")}
             station.update(
                 name=name,
                 latitude=_number(merged.get("latitude"), "Latitude", -90, 90),
                 longitude=_number(merged.get("longitude"), "Longitude", -180, 360),
                 altitude=_number(merged.get("altitude") or 0, "Altitude", -500, 10000),
                 min_elevation=_number(merged.get("min_elevation") or 0, "Minimum elevation", -5, 89),
+                capacity=int(_number(merged.get("capacity") or 1, "Capacity", 1, 100)),
                 enabled=bool(merged.get("enabled", True)),
             )
             if station["longitude"] > 180:
                 station["longitude"] -= 360
             self.stations[station["id"]] = station
             self._save("stations", station)
-            self.recompute()
-            return copy.deepcopy(station)
+            geometry_changed = previous != {k: station.get(k) for k in previous}
+            if not station["enabled"]:
+                self._drop_pairs(station_id=station["id"])
+                self._merge(self.clock())
+            elif not geometry_changed:
+                # Only the name or capacity: relabel the contacts without predicting again
+                for (_sat, st_id), pair in self.pair_contacts.items():
+                    if st_id == station["id"]:
+                        for contact in pair:
+                            contact["station"] = name
+                self._merge(self.clock())
+        if station["enabled"] and geometry_changed:
+            self.invalidate(station_ids=[station["id"]])
+        return copy.deepcopy(station)
 
     def delete_station(self, station_id):
         with self.lock:
-            if self.stations.pop(station_id, None) is None:
+            station = self.stations.pop(station_id, None)
+            if station is None:
                 raise PlannerNotFoundError(f"Station '{station_id}' not found")
             self.store.delete_record("stations", station_id)
-            self.recompute()
+            self._drop_pairs(station_id=station_id)
+            self._merge(self.clock())
+            return station
 
-    # ---- contacts ----------------------------------------------------------
-
-    def recompute(self):
-        """Predict every contact in the window, then re-time scheduled activities to follow them."""
-        with self.lock:
-            started = time.monotonic()
-            now = self.clock()
-            start, end = now - self.lookback, now + self.horizon
-            contacts = []
-            problems = {}
-            stations = [s for s in self.stations.values() if s.get("enabled", True)]
-            for sat in self.satellites.values():
-                if not sat.get("enabled", True):
-                    continue
-                if not sat.get("tle"):
-                    problems[sat["id"]] = "No TLE yet"
-                    continue
-                if SGP4_IMPORT_ERROR:
-                    problems[sat["id"]] = SGP4_IMPORT_ERROR
-                    continue
-                try:
-                    propagator = Propagator(sat["tle"]["line1"], sat["tle"]["line2"])
-                    for station in stations:
-                        site = Station(
-                            station["latitude"], station["longitude"], station["altitude"], station["min_elevation"]
-                        )
-                        for found in find_passes(propagator, site, start, end):
-                            contacts.append(self._contact(sat, station, found))
-                except Exception as error:  # noqa: BLE001 - one bad orbit mustn't hide the rest
-                    problems[sat["id"]] = f"Prediction failed: {error}"
-            contacts.sort(key=lambda c: c["aos"])
-            self.contacts = contacts
-            self.contacts_by_id = {c["id"]: c for c in contacts}
-            self.problems = problems
-            self.computed_at = now
-            self.compute_seconds = time.monotonic() - started
-            self._retime(now)
-
-    def _contact(self, sat, station, found):
-        contact = dict(found)
-        contact.update(
-            id=f"{sat['id']}-{station['id']}-{int(round(found['tca']))}",
-            satellite_id=sat["id"],
-            satellite=sat["name"],
-            target=sat.get("target", ""),
-            station_id=station["id"],
-            station=station["name"],
-        )
-        return contact
+    # ---- re-timing ---------------------------------------------------------
 
     def _nearest_contact(self, activity):
         old = activity["contact"]
-        candidates = [
-            c
-            for c in self.contacts
-            if c["satellite_id"] == old["satellite_id"] and c["station_id"] == old["station_id"] and not c["partial"]
-        ]
+        pair = self.pair_contacts.get((old["satellite_id"], old["station_id"]), [])
+        candidates = [c for c in pair if not c["partial"]]
         return min(candidates, key=lambda c: abs(c["tca"] - old["tca"]), default=None)
 
     def _retime(self, now):
@@ -329,6 +502,10 @@ class ContactPlanner:
             old = activity["contact"]
             if old["los"] < now:
                 continue  # the scheduler marks it missed
+            if (old["satellite_id"], old["station_id"]) not in self.pair_contacts and (
+                old["satellite_id"] in self.pending
+            ):
+                continue  # not predicted yet
             nearest = self._nearest_contact(activity)
             shift = None if nearest is None else nearest["tca"] - old["tca"]
             if nearest is not None and abs(shift) <= self.retime_tolerance:
@@ -344,6 +521,13 @@ class ContactPlanner:
                         activity["message"] = f"Re-timed {shift:+.1f}s to follow the updated prediction"
                     self._save("activities", activity)
                 continue
+            if activity.get("rule_id"):
+                # The rule schedules whatever pass is predicted now; this one is gone
+                why = "contact no longer predicted" if nearest is None else f"contact moved {shift:+.0f}s"
+                self._finish(activity, "cancelled", f"Cancelled: {why}; the rule schedules the new prediction", now)
+                activity["superseded"] = True
+                self._save("activities", activity)
+                continue
             if activity["status"] == "needs_review" and activity.get("suggested_contact_id") == (
                 nearest and nearest["id"]
             ):
@@ -358,7 +542,9 @@ class ContactPlanner:
                     "accept the new time or move the activity"
                 )
             self._save("activities", activity)
-            self.engine.log("warn", f"Activity '{activity['label']}' needs review: {activity['message']}")
+            self.audit(
+                SCHEDULER, "flagged for review", "activity", activity["id"], activity["label"], activity["message"]
+            )
 
     @staticmethod
     def _contact_ref(contact):
@@ -377,6 +563,52 @@ class ContactPlanner:
         )
         return {k: contact[k] for k in keys}
 
+    # ---- station capacity --------------------------------------------------
+
+    def _used_contacts(self, exclude_activity=None):
+        """Contacts that have a scheduled or running activity: {contact id: contact ref}."""
+        used = {}
+        for activity in self.activities.values():
+            if activity is exclude_activity or not (activity["status"] in WAITING or activity["status"] == "running"):
+                continue
+            used[activity["contact"]["id"]] = activity["contact"]
+        return used
+
+    def _capacity(self, station_id):
+        return int((self.stations.get(station_id) or {}).get("capacity") or 1)
+
+    def _station_conflicts(self, used):
+        """Contacts in use that overlap more than their station's capacity: {contact id: [other contact ids]}."""
+        by_station = {}
+        for contact in used.values():
+            by_station.setdefault(contact["station_id"], []).append(contact)
+        conflicts = {}
+        for station_id, contacts in by_station.items():
+            capacity = self._capacity(station_id)
+            contacts.sort(key=lambda c: c["aos"])
+            for contact in contacts:
+                others = [o for o in contacts if o is not contact and _overlap(o, contact)]
+                if len(others) < capacity:
+                    continue
+                # Worst moment inside this contact: count the overlapping ones at each of their starts
+                worst = 0
+                for moment in [contact["aos"]] + [o["aos"] for o in others if o["aos"] > contact["aos"]]:
+                    worst = max(worst, sum(1 for o in others if o["aos"] <= moment < o["los"]))
+                if worst >= capacity:
+                    conflicts[contact["id"]] = [o["id"] for o in others]
+        return conflicts
+
+    def _station_full(self, contact, used):
+        """True if scheduling into contact would put its station over capacity."""
+        if contact["id"] in used:
+            return False  # already worked; another activity in the same pass doesn't need an antenna
+        others = [o for o in used.values() if o["station_id"] == contact["station_id"] and _overlap(o, contact)]
+        if len(others) < self._capacity(contact["station_id"]):
+            return False
+        moments = [contact["aos"]] + [o["aos"] for o in others if o["aos"] > contact["aos"]]
+        worst = max(sum(1 for o in others if o["aos"] <= m < o["los"]) for m in moments)
+        return worst >= self._capacity(contact["station_id"])
+
     def list_contacts(self, start=None, end=None, satellite_id=None, station_id=None):
         with self.lock:
             contacts = self.contacts
@@ -390,8 +622,20 @@ class ContactPlanner:
                 contacts = [c for c in contacts if c["station_id"] == station_id]
             by_contact = {}
             for activity in self.activities.values():
+                if activity.get("superseded"):
+                    continue
                 by_contact.setdefault(activity["contact"]["id"], []).append(activity["id"])
-            return [{**c, "activities": by_contact.get(c["id"], [])} for c in contacts]
+            used = self._used_contacts()
+            conflicts = self._station_conflicts(used)
+            return [
+                {
+                    **c,
+                    "activities": by_contact.get(c["id"], []),
+                    "conflicts": conflicts.get(c["id"], []),
+                    "station_full": self._station_full(c, used),
+                }
+                for c in contacts
+            ]
 
     # ---- activities --------------------------------------------------------
 
@@ -401,29 +645,55 @@ class ContactPlanner:
         except Exception as error:  # noqa: BLE001 - NotFoundError from the engine
             raise PlannerNotFoundError(str(error)) from None
 
-    def _check_activity(self, activity, template, now, require_future=True):
-        contact = activity["contact"]
-        if activity["anchor"] not in ANCHORS:
-            raise PlannerError(f"Start must be relative to one of {', '.join(a.upper() for a in ANCHORS)}")
-        start = activity_start(activity)
-        if start >= contact["los"]:
-            raise PlannerError("The activity would start after LOS")
-        if require_future and start <= now:
-            raise PlannerError("That start time has already passed")
-        from .graph import MODES, validate_flow  # local: graph imports nothing from here
+    @staticmethod
+    def _check_template(template, params):
+        from .graph import validate_flow  # local: graph imports nothing from here
 
-        if activity["mode"] not in MODES:
-            raise PlannerError(f"Mode must be one of {', '.join(MODES)}")
         problems = validate_flow(template)
         if problems:
             raise PlannerError(f"The flow has problems: {problems[0]['message']}")
         if not any(n.get("type") == "trigger_manual" for n in template.get("nodes") or []):
             raise PlannerError("The flow needs a Manual trigger to be scheduled")
-        _variables, param_problems = fill_parameters(template.get("parameters"), activity["params"])
+        _variables, param_problems = fill_parameters(template.get("parameters"), params)
         if param_problems:
             raise PlannerError("Parameters: " + "; ".join(param_problems))
 
-    def create_activity(self, payload):
+    def _check_timing(self, record):
+        from .graph import MODES
+
+        if record["anchor"] not in ANCHORS:
+            raise PlannerError(f"Start must be relative to one of {', '.join(a.upper() for a in ANCHORS)}")
+        if record["mode"] not in MODES:
+            raise PlannerError(f"Mode must be one of {', '.join(MODES)}")
+
+    def _check_activity(self, activity, template, now, require_future=True):
+        self._check_timing(activity)
+        start = activity_start(activity)
+        if start >= activity["contact"]["los"]:
+            raise PlannerError("The activity would start after LOS")
+        if require_future and start <= now:
+            raise PlannerError("That start time has already passed")
+        self._check_template(template, activity["params"])
+
+    def _new_activity(self, template, now, user):
+        return {
+            "id": _short_id(),
+            "created_at": now,
+            "created_by": user_name(user),
+            "template_id": template["id"],
+            "template_name": template.get("name"),
+            "template_updated_at": template.get("updated_at"),
+            "flow": template,
+            "status": "scheduled",
+            "message": "",
+            "run_id": None,
+            "runs": [],
+            "drift": 0.0,
+            "suggested_contact_id": None,
+            "rule_id": None,
+        }
+
+    def create_activity(self, payload, user=None):
         if not isinstance(payload, dict):
             raise PlannerError("Activity must be a JSON object")
         with self.lock:
@@ -432,20 +702,7 @@ class ContactPlanner:
                 raise PlannerNotFoundError(f"Contact '{payload.get('contact_id')}' is not predicted")
             template = self._template(payload.get("template_id"))
             now = self.clock()
-            activity = {
-                "id": _short_id(),
-                "created_at": now,
-                "template_id": template["id"],
-                "template_name": template.get("name"),
-                "template_updated_at": template.get("updated_at"),
-                "flow": template,
-                "status": "scheduled",
-                "message": "",
-                "run_id": None,
-                "runs": [],
-                "drift": 0.0,
-                "suggested_contact_id": None,
-            }
+            activity = self._new_activity(template, now, user)
             self._apply_fields(activity, payload, contact, template)
             self._check_activity(activity, template, now)
             self.activities[activity["id"]] = activity
@@ -453,20 +710,21 @@ class ContactPlanner:
         self.engine.log("info", f"Activity '{activity['label']}' scheduled for {self._when(activity)}")
         return self.activity_json(activity, now)
 
-    def _apply_fields(self, activity, payload, contact, template):
-        activity["contact"] = self._contact_ref(contact)
-        activity["label"] = str(payload.get("label", activity.get("label")) or template.get("name") or "Activity")
-        activity["anchor"] = str(payload.get("anchor", activity.get("anchor")) or "aos").lower()
-        activity["offset"] = _number(payload.get("offset", activity.get("offset", 0)) or 0, "Offset", -86400, 86400)
-        activity["mode"] = payload.get("mode", activity.get("mode")) or template.get("mode", "run")
-        activity["params"] = dict(payload.get("params", activity.get("params")) or {})
+    def _apply_fields(self, record, payload, contact, template):
+        if contact is not None:
+            record["contact"] = self._contact_ref(contact)
+        record["label"] = str(payload.get("label", record.get("label")) or template.get("name") or "Activity")
+        record["anchor"] = str(payload.get("anchor", record.get("anchor")) or "aos").lower()
+        record["offset"] = _number(payload.get("offset", record.get("offset", 0)) or 0, "Offset", -86400, 86400)
+        record["mode"] = payload.get("mode", record.get("mode")) or template.get("mode", "run")
+        record["params"] = dict(payload.get("params", record.get("params")) or {})
         for key, default in DEFAULTS.items():
-            value = payload.get(key, activity.get(key, default))
-            activity[key] = bool(value) if isinstance(default, bool) else _number(value, key, 0, 86400)
-        duration = payload.get("duration", activity.get("duration"))
-        activity["duration"] = None if duration in (None, "") else _number(duration, "Duration", 1, 86400)
+            value = payload.get(key, record.get(key, default))
+            record[key] = bool(value) if isinstance(default, bool) else _number(value, key, 0, 86400)
+        duration = payload.get("duration", record.get("duration"))
+        record["duration"] = None if duration in (None, "") else _number(duration, "Duration", 1, 86400)
 
-    def update_activity(self, activity_id, payload):
+    def update_activity(self, activity_id, payload, user=None):
         with self.lock:
             activity = self._activity(activity_id)
             if activity["status"] not in WAITING:
@@ -481,20 +739,21 @@ class ContactPlanner:
             self._check_activity(updated, template, self.clock())
             updated["status"] = "scheduled"
             updated["suggested_contact_id"] = None
+            updated["updated_by"] = user_name(user)
             if activity["status"] == "needs_review":
                 updated["message"] = "Moved by operator"
             self.activities[activity_id] = updated
             self._save("activities", updated)
             return self.activity_json(updated, self.clock())
 
-    def accept_suggestion(self, activity_id):
+    def accept_suggestion(self, activity_id, user=None):
         with self.lock:
             activity = self._activity(activity_id)
             if activity["status"] != "needs_review" or not activity.get("suggested_contact_id"):
                 raise PlannerError("This activity has no new contact time to accept")
-            return self.update_activity(activity_id, {"contact_id": activity["suggested_contact_id"]})
+            return self.update_activity(activity_id, {"contact_id": activity["suggested_contact_id"]}, user)
 
-    def refresh_template(self, activity_id):
+    def refresh_template(self, activity_id, user=None):
         """Re-copy the activity's flow from its template's current version."""
         with self.lock:
             activity = self._activity(activity_id)
@@ -506,22 +765,31 @@ class ContactPlanner:
                 flow=template,
                 template_name=template.get("name"),
                 template_updated_at=template.get("updated_at"),
+                updated_by=user_name(user),
             )
             self._check_activity(updated, template, self.clock(), require_future=False)
             self.activities[activity_id] = updated
             self._save("activities", updated)
             return self.activity_json(updated, self.clock())
 
-    def delete_activity(self, activity_id):
-        """Remove an activity. A running one has its run stopped first."""
+    def delete_activity(self, activity_id, user=None):
+        """Remove an activity, stopping its run if it's running.
+
+        An activity a rule made is cancelled instead, so the rule doesn't schedule it again;
+        it's deleted with the other finished activities after the retention period.
+        """
         with self.lock:
             activity = self._activity(activity_id)
             run_id = activity.get("run_id") if activity["status"] == "running" else None
-            del self.activities[activity_id]
-            self.store.delete_record("activities", activity_id)
+            if activity.get("rule_id") and activity["status"] not in FINISHED:
+                self._finish(activity, "cancelled", f"Cancelled by {user_name(user)}", self.clock())
+            else:
+                del self.activities[activity_id]
+                self.store.delete_record("activities", activity_id)
         if run_id:
             with contextlib.suppress(Exception):  # it may have just finished
                 self.engine.stop_run(run_id)
+        return activity
 
     def _activity(self, activity_id):
         activity = self.activities.get(activity_id)
@@ -544,20 +812,29 @@ class ContactPlanner:
         result["template_changed"] = current is not None and current.get("updated_at") != activity.get(
             "template_updated_at"
         )
+        rule = self.rules.get(activity.get("rule_id")) if activity.get("rule_id") else None
+        result["rule_name"] = rule["name"] if rule else None
         result["overlaps"] = []
+        result["conflicts"] = []
         return result
 
-    def list_activities(self):
+    def list_activities(self, include_superseded=False):
         with self.lock:
             now = self.clock()
-            items = [self.activity_json(a, now) for a in self.activities.values()]
+            items = [
+                self.activity_json(a, now)
+                for a in self.activities.values()
+                if include_superseded or not a.get("superseded")
+            ]
+            conflicts = self._station_conflicts(self._used_contacts())
         items.sort(key=lambda a: a["start"])
-        # Warn about activities sharing a contact whose windows overlap (allowed, but worth a look)
+        # Activities sharing a contact whose windows overlap (allowed, but worth a look)
         by_contact = {}
         for item in items:
             if item["status"] in ("cancelled", "missed"):
                 continue
             by_contact.setdefault(item["contact"]["id"], []).append(item)
+            item["conflicts"] = conflicts.get(item["contact"]["id"], []) if item["status"] != "done" else []
         for group in by_contact.values():
             for i, a in enumerate(group):
                 for b in group[i + 1 :]:
@@ -565,6 +842,144 @@ class ContactPlanner:
                         a["overlaps"].append(b["id"])
                         b["overlaps"].append(a["id"])
         return items
+
+    # ---- rules ---------------------------------------------------------------
+
+    def save_rule(self, payload, rule_id=None, user=None):
+        if not isinstance(payload, dict):
+            raise PlannerError("Rule must be a JSON object")
+        with self.lock:
+            if rule_id is not None:
+                rule = copy.deepcopy(self.rules.get(rule_id))
+                if rule is None:
+                    raise PlannerNotFoundError(f"Rule '{rule_id}' not found")
+            else:
+                rule = {"id": _short_id(), "created_at": self.clock(), "created_by": user_name(user)}
+            template = self._template(payload.get("template_id", rule.get("template_id")))
+            rule["template_id"] = template["id"]
+            rule["name"] = str(payload.get("name", rule.get("name")) or template.get("name") or "Rule").strip()
+            rule["enabled"] = bool(payload.get("enabled", rule.get("enabled", True)))
+            for key in ("satellite_ids", "station_ids"):
+                value = payload.get(key, rule.get(key)) or []
+                if not isinstance(value, list):
+                    raise PlannerError(f"{key} must be a list (empty for all)")
+                rule[key] = [str(v) for v in value]
+            unknown = [s for s in rule["satellite_ids"] if s not in self.satellites]
+            unknown += [s for s in rule["station_ids"] if s not in self.stations]
+            if unknown:
+                raise PlannerNotFoundError(f"Unknown satellite or station: {', '.join(unknown)}")
+            rule["min_elevation"] = _number(
+                payload.get("min_elevation", rule.get("min_elevation", 0)) or 0, "Minimum elevation", 0, 90
+            )
+            rule["min_duration"] = _number(
+                payload.get("min_duration", rule.get("min_duration", 0)) or 0, "Minimum duration", 0, 86400
+            )
+            rule["priority"] = int(_number(payload.get("priority", rule.get("priority", 0)) or 0, "Priority"))
+            rule["skip_full_stations"] = bool(payload.get("skip_full_stations", rule.get("skip_full_stations", True)))
+            self._apply_fields(rule, payload, None, template)
+            rule.pop("label", None)  # its activities are labelled with the rule's name
+            self._check_timing(rule)
+            self._check_template(template, rule["params"])
+            rule["updated_at"] = self.clock()
+            rule["updated_by"] = user_name(user)
+            rule["last_error"] = None
+            self.rules[rule["id"]] = rule
+            self._save("rules", rule)
+            # Re-plan: the rule's future activities follow its new settings
+            removed = self._remove_rule_activities(rule["id"])
+            created = self._apply_rules(self.clock(), only=rule["id"])
+            return {"rule": copy.deepcopy(rule), "removed": removed, "created": created}
+
+    def delete_rule(self, rule_id):
+        with self.lock:
+            rule = self.rules.pop(rule_id, None)
+            if rule is None:
+                raise PlannerNotFoundError(f"Rule '{rule_id}' not found")
+            self.store.delete_record("rules", rule_id)
+            removed = self._remove_rule_activities(rule_id, keep_cancelled=False)
+            return rule, removed
+
+    def _remove_rule_activities(self, rule_id, keep_cancelled=True):
+        """Delete a rule's activities that haven't started. Cancelled ones stay (unless asked) to block re-creation."""
+        removed = 0
+        for activity in list(self.activities.values()):
+            if activity.get("rule_id") != rule_id:
+                continue
+            if activity["status"] in WAITING or (not keep_cancelled and activity["status"] == "cancelled"):
+                del self.activities[activity["id"]]
+                self.store.delete_record("activities", activity["id"])
+                removed += 1
+        return removed
+
+    def _rule_matches(self, rule, contact, now):
+        if contact["partial"]:
+            return False
+        if rule["satellite_ids"] and contact["satellite_id"] not in rule["satellite_ids"]:
+            return False
+        if rule["station_ids"] and contact["station_id"] not in rule["station_ids"]:
+            return False
+        if contact["max_elevation"] < rule["min_elevation"] or contact["duration"] < rule["min_duration"]:
+            return False
+        start = contact[rule["anchor"]] + rule["offset"]
+        return now + RULE_LEAD_SECONDS < start < contact["los"]
+
+    def _apply_rules(self, now, only=None):
+        """Create activities for every enabled rule's matching contacts that don't have one yet."""
+        created = 0
+        rules = sorted(
+            (r for r in self.rules.values() if r.get("enabled", True) and (only is None or r["id"] == only)),
+            key=lambda r: -int(r.get("priority") or 0),
+        )
+        if not rules:
+            return 0
+        taken = {}
+        for activity in self.activities.values():
+            if activity.get("rule_id"):
+                taken.setdefault(activity["rule_id"], set()).add(activity["contact"]["id"])
+        used = self._used_contacts()
+        for rule in rules:
+            template = self.engine.flows.get(rule["template_id"])
+            if template is None:
+                rule["last_error"] = "Its template was deleted"
+                continue
+            try:
+                self._check_template(template, rule["params"])
+            except PlannerError as error:
+                rule["last_error"] = str(error)
+                continue
+            rule["last_error"] = None
+            skipped_full = 0
+            for contact in self.contacts:
+                if contact["id"] in taken.get(rule["id"], ()) or not self._rule_matches(rule, contact, now):
+                    continue
+                if rule.get("skip_full_stations", True) and self._station_full(contact, used):
+                    skipped_full += 1
+                    continue
+                activity = self._new_activity(copy.deepcopy(template), now, f"rule:{rule['name']}")
+                self._apply_fields(activity, rule, contact, template)
+                activity["label"] = rule.get("label") or rule["name"]
+                activity["rule_id"] = rule["id"]
+                activity["message"] = f"Scheduled by rule '{rule['name']}'"
+                self.activities[activity["id"]] = activity
+                self._save("activities", activity)
+                taken.setdefault(rule["id"], set()).add(contact["id"])
+                used[contact["id"]] = activity["contact"]
+                created += 1
+            rule["skipped_full"] = skipped_full
+        if created:
+            self.audit(SCHEDULER, "scheduled from rules", "activity", detail=f"{created} new activities")
+        return created
+
+    def rule_json(self, rule):
+        result = copy.deepcopy(rule)
+        mine = [a for a in self.activities.values() if a.get("rule_id") == rule["id"]]
+        result["scheduled"] = sum(1 for a in mine if a["status"] in WAITING)
+        result["template_name"] = (self.engine.flows.get(rule["template_id"]) or {}).get("name")
+        return result
+
+    def list_rules(self):
+        with self.lock:
+            return sorted((self.rule_json(r) for r in self.rules.values()), key=lambda r: -int(r.get("priority") or 0))
 
     # ---- scheduling --------------------------------------------------------
 
@@ -586,9 +1001,17 @@ class ContactPlanner:
 
     def tick(self):
         now = self.clock()
-        if self.computed_at is None or now - self.computed_at >= self.recompute_every:
+        if self.computed_at is not None and now - self.computed_at >= self.recompute_every and not self.predicting():
             self.recompute()
+        elif not self.background and self.pending:
+            self.predict_pending()
         self._poll_sources(now)
+        if now - self.last_pruned >= 300:
+            self.prune(now)
+        if now - self.last_rules >= 60:
+            self.last_rules = now
+            with self.lock:
+                self._apply_rules(now)
         to_start = []
         to_stop = []
         with self.lock:
@@ -628,6 +1051,24 @@ class ContactPlanner:
                 run.message = "Stopped at LOS"
                 run.stop()
 
+    def prune(self, now=None):
+        """Delete finished activities whose contact ended more than the retention period ago."""
+        now = self.clock() if now is None else now
+        self.last_pruned = now
+        removed = 0
+        with self.lock:
+            for activity in list(self.activities.values()):
+                if activity["status"] not in FINISHED:
+                    continue
+                ended = max(float(activity.get("ended_at") or 0), activity["contact"]["los"])
+                if now - ended > self.retention:
+                    del self.activities[activity["id"]]
+                    self.store.delete_record("activities", activity["id"])
+                    removed += 1
+        if removed:
+            self.engine.log("info", f"Deleted {removed} finished activities older than the retention period")
+        return removed
+
     def _poll_sources(self, now):
         for sat in list(self.satellites.values()):
             config = sat.get("tle_source") or {}
@@ -642,6 +1083,7 @@ class ContactPlanner:
                 text = source.fetch(sat, config, self.engine.backend)
                 if text:
                     self.set_tle(sat["id"], text, source.kind)
+                    self.audit(source.kind, "updated TLE", "satellite", sat["id"], sat["name"])
             except Exception as error:  # noqa: BLE001
                 self.problems[sat["id"]] = f"TLE source {source.kind}: {error}"
 
@@ -690,7 +1132,7 @@ class ContactPlanner:
             activity["message"] = f"Started {late:.1f}s late" if late >= 1 else "Started"
             activity["runs"] = (list(activity.get("runs") or []) + [run.id])[-10:]
             self._save("activities", activity)
-        self.engine.log("info", f"Activity '{activity['label']}' started run {run.id}")
+        self.audit(SCHEDULER, "started", "activity", activity["id"], activity["label"], f"run {run.id}")
 
     def on_run_finished(self, run):
         """Called by the engine when a run that belongs to an activity ends."""
@@ -709,8 +1151,8 @@ class ContactPlanner:
         activity["message"] = message or status
         activity["ended_at"] = now
         self._save("activities", activity)
-        if status in ("missed", "failed"):
-            self.engine.log("warn", f"Activity '{activity.get('label')}' {status}: {activity['message']}")
+        if status in ("missed", "failed", "done", "stopped"):
+            self.audit(SCHEDULER, status, "activity", activity.get("id"), activity.get("label"), activity["message"])
 
     # ---- overview ----------------------------------------------------------
 
@@ -720,19 +1162,24 @@ class ContactPlanner:
             upcoming = [a for a in self.activities.values() if a["status"] in WAITING]
             next_activity = min(upcoming, key=activity_start, default=None)
             next_contact = next((c for c in self.contacts if c["los"] >= now), None)
+            conflicts = self._station_conflicts(self._used_contacts())
             return {
                 "satellites": len(self.satellites),
                 "stations": len(self.stations),
                 "contacts": len(self.contacts),
+                "rules": len(self.rules),
                 "scheduled": len(upcoming),
                 "needs_review": sum(1 for a in upcoming if a["status"] == "needs_review"),
                 "running": sum(1 for a in self.activities.values() if a["status"] == "running"),
+                "conflicts": len(conflicts),
                 "next_activity": self.activity_json(next_activity, now) if next_activity else None,
                 "next_contact": next_contact,
                 "paused": self.settings.get("paused", False),
                 "paused_reason": self.settings.get("paused_reason", ""),
+                "predicting": self.predicting(),
                 "computed_at": self.computed_at,
                 "compute_seconds": self.compute_seconds,
+                "retention_days": self.retention / 86400,
                 "sgp4_error": SGP4_IMPORT_ERROR,
                 "error": self.last_error,
             }
@@ -748,5 +1195,6 @@ class ContactPlanner:
                 "stations": [copy.deepcopy(s) for s in self.stations.values()],
                 "contacts": self.list_contacts(start, end),
                 "activities": self.list_activities(),
+                "rules": self.list_rules(),
                 "status": self.status(),
             }

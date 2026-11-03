@@ -404,6 +404,8 @@
       </v-card>
     </v-dialog>
 
+    <audit-log v-model="showAudit" />
+
     <v-dialog v-model="paramDialog.show" max-width="480">
       <v-card class="fa-param-dialog">
         <v-card-title>Run '{{ flowSettings.name }}'</v-card-title>
@@ -455,6 +457,7 @@ import RunPanel from './RunPanel.vue'
 import ApprovalPanel from './ApprovalPanel.vue'
 import ContactsView from './ContactsView.vue'
 import ParamForm from './ParamForm.vue'
+import AuditLog from './AuditLog.vue'
 import flowApi, { ROUTE_PREFIX, errorInfo } from './flowApi'
 import {
   CATEGORIES,
@@ -494,6 +497,7 @@ export default {
     ApprovalPanel,
     ContactsView,
     ParamForm,
+    AuditLog,
   },
   provide() {
     return { flowContext: this.flowContext }
@@ -507,6 +511,7 @@ export default {
     return {
       title: 'Flow Automator',
       view: 'flows',
+      showAudit: false,
       paramDialog: { show: false, triggerNode: null, values: {} },
       routePrefix: ROUTE_PREFIX,
       nodeTypes: NODE_TYPES,
@@ -589,6 +594,13 @@ export default {
               label: 'Fit to Screen',
               icon: 'mdi-fit-to-screen',
               command: () => this.fitView({ padding: 0.2 }),
+            },
+            {
+              label: 'Audit Log',
+              icon: 'mdi-clipboard-text-clock',
+              command: () => {
+                this.showAudit = true
+              },
             },
             {
               label: 'Follow Live Runs',

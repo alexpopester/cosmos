@@ -3,10 +3,13 @@
 Traefik routes ``<prefix>/*`` (the plugin's ROUTE_PREFIX) here without
 stripping the prefix. Every route except ``/health`` needs a COSMOS token in the
 ``Authorization`` header; ``authorize(token, write)`` decides whether it's
-good enough.
+good enough (writes need COSMOS's script_run permission) and returns the user,
+which every write records in the audit log.
 
     GET    <prefix>/api/health
     GET    <prefix>/api/status
+    GET    <prefix>/api/whoami                   the user the token belongs to
+    GET    <prefix>/api/audit?limit=&kind=&user=&target_id=&search=   who did what, newest first
     GET    <prefix>/api/flows
     POST   <prefix>/api/flows                 create
     POST   <prefix>/api/validate              check a flow without saving
@@ -39,6 +42,10 @@ good enough.
     DELETE <prefix>/api/activities/<id>          stops its run if it's running
     POST   <prefix>/api/activities/<id>/accept   move a needs-review activity to the suggested contact
     POST   <prefix>/api/activities/<id>/refresh_template
+    GET    <prefix>/api/rules                    recurring rules: a template into every matching contact
+    POST   <prefix>/api/rules                    {"template_id", "satellite_ids", "station_ids", "min_elevation", ...}
+    PUT    <prefix>/api/rules/<id>
+    DELETE <prefix>/api/rules/<id>               removes its scheduled activities
     POST   <prefix>/api/scheduler/pause
     POST   <prefix>/api/scheduler/resume
 """
@@ -49,6 +56,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+from .audit import user_name
 from .contacts import PlannerError
 from .engine import EngineError
 from .graph import validate_flow
@@ -68,6 +76,8 @@ def _routes():
     return [
         ("GET", r"/api/health", "health", None),
         ("GET", r"/api/status", "status", False),
+        ("GET", r"/api/whoami", "whoami", False),
+        ("GET", r"/api/audit", "audit_log", False),
         ("GET", r"/api/flows", "list_flows", False),
         ("POST", r"/api/flows", "create_flow", True),
         ("POST", r"/api/validate", "validate", False),
@@ -98,6 +108,10 @@ def _routes():
         ("DELETE", r"/api/activities/(?P<item_id>[\w-]+)", "delete_activity", True),
         ("POST", r"/api/activities/(?P<item_id>[\w-]+)/accept", "accept_activity", True),
         ("POST", r"/api/activities/(?P<item_id>[\w-]+)/refresh_template", "refresh_template", True),
+        ("GET", r"/api/rules", "list_rules", False),
+        ("POST", r"/api/rules", "create_rule", True),
+        ("PUT", r"/api/rules/(?P<item_id>[\w-]+)", "update_rule", True),
+        ("DELETE", r"/api/rules/(?P<item_id>[\w-]+)", "delete_rule", True),
         ("POST", r"/api/scheduler/pause", "pause_scheduler", True),
         ("POST", r"/api/scheduler/resume", "resume_scheduler", True),
     ]
@@ -119,10 +133,11 @@ class FlowApi:
             if not match or route_method != method:
                 continue
             try:
+                user = None
                 if write is not None:
-                    self.authorize(headers.get("Authorization") or headers.get("authorization"), write)
+                    user = self.authorize(headers.get("Authorization") or headers.get("authorization"), write)
                 payload = json.loads(body) if body else {}
-                return 200, getattr(self, handler)(payload=payload, query=query, **match.groupdict())
+                return 200, getattr(self, handler)(payload=payload, query=query, user=user, **match.groupdict())
             except AuthError as error:
                 return error.status, {"error": str(error)}
             except EngineError as error:
@@ -136,6 +151,14 @@ class FlowApi:
         return 404, {"error": f"No route for {method} {path}"}
 
     # ---- handlers --------------------------------------------------------
+    # Every write records who did it (``user`` comes from their token) in the audit log.
+
+    def _audit(self, user, action, kind, target_id=None, target_name=None, detail=""):
+        self.engine.audit.record(user, action, kind, target_id, target_name, detail)
+
+    def _flow_name(self, flow_id):
+        flow = self.engine.flows.get(flow_id)
+        return flow.get("name") if flow else flow_id
 
     def health(self, **_):
         return {"ok": True}
@@ -143,11 +166,15 @@ class FlowApi:
     def status(self, **_):
         return self.engine.status()
 
+    def whoami(self, user, **_):
+        return {"user": user or {"username": "anonymous", "name": "Anonymous"}}
+
     def list_flows(self, **_):
         return self.engine.list_flows()
 
-    def create_flow(self, payload, **_):
+    def create_flow(self, payload, user, **_):
         flow, problems = self.engine.save_flow(payload)
+        self._audit(user, "created", "flow", flow["id"], flow["name"], f"{len(flow['nodes'])} nodes")
         return {"flow": flow, "problems": problems}
 
     def validate(self, payload, **_):
@@ -157,32 +184,48 @@ class FlowApi:
         flow = self.engine.get_flow(flow_id)
         return {"flow": flow, "problems": validate_flow(flow)}
 
-    def update_flow(self, flow_id, payload, **_):
+    def update_flow(self, flow_id, payload, user, **_):
         flow, problems = self.engine.save_flow(payload, flow_id)
+        detail = f"{len(flow['nodes'])} nodes, mode {flow['mode']}" + (
+            f", {len(problems)} problems" if problems else ""
+        )
+        self._audit(user, "saved", "flow", flow_id, flow["name"], detail)
         return {"flow": flow, "problems": problems}
 
-    def delete_flow(self, flow_id, **_):
+    def delete_flow(self, flow_id, user, **_):
+        name = self._flow_name(flow_id)
         self.engine.delete_flow(flow_id)
+        self._audit(user, "deleted", "flow", flow_id, name)
         return {"deleted": flow_id}
 
-    def arm(self, flow_id, **_):
-        return {"flow": self.engine.set_armed(flow_id, True)}
+    def arm(self, flow_id, user, **_):
+        flow = self.engine.set_armed(flow_id, True)
+        self._audit(user, "armed", "flow", flow_id, flow["name"])
+        return {"flow": flow}
 
-    def disarm(self, flow_id, **_):
-        return {"flow": self.engine.set_armed(flow_id, False)}
+    def disarm(self, flow_id, user, **_):
+        flow = self.engine.set_armed(flow_id, False)
+        self._audit(user, "disarmed", "flow", flow_id, flow["name"])
+        return {"flow": flow}
 
-    def run(self, flow_id, payload, **_):
+    def run(self, flow_id, payload, user, **_):
         variables = payload.get("variables") or {}
         if not isinstance(variables, dict):
             raise EngineError("variables must be an object")
-        return self.engine.trigger(
+        result = self.engine.trigger(
             flow_id,
             payload.get("trigger_node"),
-            payload.get("reason") or "Manual run",
+            payload.get("reason") or f"Manual run by {user_name(user)}",
             variables,
             manual=True,
             mode=payload.get("mode"),
         )
+        run = result.get("run") or {}
+        detail = f"run {run['id']} ({run.get('mode')})" if run else result.get("message", result["result"])
+        self._audit(
+            user, "ran" if run else f"run {result['result']}", "flow", flow_id, self._flow_name(flow_id), detail
+        )
+        return result
 
     def list_runs(self, query, **_):
         flow_id = (query.get("flow_id") or [None])[0]
@@ -195,15 +238,53 @@ class FlowApi:
     def get_run(self, run_id, **_):
         return self.engine.get_run(run_id)
 
-    def approve(self, run_id, payload, **_):
-        return self.engine.approve(run_id, payload.get("approval_id"), payload.get("decision"))
+    def approve(self, run_id, payload, user, **_):
+        run = self.engine.runs.get(run_id)
+        pending = {a["id"]: a for a in run.pending_approvals()} if run else {}
+        result = self.engine.approve(run_id, payload.get("approval_id"), payload.get("decision"), user)
+        approval = pending.get(payload.get("approval_id")) or {}
+        detail = f"'{payload.get('decision')}' at '{approval.get('label', '?')}' in run {run_id}"
+        if approval.get("reason"):
+            detail += f" ({approval['reason']})"
+        self._audit(
+            user,
+            "approved" if payload.get("decision") != "abort" else "aborted",
+            "flow",
+            result["run"]["flow_id"],
+            result["run"]["flow_name"],
+            detail,
+        )
+        return result
 
-    def stop_run(self, run_id, **_):
+    def stop_run(self, run_id, user, **_):
+        run = self.engine.runs.get(run_id)
         self.engine.stop_run(run_id)
+        self._audit(
+            user,
+            "stopped run",
+            "flow",
+            run.flow.get("id") if run else None,
+            run.flow.get("name") if run else None,
+            f"run {run_id}",
+        )
         return {"stopping": run_id}
 
-    def stop_all(self, **_):
-        return self.engine.stop_all()
+    def stop_all(self, user, **_):
+        result = self.engine.stop_all()
+        self._audit(
+            user, "STOP ALL", "engine", detail=f"disarmed {result['disarmed']}, stopped {result['stopped']} runs"
+        )
+        return result
+
+    def audit_log(self, query, **_):
+        def arg(name):
+            return (query.get(name) or [None])[0]
+
+        try:
+            limit = int(arg("limit") or 200)
+        except ValueError:
+            raise EngineError("limit must be a number") from None
+        return self.engine.audit.entries(limit, arg("kind"), arg("user"), arg("target_id"), arg("search"))
 
     # ---- contacts --------------------------------------------------------
 
@@ -232,56 +313,132 @@ class FlowApi:
             (query.get("station_id") or [None])[0],
         )
 
-    def recompute(self, **_):
+    def recompute(self, user, **_):
         self.planner.recompute()
+        self._audit(user, "recomputed contacts", "scheduler")
         return self.planner.status()
 
-    def create_satellite(self, payload, **_):
-        return {"satellite": self.planner.save_satellite(payload)}
+    @staticmethod
+    def _tle_detail(sat):
+        tle = sat.get("tle") or {}
+        return f"TLE {tle.get('norad_id')} epoch {tle.get('epoch')}" if tle else ""
 
-    def update_satellite(self, item_id, payload, **_):
-        return {"satellite": self.planner.save_satellite(payload, item_id)}
+    def create_satellite(self, payload, user, **_):
+        sat = self.planner.save_satellite(payload, user=user)
+        self._audit(user, "added", "satellite", sat["id"], sat["name"], self._tle_detail(sat))
+        return {"satellite": sat}
 
-    def delete_satellite(self, item_id, **_):
-        self.planner.delete_satellite(item_id)
+    def update_satellite(self, item_id, payload, user, **_):
+        before = (self.planner.satellites.get(item_id) or {}).get("tle")
+        sat = self.planner.save_satellite(payload, item_id, user=user)
+        changed = " (new TLE)" if sat.get("tle") != before else ""
+        self._audit(user, "saved", "satellite", item_id, sat["name"], self._tle_detail(sat) + changed)
+        return {"satellite": sat}
+
+    def delete_satellite(self, item_id, user, **_):
+        sat = self.planner.delete_satellite(item_id)
+        self._audit(user, "deleted", "satellite", item_id, sat["name"])
         return {"deleted": item_id}
 
-    def set_tle(self, item_id, payload, **_):
-        return {"satellite": self.planner.set_tle(item_id, payload.get("tle"), payload.get("source") or "manual")}
+    def set_tle(self, item_id, payload, user, **_):
+        sat = self.planner.set_tle(item_id, payload.get("tle"), payload.get("source") or "manual", user=user)
+        self._audit(user, "updated TLE", "satellite", item_id, sat["name"], self._tle_detail(sat))
+        return {"satellite": sat}
 
-    def create_station(self, payload, **_):
-        return {"station": self.planner.save_station(payload)}
+    @staticmethod
+    def _station_detail(station):
+        return (
+            f"{station['latitude']:.4f}, {station['longitude']:.4f}, mask {station['min_elevation']:g}°, "
+            f"capacity {station.get('capacity', 1)}"
+        )
 
-    def update_station(self, item_id, payload, **_):
-        return {"station": self.planner.save_station(payload, item_id)}
+    def create_station(self, payload, user, **_):
+        station = self.planner.save_station(payload, user=user)
+        self._audit(user, "added", "station", station["id"], station["name"], self._station_detail(station))
+        return {"station": station}
 
-    def delete_station(self, item_id, **_):
-        self.planner.delete_station(item_id)
+    def update_station(self, item_id, payload, user, **_):
+        station = self.planner.save_station(payload, item_id, user=user)
+        self._audit(user, "saved", "station", item_id, station["name"], self._station_detail(station))
+        return {"station": station}
+
+    def delete_station(self, item_id, user, **_):
+        station = self.planner.delete_station(item_id)
+        self._audit(user, "deleted", "station", item_id, station["name"])
         return {"deleted": item_id}
+
+    @staticmethod
+    def _activity_detail(activity):
+        contact = activity["contact"]
+        offset = float(activity.get("offset") or 0)
+        return (
+            f"{activity['template_name']} at {activity['anchor'].upper()} {'+' if offset >= 0 else '-'} "
+            f"{abs(offset):g}s of {contact['satellite']} over {contact['station']} ({activity['mode']})"
+        )
 
     def list_activities(self, **_):
         return self.planner.list_activities()
 
-    def create_activity(self, payload, **_):
-        return {"activity": self.planner.create_activity(payload)}
+    def create_activity(self, payload, user, **_):
+        activity = self.planner.create_activity(payload, user=user)
+        self._audit(user, "scheduled", "activity", activity["id"], activity["label"], self._activity_detail(activity))
+        return {"activity": activity}
 
-    def update_activity(self, item_id, payload, **_):
-        return {"activity": self.planner.update_activity(item_id, payload)}
+    def update_activity(self, item_id, payload, user, **_):
+        activity = self.planner.update_activity(item_id, payload, user=user)
+        self._audit(user, "changed", "activity", item_id, activity["label"], self._activity_detail(activity))
+        return {"activity": activity}
 
-    def delete_activity(self, item_id, **_):
-        self.planner.delete_activity(item_id)
+    def delete_activity(self, item_id, user, **_):
+        activity = self.planner.delete_activity(item_id, user=user)
+        action = "cancelled" if activity.get("rule_id") and activity["status"] == "cancelled" else "deleted"
+        self._audit(user, action, "activity", item_id, activity["label"], f"was {activity['status']}")
         return {"deleted": item_id}
 
-    def accept_activity(self, item_id, **_):
-        return {"activity": self.planner.accept_suggestion(item_id)}
+    def accept_activity(self, item_id, user, **_):
+        activity = self.planner.accept_suggestion(item_id, user=user)
+        self._audit(user, "accepted new time", "activity", item_id, activity["label"], self._activity_detail(activity))
+        return {"activity": activity}
 
-    def refresh_template(self, item_id, **_):
-        return {"activity": self.planner.refresh_template(item_id)}
+    def refresh_template(self, item_id, user, **_):
+        activity = self.planner.refresh_template(item_id, user=user)
+        self._audit(user, "updated from template", "activity", item_id, activity["label"])
+        return {"activity": activity}
 
-    def pause_scheduler(self, payload, **_):
-        return self.planner.set_paused(True, payload.get("reason") or "Paused by operator")
+    def list_rules(self, **_):
+        return self.planner.list_rules()
 
-    def resume_scheduler(self, **_):
+    def create_rule(self, payload, user, **_):
+        result = self.planner.save_rule(payload, user=user)
+        rule = result["rule"]
+        self._audit(user, "created", "rule", rule["id"], rule["name"], f"scheduled {result['created']} activities")
+        return result
+
+    def update_rule(self, item_id, payload, user, **_):
+        result = self.planner.save_rule(payload, item_id, user=user)
+        rule = result["rule"]
+        self._audit(
+            user,
+            "saved",
+            "rule",
+            item_id,
+            rule["name"],
+            f"{'enabled' if rule['enabled'] else 'disabled'}; replaced {result['removed']} with {result['created']}",
+        )
+        return result
+
+    def delete_rule(self, item_id, user, **_):
+        rule, removed = self.planner.delete_rule(item_id)
+        self._audit(user, "deleted", "rule", item_id, rule["name"], f"removed {removed} scheduled activities")
+        return {"deleted": item_id, "removed": removed}
+
+    def pause_scheduler(self, payload, user, **_):
+        reason = payload.get("reason") or f"Paused by {user_name(user)}"
+        self._audit(user, "paused", "scheduler", detail=reason)
+        return self.planner.set_paused(True, reason)
+
+    def resume_scheduler(self, user, **_):
+        self._audit(user, "resumed", "scheduler")
         return self.planner.set_paused(False)
 
 

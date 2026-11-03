@@ -6,6 +6,7 @@ import threading
 import time
 import uuid
 
+from .audit import AuditLog, user_name
 from .contacts import ContactPlanner
 from .graph import MODES, POLICIES, is_trigger, validate_flow
 from .runner import FlowRun
@@ -40,6 +41,7 @@ class FlowEngine:
         self.queues = collections.defaultdict(collections.deque)
         self.lock = threading.RLock()
         self.triggers = TriggerManager(self, period=trigger_period)
+        self.audit = AuditLog(store, self.log)
         self.planner = ContactPlanner(self, store, **(planner_options or {}))
 
     def start(self, start_triggers=True):
@@ -302,19 +304,19 @@ class FlowEngine:
             with self.lock:
                 self._start_run(*next_start)
 
-    def approve(self, run_id, approval_id, decision):
+    def approve(self, run_id, approval_id, decision, user=None):
         """An operator answers a run's pending approval (crawl/walk modes)."""
         with self.lock:
             run = self.runs.get(run_id)
         if run is None:
             raise NotFoundError(f"Run '{run_id}' is not active")
         try:
-            answered = run.approve(approval_id, decision)
+            answered = run.approve(approval_id, decision, user_name(user))
         except ValueError as error:
             raise EngineError(str(error)) from None
         if not answered:
             raise NotFoundError(f"Approval '{approval_id}' is not pending (already answered or timed out)")
-        self.log("info", f"Flow '{run.flow.get('name')}' run {run.id}: operator chose '{decision}'")
+        self.log("info", f"Flow '{run.flow.get('name')}' run {run.id}: {user_name(user)} chose '{decision}'")
         return {"run": run.as_json(include_steps=False)}
 
     def stop_run(self, run_id):

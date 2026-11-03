@@ -283,6 +283,7 @@ class FlowRun:
             "preview": preview,
             "requested_at": time.time(),
             "deadline": None,
+            "decided_by": None,
             "event": threading.Event(),
             "decision": None,
         }
@@ -310,14 +311,15 @@ class FlowRun:
             with self._lock:
                 self.approvals.pop(approval["id"], None)
         decision = approval["decision"]
-        step["message"] = f"Operator chose {decision}"
+        step["message"] = f"{approval['decided_by'] or 'Operator'} chose {decision}"
+        step["decided_by"] = approval["decided_by"]
         if decision == "abort":
-            self.message = f"Aborted by operator at '{approval['label']}'"
+            self.message = f"Aborted by {approval['decided_by'] or 'operator'} at '{approval['label']}'"
             self._cancel.set()
             raise RunStoppedError()
         return decision
 
-    def approve(self, approval_id, decision):
+    def approve(self, approval_id, decision, user=None):
         """Answer a pending approval: 'go', 'run' (go, and stop asking) or 'abort'."""
         if decision not in APPROVAL_DECISIONS:
             raise ValueError(f"Decision must be one of {', '.join(APPROVAL_DECISIONS)}")
@@ -325,6 +327,7 @@ class FlowRun:
             approval = self.approvals.get(approval_id)
         if approval is None or approval["decision"] is not None:
             return False
+        approval["decided_by"] = user or "anonymous"
         approval["decision"] = decision
         if decision == "run":
             # Release other branches waiting on routine steps right now too
@@ -336,6 +339,7 @@ class FlowRun:
                     if a is not approval and a["decision"] is None and "HAZARDOUS" not in a["reason"]
                 ]
             for other in others:
+                other["decided_by"] = f"{user or 'anonymous'} (run the rest)"
                 other["decision"] = "go"
                 other["event"].set()
         approval["event"].set()

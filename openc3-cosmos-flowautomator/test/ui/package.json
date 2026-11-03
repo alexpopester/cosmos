@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "description": "Browser tests for the Flow Automator, run against a live COSMOS (see run.sh)",
+  "dependencies": {
+    "playwright": "1.63.0"
+  }
+}

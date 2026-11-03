@@ -296,3 +296,15 @@ def passes_from_samples(propagator, station, times, elevations):
         )
     passes.sort(key=lambda p: p["aos"])
     return passes
+
+
+def find_passes_for_stations(propagator, stations, start, end, step=COARSE_STEP_S):
+    """find_passes for several stations, propagating the satellite once. Returns one list per station."""
+    times = np.arange(start, end + step, step)
+    times[-1] = min(times[-1], end)
+    ecef, ok = propagator.ecef(times)
+    results = []
+    for station in stations:
+        elevations = np.where(ok, station.look(ecef)[1], -90.0)
+        results.append(passes_from_samples(propagator, station, times, elevations))
+    return results

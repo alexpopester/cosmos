@@ -39,6 +39,7 @@ class FlowEngineMicroservice(Microservice):
             "CONTACT_RECOMPUTE_HOURS": "recompute_hours",
             "CONTACT_RETIME_TOLERANCE": "retime_tolerance",
             "STALE_TLE_DAYS": "stale_tle_days",
+            "ACTIVITY_RETENTION_DAYS": "retention_days",
         }
         for option in self.config.get("options", []):
             match option[0].upper():

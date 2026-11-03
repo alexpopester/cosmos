@@ -7,6 +7,8 @@ the Script Runner API over HTTP, authenticated with the microservice's
 service password (the same way COSMOS starts scripts).
 """
 
+import base64
+import json
 import threading
 import time
 
@@ -101,12 +103,33 @@ class CosmosBackend:
         running_script_stop(script_id, scope=self.scope)
 
 
-class TokenAuthorizer:
-    """Checks a user's COSMOS token by making a harmless API call with it.
+# A stash key nobody uses: deleting it is harmless, but COSMOS checks script_run first
+WRITE_PROBE_KEY = "__flow_automator_permission_check__"
 
-    Core has a single user, so any valid token may read and write. In
-    Enterprise the call must pass COSMOS's own role check for 'tlm'.
-    TODO: Enterprise should require a 'cmd' style permission for writes.
+
+def token_identity(token):
+    """The user a token belongs to. Enterprise tokens are JWTs naming the user; Core has one user."""
+    parts = str(token or "").split(".")
+    if len(parts) == 3:
+        try:
+            payload = parts[1] + "=" * (-len(parts[1]) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(payload))
+            username = claims.get("preferred_username") or claims.get("sub")
+            if username:
+                return {"username": username, "name": claims.get("name") or username}
+        except (ValueError, TypeError):
+            pass
+    return {"username": "anonymous", "name": "Anonymous"}
+
+
+class TokenAuthorizer:
+    """Checks a user's COSMOS token by making a harmless API call with it, and says who they are.
+
+    Reads need COSMOS's 'tlm' permission (get_target_names). Changes need
+    'script_run', the Script Runner role, because flows send commands and run
+    scripts: the check deletes a stash key that doesn't exist. Core has a
+    single user, so any valid token passes both. The token is verified by
+    COSMOS before its claims are trusted for the username.
     """
 
     def __init__(self, scope, api_url, timeout=5):
@@ -119,18 +142,20 @@ class TokenAuthorizer:
     def __call__(self, token, write):
         if not token:
             raise AuthError("Token is required", 401)
-        key = (token, write)
+        key = (token, bool(write))
         now = time.monotonic()
         with self.lock:
-            if self.cache.get(key, 0) > now:
-                return
+            cached = self.cache.get(key)
+            if cached and cached[0] > now:
+                return cached[1]
+        method, params = ("stash_delete", [WRITE_PROBE_KEY]) if write else ("get_target_names", [])
         try:
             response = requests.post(
                 self.api_url,
                 json={
                     "jsonrpc": "2.0",
-                    "method": "get_target_names",
-                    "params": [],
+                    "method": method,
+                    "params": params,
                     "id": 1,
                     "keyword_params": {"scope": self.scope},
                 },
@@ -140,7 +165,10 @@ class TokenAuthorizer:
         except requests.RequestException as error:
             raise AuthError(f"Could not verify token: {error}", 503) from None
         if response.status_code in (401, 403):
-            raise AuthError("Not authorized", response.status_code)
+            raise AuthError(
+                "Not authorized" if not write else "Changing flows needs the script_run permission",
+                response.status_code,
+            )
         try:
             body = response.json()
         except ValueError:
@@ -148,8 +176,13 @@ class TokenAuthorizer:
         error = body.get("error")
         if error:
             message = error.get("message", "Not authorized") if isinstance(error, dict) else str(error)
-            raise AuthError(message, 403 if "permission" in message.lower() or "forbidden" in message.lower() else 401)
+            forbidden = "permission" in message.lower() or "forbidden" in message.lower()
+            if forbidden and write:
+                message = f"Changing flows needs the script_run permission ({message})"
+            raise AuthError(message, 403 if forbidden else 401)
+        user = token_identity(token)
         with self.lock:
             if len(self.cache) > 1000:
                 self.cache.clear()
-            self.cache[key] = now + TOKEN_CACHE_SECONDS
+            self.cache[key] = (now + TOKEN_CACHE_SECONDS, user)
+        return user

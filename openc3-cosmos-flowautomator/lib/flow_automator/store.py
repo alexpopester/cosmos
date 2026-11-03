@@ -45,6 +45,17 @@ class FlowStore:
         end = (limit or self.history_limit) - 1
         return [json.loads(_text(item)) for item in self.redis.lrange(self._runs_key(flow_id), 0, end) or []]
 
+    # ---- audit log -----------------------------------------------------------
+
+    def add_audit(self, entry, limit):
+        key = f"flow_automator__{self.scope}__audit"
+        self.redis.lpush(key, json.dumps(entry))
+        self.redis.ltrim(key, 0, limit - 1)
+
+    def audit_entries(self):
+        key = f"flow_automator__{self.scope}__audit"
+        return [json.loads(_text(item)) for item in self.redis.lrange(key, 0, -1) or []]
+
     # ---- contact planner records ---------------------------------------------
 
     def _records_key(self, kind):
@@ -88,4 +99,5 @@ class MemoryRedis:
         self.lists[key] = self.lists.get(key, [])[start : end + 1]
 
     def lrange(self, key, start, end):
-        return self.lists.get(key, [])[start : end + 1]
+        items = self.lists.get(key, [])
+        return items[start:] if end == -1 else items[start : end + 1]

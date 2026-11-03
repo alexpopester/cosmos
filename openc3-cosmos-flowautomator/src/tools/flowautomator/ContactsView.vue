@@ -104,7 +104,65 @@
         </div>
       </v-list>
 
+      <div class="d-flex align-center px-3 pt-4 pb-1">
+        <span class="text-subtitle-2">Rules</span>
+        <v-spacer />
+        <v-btn
+          size="x-small"
+          variant="tonal"
+          prepend-icon="mdi-plus"
+          class="fa-add-rule"
+          @click="editRule(null)"
+        >
+          Add
+        </v-btn>
+      </div>
+      <v-list density="compact" class="py-0">
+        <v-list-item
+          v-for="rule in rules"
+          :key="rule.id"
+          class="fa-rule"
+          @click="editRule(rule)"
+        >
+          <template #prepend>
+            <v-icon
+              size="18"
+              class="mr-2"
+              :color="rule.enabled ? 'primary' : undefined"
+            >
+              mdi-calendar-sync
+            </v-icon>
+          </template>
+          <v-list-item-title>{{ rule.name }}</v-list-item-title>
+          <v-list-item-subtitle>
+            <span v-if="rule.last_error" class="text-error">
+              {{ rule.last_error }}
+            </span>
+            <span v-else-if="!rule.enabled">disabled</span>
+            <span v-else>
+              {{ rule.scheduled }} scheduled
+              <template v-if="rule.skipped_full">
+                · {{ rule.skipped_full }} skipped (station busy)
+              </template>
+            </span>
+          </v-list-item-subtitle>
+        </v-list-item>
+        <div
+          v-if="!rules.length"
+          class="text-caption text-medium-emphasis px-4 py-2"
+        >
+          A rule schedules a template into every matching pass.
+        </div>
+      </v-list>
+
       <div class="text-caption text-medium-emphasis px-3 pt-4">
+        <div v-if="status.predicting" class="text-info fa-predicting">
+          <v-progress-circular indeterminate size="12" width="2" class="mr-1" />
+          Predicting passes: {{ status.predicting }} satellite{{
+            status.predicting === 1 ? '' : 's'
+          }}
+          left
+        </div>
         <div v-if="status.computed_at">
           Passes predicted {{ relText(status.computed_at) }} for the next
           {{ horizonDays }} days ({{ status.contacts }} contacts,
@@ -217,7 +275,10 @@
               v-for="c in contactsFor(station.id)"
               :key="c.id"
               class="fa-tl-pass"
-              :class="{ 'fa-tl-selected': c.id === selectedContactId }"
+              :class="{
+                'fa-tl-selected': c.id === selectedContactId,
+                'fa-tl-conflict': c.conflicts.length,
+              }"
               :style="passStyle(c)"
               :title="passTitle(c)"
               :data-contact="c.id"
@@ -318,6 +379,31 @@
                   >
                     overlaps
                   </v-chip>
+                  <v-chip
+                    v-if="a.conflicts.length"
+                    size="x-small"
+                    color="error"
+                    label
+                    class="ml-1 fa-conflict"
+                    :title="`${a.contact.station} is already working ${a.conflicts.length} other pass(es) at this time, more than its capacity`"
+                  >
+                    station busy
+                  </v-chip>
+                  <v-chip
+                    v-if="a.rule_name"
+                    size="x-small"
+                    label
+                    class="ml-1 fa-rule-chip"
+                    prepend-icon="mdi-calendar-sync"
+                  >
+                    {{ a.rule_name }}
+                  </v-chip>
+                </div>
+                <div
+                  v-if="a.created_by && !a.rule_id"
+                  class="text-caption text-medium-emphasis"
+                >
+                  by {{ a.created_by }}
                 </div>
               </td>
               <td>
@@ -441,6 +527,19 @@
               <td>{{ duration(c.duration) }}</td>
               <td>{{ c.max_elevation.toFixed(1) }}°</td>
               <td class="text-no-wrap">
+                <v-icon
+                  v-if="c.conflicts.length || (c.station_full && c.los > now)"
+                  size="16"
+                  :color="c.conflicts.length ? 'error' : 'warning'"
+                  class="mr-1 fa-station-full"
+                  :title="
+                    c.conflicts.length
+                      ? 'Station over capacity during this pass'
+                      : 'Station already busy with another pass at this time'
+                  "
+                >
+                  mdi-antenna
+                </v-icon>
                 <v-chip
                   v-if="c.activities.length"
                   size="x-small"
@@ -602,6 +701,18 @@
               data-field="station-mask"
             />
           </div>
+          <v-text-field
+            v-model.number="stationDialog.capacity"
+            type="number"
+            min="1"
+            label="Capacity (passes at once)"
+            hint="How many satellites the station can work at the same time, e.g. its number of antennas"
+            persistent-hint
+            density="compact"
+            variant="outlined"
+            class="mb-2"
+            data-field="station-capacity"
+          />
           <v-switch
             v-model="stationDialog.enabled"
             label="Predict contacts"
@@ -636,6 +747,219 @@
             variant="flat"
             :loading="stationDialog.busy"
             @click="saveStation"
+          >
+            Save
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <!-- Rule -->
+    <v-dialog v-model="ruleDialog.show" max-width="680" scrollable>
+      <v-card class="fa-rule-dialog">
+        <v-card-title>{{
+          ruleDialog.id ? 'Edit rule' : 'Add rule'
+        }}</v-card-title>
+        <v-card-text>
+          <div class="text-caption text-medium-emphasis mb-3">
+            Schedules the template into every predicted pass that matches, as
+            passes are predicted. Saving re-plans the rule's activities that
+            haven't started; ones you deleted stay cancelled.
+          </div>
+          <div class="d-flex align-center">
+            <v-text-field
+              v-model="ruleDialog.name"
+              label="Name"
+              density="compact"
+              variant="outlined"
+              class="mr-2"
+              data-field="rule-name"
+            />
+            <v-switch
+              v-model="ruleDialog.enabled"
+              label="Enabled"
+              color="primary"
+              density="compact"
+              hide-details
+              class="flex-grow-0"
+            />
+          </div>
+          <v-autocomplete
+            v-model="ruleDialog.template_id"
+            :items="templateChoices"
+            item-title="name"
+            item-value="id"
+            label="Flow template"
+            density="compact"
+            variant="outlined"
+            class="mb-3 fa-rule-template"
+            @update:model-value="ruleTemplateChosen"
+          />
+          <div v-if="ruleDialog.template_id" class="mb-2">
+            <div class="text-caption mb-1">Parameters</div>
+            <param-form
+              v-model="ruleDialog.params"
+              :parameters="ruleParameters"
+            />
+          </div>
+          <div class="d-flex">
+            <v-select
+              v-model="ruleDialog.satellite_ids"
+              :items="satellites"
+              item-title="name"
+              item-value="id"
+              label="Satellites"
+              placeholder="All"
+              persistent-placeholder
+              multiple
+              chips
+              closable-chips
+              density="compact"
+              variant="outlined"
+              class="mr-2"
+            />
+            <v-select
+              v-model="ruleDialog.station_ids"
+              :items="stations"
+              item-title="name"
+              item-value="id"
+              label="Stations"
+              placeholder="All"
+              persistent-placeholder
+              multiple
+              chips
+              closable-chips
+              density="compact"
+              variant="outlined"
+            />
+          </div>
+          <div class="d-flex">
+            <v-text-field
+              v-model.number="ruleDialog.min_elevation"
+              type="number"
+              label="Passes above (° max elevation)"
+              density="compact"
+              variant="outlined"
+              class="mr-2"
+              data-field="rule-min-el"
+            />
+            <v-text-field
+              v-model.number="ruleDialog.min_duration"
+              type="number"
+              label="At least (s long)"
+              density="compact"
+              variant="outlined"
+            />
+          </div>
+          <div class="d-flex align-center">
+            <v-select
+              v-model="ruleDialog.anchor"
+              :items="anchors"
+              label="Start relative to"
+              density="compact"
+              variant="outlined"
+              class="mr-2 fa-anchor"
+            />
+            <v-text-field
+              v-model.number="ruleDialog.offset"
+              type="number"
+              label="Offset (s)"
+              density="compact"
+              variant="outlined"
+              data-field="rule-offset"
+            />
+          </div>
+          <div class="d-flex align-center mb-3">
+            <span class="text-body-2 mr-3">Mode</span>
+            <v-btn-toggle
+              v-model="ruleDialog.mode"
+              mandatory
+              density="compact"
+              variant="outlined"
+              divided
+              color="primary"
+            >
+              <v-btn
+                v-for="m in modes"
+                :key="m.value"
+                :value="m.value"
+                size="small"
+                :title="m.hint"
+                :prepend-icon="m.icon"
+              >
+                {{ m.title }}
+              </v-btn>
+            </v-btn-toggle>
+          </div>
+          <div class="d-flex">
+            <v-text-field
+              v-model.number="ruleDialog.priority"
+              type="number"
+              label="Priority"
+              hint="Higher priority rules claim passes first"
+              persistent-hint
+              density="compact"
+              variant="outlined"
+              class="mr-2"
+            />
+            <v-text-field
+              v-if="ruleDialog.mode !== 'run'"
+              v-model.number="ruleDialog.approval_margin"
+              type="number"
+              label="Approvals close before LOS (s)"
+              density="compact"
+              variant="outlined"
+              class="mr-2"
+            />
+            <v-text-field
+              v-model.number="ruleDialog.late_tolerance"
+              type="number"
+              label="May start late by (s)"
+              density="compact"
+              variant="outlined"
+            />
+          </div>
+          <v-switch
+            v-model="ruleDialog.skip_full_stations"
+            label="Skip passes when the station is already busy"
+            color="primary"
+            density="compact"
+            hide-details
+          />
+          <v-switch
+            v-model="ruleDialog.stop_at_los"
+            label="Stop runs at LOS"
+            color="primary"
+            density="compact"
+            hide-details
+          />
+          <v-alert
+            v-if="ruleDialog.error"
+            type="error"
+            density="compact"
+            class="mt-2"
+          >
+            {{ ruleDialog.error }}
+          </v-alert>
+        </v-card-text>
+        <v-card-actions>
+          <v-btn
+            v-if="ruleDialog.id"
+            color="error"
+            variant="text"
+            @click="deleteRule"
+          >
+            Delete
+          </v-btn>
+          <v-spacer />
+          <v-btn variant="text" @click="ruleDialog.show = false">Cancel</v-btn>
+          <v-btn
+            color="primary"
+            variant="flat"
+            :loading="ruleDialog.busy"
+            :disabled="!ruleDialog.template_id"
+            class="fa-rule-save"
+            @click="saveRule"
           >
             Save
           </v-btn>
@@ -890,6 +1214,7 @@ export default {
       satDialog: { show: false },
       stationDialog: { show: false },
       actDialog: blankActivity(),
+      ruleDialog: { show: false },
       timer: null,
     }
   },
@@ -905,6 +1230,15 @@ export default {
     },
     activities() {
       return this.schedule?.activities || []
+    },
+    rules() {
+      return this.schedule?.rules || []
+    },
+    ruleParameters() {
+      return (
+        this.flows.find((f) => f.id === this.ruleDialog.template_id)
+          ?.parameters || []
+      )
     },
     status() {
       return this.schedule?.status || {}
@@ -1009,7 +1343,12 @@ export default {
   methods: {
     async refresh() {
       try {
-        this.schedule = await flowApi.schedule()
+        // Only the contacts in view (at least a day ahead, for the schedule dialog)
+        const now = Date.now() / 1000
+        this.schedule = await flowApi.schedule(
+          Math.floor(Math.min(this.viewStart, now - 900)),
+          Math.ceil(Math.max(this.viewEnd, now + 86400)),
+        )
         this.now = this.schedule.time
       } catch {
         this.now = Date.now() / 1000 // engine offline: the toolbar shows it
@@ -1162,6 +1501,7 @@ export default {
         longitude: station?.longitude ?? 0,
         altitude: station?.altitude ?? 0,
         min_elevation: station?.min_elevation ?? 10,
+        capacity: station?.capacity ?? 1,
         enabled: station ? station.enabled !== false : true,
         error: '',
         busy: false,
@@ -1178,6 +1518,7 @@ export default {
           longitude: d.longitude,
           altitude: d.altitude,
           min_elevation: d.min_elevation,
+          capacity: d.capacity,
           enabled: d.enabled,
         })
         d.show = false
@@ -1293,13 +1634,105 @@ export default {
       }
     },
     async removeActivity(a) {
-      const verb = a.status === 'running' ? 'Stop and delete' : 'Delete'
+      let verb = a.status === 'running' ? 'Stop and delete' : 'Delete'
+      if (
+        a.rule_id &&
+        ['scheduled', 'needs_review', 'running'].includes(a.status)
+      )
+        verb = `${a.status === 'running' ? 'Stop and cancel' : 'Cancel'} (rule '${a.rule_name}' won't reschedule it)`
       if (!window.confirm(`${verb} activity '${a.label}'?`)) return
       try {
         await flowApi.deleteActivity(a.id)
         await this.refresh()
       } catch (error) {
         this.notifyError('Could not delete', error)
+      }
+    },
+
+    // ---- rules -----------------------------------------------------------
+    editRule(rule) {
+      this.ruleDialog = {
+        show: true,
+        id: rule?.id || null,
+        name: rule?.name || '',
+        enabled: rule ? rule.enabled !== false : true,
+        template_id: rule?.template_id || null,
+        params: { ...(rule?.params || {}) },
+        satellite_ids: [...(rule?.satellite_ids || [])],
+        station_ids: [...(rule?.station_ids || [])],
+        min_elevation: rule?.min_elevation ?? 10,
+        min_duration: rule?.min_duration ?? 0,
+        anchor: rule?.anchor || 'aos',
+        offset: rule?.offset ?? -120,
+        mode: rule?.mode || 'walk',
+        priority: rule?.priority ?? 0,
+        approval_margin: rule?.approval_margin ?? 30,
+        late_tolerance: rule?.late_tolerance ?? 30,
+        stop_at_los: rule?.stop_at_los ?? false,
+        skip_full_stations: rule?.skip_full_stations ?? true,
+        error: '',
+        busy: false,
+      }
+    },
+    ruleTemplateChosen() {
+      const template = this.flows.find(
+        (f) => f.id === this.ruleDialog.template_id,
+      )
+      if (!template) return
+      this.ruleDialog.mode = template.mode || 'run'
+      this.ruleDialog.params = {}
+      if (!this.ruleDialog.name) this.ruleDialog.name = template.name
+    },
+    async saveRule() {
+      const d = this.ruleDialog
+      d.busy = true
+      d.error = ''
+      const body = {
+        name: d.name,
+        enabled: d.enabled,
+        template_id: d.template_id,
+        params: d.params,
+        satellite_ids: d.satellite_ids,
+        station_ids: d.station_ids,
+        min_elevation: Number(d.min_elevation) || 0,
+        min_duration: Number(d.min_duration) || 0,
+        anchor: d.anchor,
+        offset: Number(d.offset) || 0,
+        mode: d.mode,
+        priority: Number(d.priority) || 0,
+        approval_margin: Number(d.approval_margin) || 0,
+        late_tolerance: Number(d.late_tolerance) || 0,
+        stop_at_los: d.stop_at_los,
+        skip_full_stations: d.skip_full_stations,
+      }
+      try {
+        const result = await flowApi.saveRule(d.id, body)
+        d.show = false
+        this.$notify.normal({
+          title: `Rule '${result.rule.name}' saved`,
+          body: `Scheduled ${result.created} activities${result.removed ? `, replacing ${result.removed}` : ''}.`,
+        })
+        await this.refresh()
+      } catch (error) {
+        d.error = errorInfo(error).message
+      } finally {
+        d.busy = false
+      }
+    },
+    async deleteRule() {
+      const d = this.ruleDialog
+      if (
+        !window.confirm(
+          `Delete rule '${d.name}'? Its activities that haven't started are removed.`,
+        )
+      )
+        return
+      try {
+        await flowApi.deleteRule(d.id)
+        d.show = false
+        await this.refresh()
+      } catch (error) {
+        d.error = errorInfo(error).message
       }
     },
   },
@@ -1324,6 +1757,9 @@ export default {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+.fa-contacts-center > .v-alert {
+  flex: 0 0 auto;
 }
 .fa-contacts-tables {
   flex: 1;
@@ -1379,6 +1815,9 @@ export default {
   cursor: pointer;
   overflow: hidden;
   min-width: 3px;
+}
+.fa-tl-pass.fa-tl-conflict {
+  box-shadow: inset 0 0 0 2px rgb(var(--v-theme-error));
 }
 .fa-tl-pass.fa-tl-selected {
   outline: 2px solid #fff;

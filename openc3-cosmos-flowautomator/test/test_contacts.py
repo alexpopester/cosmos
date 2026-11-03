@@ -504,3 +504,224 @@ def test_contacts_http_api(engine, planner, clock):
     assert call("DELETE", f"/activities/{activity_id}")[0] == 200
     assert call("DELETE", f"/satellites/{sat_id}")[0] == 200
     assert call("GET", "/activities")[1] == []
+
+
+# ---- background prediction, retention ------------------------------------------
+
+
+def test_prediction_runs_in_the_background_one_satellite_at_a_time(engine, clock):
+    planner = engine.planner
+    planner.clock = clock
+    planner.horizon = 2 * 86400
+    planner.start()
+    try:
+        for i in range(5):
+            planner.save_station({**DC, "name": f"Site {i}", "longitude": -77.0 + 10 * i})
+        started = time.monotonic()
+        sats = [planner.save_satellite({"name": f"SAT-{i}", "tle": f"{ISS_1}\n{ISS_2}"}) for i in range(10)]
+        assert time.monotonic() - started < 1.0  # saving never waits for prediction
+        assert wait_until(lambda: planner.predicting() == 0, 30)
+        assert len(planner.pair_contacts) == 50  # nothing still in flight once predicting() says 0
+        assert planner.status()["predicting"] == 0 and planner.computed_at is not None
+        assert {c["satellite"] for c in planner.contacts} == {f"SAT-{i}" for i in range(10)}
+
+        # A new TLE for one satellite only re-predicts that satellite
+        before = {key: id(pair) for key, pair in planner.pair_contacts.items()}
+        planner.set_tle(sats[3]["id"], f"{ISS_1}\n{with_checksum(ISS_2[:43] + '325.1288' + ISS_2[51:])}")
+        assert wait_until(
+            lambda: (
+                not planner.pending
+                and id(planner.pair_contacts[(sats[3]["id"], next(iter(planner.stations)))])
+                != before[(sats[3]["id"], next(iter(planner.stations)))]
+            ),
+            10,
+        )
+        unchanged = [k for k in before if k[0] != sats[3]["id"] and id(planner.pair_contacts[k]) == before[k]]
+        assert len(unchanged) == 45
+    finally:
+        planner.stop()
+
+
+def test_finished_activities_are_pruned_after_retention(engine, planner, setup, clock):
+    flow = template(engine)
+    contact = first_contact(planner)
+    activity = planner.create_activity({"template_id": flow["id"], "contact_id": contact["id"]})
+    clock.now = contact["aos"] + 600
+    planner.tick()
+    assert record_status(planner, activity) == "missed"
+    clock.now = contact["los"] + 6 * 86400
+    assert planner.prune() == 0
+    clock.now = contact["los"] + 8 * 86400
+    assert planner.prune() == 1
+    assert activity["id"] not in planner.activities
+    assert activity["id"] not in planner.store.records("activities")
+
+
+def test_scheduler_events_are_audited(engine, planner, setup, clock):
+    flow = template(engine)
+    contact = first_contact(planner)
+    activity = planner.create_activity({"template_id": flow["id"], "contact_id": contact["id"]})
+    clock.now = activity["start"]
+    planner.tick()
+    assert wait_until(lambda: record_status(planner, activity) == "done")
+    actions = [(e["user"], e["action"]) for e in engine.audit.entries(kind="activity")]
+    assert ("scheduler", "started") in actions and ("scheduler", "done") in actions
+
+
+# ---- recurring rules ---------------------------------------------------------
+
+
+def test_rule_schedules_every_matching_contact(engine, planner, setup, clock):
+    sat, station = setup
+    flow = template(engine)
+    result = planner.save_rule(
+        {
+            "name": "Every good pass",
+            "template_id": flow["id"],
+            "satellite_ids": [sat["id"]],
+            "min_elevation": 30,
+            "anchor": "aos",
+            "offset": -60,
+            "params": {"kind": "SPECIAL"},
+        },
+        user="alice",
+    )
+    good = [c for c in upcoming(planner) if c["max_elevation"] >= 30]
+    assert result["created"] == len(good) > 0
+    made = [a for a in planner.activities.values() if a.get("rule_id") == result["rule"]["id"]]
+    assert {a["contact"]["id"] for a in made} == {c["id"] for c in good}
+    assert all(a["label"] == "Every good pass" and a["params"] == {"kind": "SPECIAL"} for a in made)
+    assert made[0]["created_by"] == "rule:Every good pass"
+    assert planner.list_rules()[0]["scheduled"] == len(good)
+
+    # Applying again creates nothing new
+    assert planner._apply_rules(clock.now) == 0
+    # New contacts (a second station) get activities too
+    planner.save_station({**DC, "name": "Houston", "latitude": 29.7, "longitude": -95.4})
+    assert len([a for a in planner.activities.values() if a.get("rule_id")]) > len(good)
+
+
+def test_deleting_a_rule_activity_cancels_it_so_the_rule_leaves_it(engine, planner, setup, clock):
+    flow = template(engine)
+    rule = planner.save_rule({"template_id": flow["id"], "min_elevation": 30})["rule"]
+    victim = next(a for a in planner.activities.values() if a.get("rule_id") == rule["id"])
+    planner.delete_activity(victim["id"], user="alice")
+    assert victim["status"] == "cancelled" and "alice" in victim["message"]
+    assert planner._apply_rules(clock.now) == 0
+    assert len([a for a in planner.activities.values() if a["contact"]["id"] == victim["contact"]["id"]]) == 1
+
+
+def test_editing_or_deleting_a_rule_replans_its_activities(engine, planner, setup, clock):
+    flow = template(engine)
+    rule = planner.save_rule({"template_id": flow["id"], "min_elevation": 10})["rule"]
+    many = planner.list_rules()[0]["scheduled"]
+    result = planner.save_rule({"min_elevation": 40}, rule["id"])
+    assert result["removed"] == many and 0 < result["created"] < many
+    assert all(a["contact"]["max_elevation"] >= 40 for a in planner.activities.values() if a["status"] == "scheduled")
+    planner.save_rule({"enabled": False}, rule["id"])
+    assert not [a for a in planner.activities.values() if a["status"] == "scheduled"]
+    planner.save_rule({"enabled": True}, rule["id"])
+    _rule, removed = planner.delete_rule(rule["id"])
+    assert removed == result["created"] and not planner.activities
+
+
+def test_rule_follows_a_pass_that_moves_too_far(engine, planner, setup, clock):
+    flow = template(engine)
+    rule = planner.save_rule({"template_id": flow["id"], "min_elevation": 10})["rule"]
+    activity = next(a for a in planner.activities.values() if a.get("rule_id") == rule["id"])
+    real_id = activity["contact"]["id"]
+    # As if this activity was planned on an older prediction that put the pass 10 minutes later
+    activity["contact"] = {**activity["contact"], "id": "old-prediction", "tca": activity["contact"]["tca"] + 600}
+    planner.recompute()
+    assert activity["status"] == "cancelled" and activity.get("superseded")
+    replacement = [
+        a for a in planner.activities.values() if a["status"] == "scheduled" and a["contact"]["id"] == real_id
+    ]
+    assert len(replacement) == 1 and replacement[0]["rule_id"] == rule["id"]
+    assert activity["id"] not in [a["id"] for a in planner.list_activities()]  # superseded ones are hidden
+
+
+def test_rule_with_problems_reports_them(engine, planner, setup):
+    flow = template(engine, parameters=[{"name": "kind", "type": "string", "required": True}])
+    with pytest.raises(PlannerError, match="'kind' is required"):
+        planner.save_rule({"template_id": flow["id"]})
+    rule = planner.save_rule({"template_id": flow["id"], "params": {"kind": "X"}})["rule"]
+    engine.delete_flow(flow["id"])
+    planner._apply_rules(planner.clock())
+    assert planner.rules[rule["id"]]["last_error"] == "Its template was deleted"
+
+
+# ---- station capacity --------------------------------------------------------
+
+
+def two_satellites(planner):
+    """A second satellite a few seconds behind the first, so their passes over DC overlap."""
+    planner.save_satellite({"name": "ISS-B", "tle": f"{ISS_1}\n{with_checksum(ISS_2[:43] + '324.0288' + ISS_2[51:])}"})
+    return list(planner.satellites.values())
+
+
+def overlapping_pair(planner):
+    for a in upcoming(planner):
+        for b in upcoming(planner):
+            if (
+                a["satellite_id"] != b["satellite_id"]
+                and a["station_id"] == b["station_id"]
+                and a["aos"] < b["los"]
+                and b["aos"] < a["los"]
+            ):
+                return a, b
+    raise AssertionError("no overlapping passes")
+
+
+def test_station_capacity_conflicts(engine, planner, setup):
+    two_satellites(planner)
+    a, b = overlapping_pair(planner)
+    flow = template(engine)
+    first = planner.create_activity({"template_id": flow["id"], "contact_id": a["id"]})
+    assert first["conflicts"] == []
+    listed = {c["id"]: c for c in planner.list_contacts()}
+    assert listed[b["id"]]["station_full"] is True and listed[a["id"]]["station_full"] is False
+    planner.create_activity({"template_id": flow["id"], "contact_id": b["id"]})  # allowed, but flagged
+    activities = planner.list_activities()
+    assert all(x["conflicts"] for x in activities)
+    assert planner.status()["conflicts"] == 2
+
+    station = planner.stations[a["station_id"]]
+    planner.save_station({"capacity": 2}, station["id"])
+    assert not any(x["conflicts"] for x in planner.list_activities())
+
+
+def test_rules_skip_full_stations_by_priority(engine, planner, setup):
+    sats = two_satellites(planner)
+    flow = template(engine)
+    high = planner.save_rule(
+        {"name": "A first", "template_id": flow["id"], "satellite_ids": [sats[0]["id"]], "priority": 10}
+    )
+    low = planner.save_rule({"name": "B second", "template_id": flow["id"], "satellite_ids": [sats[1]["id"]]})
+    assert high["created"] > 0 and planner.rules[low["rule"]["id"]]["skipped_full"] > 0
+    assert not any(x["conflicts"] for x in planner.list_activities())
+    planner.save_rule({"skip_full_stations": False}, low["rule"]["id"])
+    assert any(x["conflicts"] for x in planner.list_activities())
+
+
+def test_rules_http_api(engine, planner, setup):
+    from flow_automator.http_api import FlowApi
+
+    api = FlowApi(engine, lambda token, write: {"username": "alice"})
+
+    def call(method, path, body=None):
+        import json
+
+        return api.handle(method, f"/flow-automator/api{path}", {}, {}, json.dumps(body) if body else "")
+
+    flow = template(engine)
+    status, body = call("POST", "/rules", {"template_id": flow["id"], "min_elevation": 30})
+    assert status == 200 and body["created"] > 0
+    rule_id = body["rule"]["id"]
+    assert call("GET", "/rules")[1][0]["id"] == rule_id
+    assert call("PUT", f"/rules/{rule_id}", {"enabled": False})[1]["removed"] == body["created"]
+    assert call("POST", "/rules", {"template_id": flow["id"], "satellite_ids": ["nope"]})[0] == 404
+    assert call("DELETE", f"/rules/{rule_id}")[0] == 200
+    actions = [e["action"] for e in engine.audit.entries(kind="rule")]
+    assert actions == ["deleted", "saved", "created"]
+    assert call("GET", "/schedule")[1]["rules"] == []

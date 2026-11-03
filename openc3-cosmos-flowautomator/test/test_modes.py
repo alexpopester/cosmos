@@ -85,7 +85,7 @@ def test_abort_stops_the_run(engine, backend):
     engine.approve(run.id, next_approval(engine, run)["id"], "abort")
     record = finish(engine, run)
     assert record["status"] == "stopped"
-    assert "Aborted by operator" in record["message"]
+    assert "Aborted by anonymous" in record["message"]
     assert backend.commands == ["INST A"]
 
 

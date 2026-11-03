@@ -68,9 +68,12 @@ export default {
       headers: handled,
     }).then(unwrap),
   stopAll: () => Api.post(`${BASE}/stop_all`, { data: {} }).then(unwrap),
+  whoami: () => Api.get(`${BASE}/whoami`).then(unwrap),
+  audit: (params) => Api.get(`${BASE}/audit`, { params }).then(unwrap),
 
   // Contacts: satellites, stations, predicted passes and scheduled activities
-  schedule: () => Api.get(`${BASE}/schedule`).then(unwrap),
+  schedule: (start, end) =>
+    Api.get(`${BASE}/schedule`, { params: { start, end } }).then(unwrap),
   recompute: () => post('/contacts/recompute'),
   saveSatellite: (id, satellite) =>
     id ? put(`/satellites/${id}`, satellite) : post('/satellites', satellite),
@@ -84,6 +87,9 @@ export default {
   deleteActivity: (id) => del(`/activities/${id}`),
   acceptActivity: (id) => post(`/activities/${id}/accept`),
   refreshActivityTemplate: (id) => post(`/activities/${id}/refresh_template`),
+  saveRule: (id, rule) =>
+    id ? put(`/rules/${id}`, rule) : post('/rules', rule),
+  deleteRule: (id) => del(`/rules/${id}`),
   pauseScheduler: () => post('/scheduler/pause'),
   resumeScheduler: () => post('/scheduler/resume'),
   // Script Runner's file list, for the Run script node
