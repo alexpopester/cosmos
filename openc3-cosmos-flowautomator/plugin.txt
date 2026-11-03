@@ -1,0 +1,28 @@
+# Flow Automator: build automation flows by wiring nodes together.
+#
+# The tool is the graph editor. The FLOW_ENGINE microservice stores the flows,
+# keeps their triggers armed and runs them server side, so flows keep running
+# when nobody has the tool open.
+#
+# Variables:
+#   flow_engine_port   port the engine's HTTP API listens on inside the operator
+#   flow_route_prefix  Traefik route to the engine. Must be unique across scopes,
+#                      and the tool expects /flow-automator.
+#   trigger_period     seconds between trigger polls
+#   run_history        runs kept per flow
+
+VARIABLE flow_engine_port 7790
+VARIABLE flow_route_prefix /flow-automator
+VARIABLE trigger_period 0.25
+VARIABLE run_history 50
+
+MICROSERVICE FLOW_ENGINE flow-engine
+  CMD python flow_engine.py
+  OPTION TRIGGER_PERIOD <%= trigger_period %>
+  OPTION HISTORY <%= run_history %>
+  PORT <%= flow_engine_port %>
+  ROUTE_PREFIX <%= flow_route_prefix %>
+
+TOOL flowautomator "Flow Automator"
+  INLINE_URL main.js
+  ICON mdi-sitemap-outline
