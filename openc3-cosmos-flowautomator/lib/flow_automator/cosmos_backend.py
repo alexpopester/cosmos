@@ -81,6 +81,27 @@ class CosmosBackend:
 
         put_target_file(path, text, scope=self.scope)
 
+    def stash_set(self, key, value):
+        from openc3.api.stash_api import stash_set
+
+        stash_set(key, value, scope=self.scope)
+
+    def read_target_file(self, path):
+        """A target file's text from the bucket (modified, else original), or None if there isn't one."""
+        from openc3.script.storage import get_target_file
+
+        try:
+            file = get_target_file(path, scope=self.scope)
+        except Exception as error:  # noqa: BLE001
+            if "not found" in str(error).lower() or "nosuchkey" in str(error).lower() or "404" in str(error):
+                return None
+            raise
+        if file is None:
+            return None
+        with file:
+            data = file.read()
+        return data.decode(errors="replace") if isinstance(data, bytes) else data
+
     def stash_take(self, key):
         """Read and remove a value a script left in the COSMOS stash (None if there isn't one)."""
         from openc3.api.stash_api import stash_delete, stash_get

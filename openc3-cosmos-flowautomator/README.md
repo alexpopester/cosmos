@@ -283,8 +283,39 @@ time, and only for what changed; the Contacts view shows the progress.
 Predictions agree with skyfield to well under a second.
 
 TLEs older than `stale_tle_days` are flagged. Each satellite keeps its last 5
-TLEs. TLEs come from the dialog today; other sources (files, URLs such as
-CelesTrak, telemetry) plug into `lib/flow_automator/tle_sources.py`.
+TLEs and records where each came from.
+
+### Feeding TLEs from other apps
+
+Paste a TLE in the satellite dialog, upload a file of them (the upload button
+next to Satellites), or let another app keep them current through any of:
+
+| Input | How | Source recorded as |
+| --- | --- | --- |
+| HTTP | `POST /flow-automator/api/tles` with `{"tle": "<any number of TLEs>", "source": "fds"}` and a COSMOS token; the response says what happened to each | `source` |
+| COSMOS stash | from any COSMOS script or microservice: `stash_set("flow_automator_tles", {"tle": text, "source": "fds"})` (or just the text, or a list); the outcome appears in `flow_automator_tles_result` | `source`, or `stash` |
+| Bucket file | list target paths (e.g. `INST/tle/latest.tle`) in **TLE inputs**; write them with `put_target_file(...)` or Bucket Explorer; read again whenever they change | `file:<path>` |
+| Telemetry | list packets in **TLE inputs**: one item holding the TLE text, or line 1 and line 2 items; read whenever the packet's count goes up | `tlm:<TGT PKT>` |
+
+Text may hold any number of 2- or 3-line TLEs. Each is matched to a satellite
+by catalog number (the satellite dialog shows it; it's set from the first TLE),
+then by name. Every TLE from these inputs must pass these checks:
+
+- **catalog number** matches the satellite's (else *rejected*),
+- **epoch** is newer than the current TLE's (else *skipped*: an old file or a
+  cached download can't roll the orbit back),
+- the satellite's **preferred source**, if set, wins while its TLE is fresher
+  than `stale_tle_days` (others are *skipped*),
+- it doesn't move the satellite more than the **jump limit** (100 km by
+  default) from where the current TLE puts it now: otherwise it's *held* for
+  review, alerting, and waits for **Accept** or **Reject** in the satellite
+  dialog (a maneuver, or a wrong TLE?).
+
+Pasting in the satellite dialog is an operator's decision and applies as is.
+**TLE inputs** (the import button next to Satellites) sets the stash key, files,
+packets, jump limit and polling interval, and shows each input's last result.
+Every TLE that applies re-times scheduled activities like any other update,
+and the audit log records every batch.
 
 ### Templates
 
@@ -429,5 +460,5 @@ AOS; it takes about five minutes.
 - Each run keeps its last 1,000 steps; each flow its last `run_history` runs.
 - Predicting 50 satellites × 20 stations for 7 days takes about a minute in
   the background after a restart or a full recompute.
-- TLEs come from the dialog only; times are UTC; stations have one elevation
+- No built-in internet TLE fetch (CelesTrak, Space-Track) yet; times are UTC; stations have one elevation
   mask, not a horizon profile.

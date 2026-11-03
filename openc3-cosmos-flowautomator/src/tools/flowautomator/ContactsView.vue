@@ -12,6 +12,22 @@
         <span class="text-subtitle-2">Satellites</span>
         <v-spacer />
         <v-btn
+          icon="mdi-upload"
+          size="x-small"
+          variant="text"
+          title="Upload TLEs for any number of satellites"
+          class="fa-upload-tles"
+          @click="showUpload = true"
+        />
+        <v-btn
+          icon="mdi-import"
+          size="x-small"
+          variant="text"
+          title="TLE inputs: where other apps can send TLEs"
+          class="fa-tle-inputs-btn mr-1"
+          @click="showInputs = true"
+        />
+        <v-btn
           size="x-small"
           variant="tonal"
           prepend-icon="mdi-plus"
@@ -46,9 +62,18 @@
               <span :class="sat.tle_stale ? 'text-warning' : ''">
                 {{ ageText(sat.tle_age_days) }} old
               </span>
+              <template v-if="sat.tle.source && sat.tle.source !== 'manual'">
+                · {{ sat.tle.source }}
+              </template>
             </span>
+            <div v-if="sat.held_tle" class="text-warning fa-held-tle">
+              New TLE held for review
+            </div>
           </v-list-item-subtitle>
           <template #append>
+            <v-icon v-if="sat.held_tle" color="warning" size="16">
+              mdi-alert-decagram
+            </v-icon>
             <v-icon v-if="sat.tle_stale" color="warning" size="16">
               mdi-clock-alert-outline
             </v-icon>
@@ -606,6 +631,51 @@
               data-field="sat-target"
             />
           </div>
+          <div class="d-flex">
+            <v-text-field
+              v-model="satDialog.catalog"
+              label="Catalog number"
+              hint="Matches TLEs sent by other apps; set from the first TLE"
+              persistent-hint
+              density="compact"
+              variant="outlined"
+              class="mr-2"
+            />
+            <v-text-field
+              v-model="satDialog.preferred_source"
+              label="Preferred TLE source (optional)"
+              hint="While its TLE is fresh, other automated sources don't replace it"
+              persistent-hint
+              density="compact"
+              variant="outlined"
+            />
+          </div>
+          <v-alert
+            v-if="satDialog.held"
+            type="warning"
+            density="compact"
+            class="mb-3 fa-held-alert"
+          >
+            <div>
+              A TLE from <b>{{ satDialog.held.source }}</b> (epoch
+              {{ fmtTime(satDialog.held.epoch) }} UTC) is held:
+              {{ satDialog.held.reason }}
+            </div>
+            <div class="mt-2">
+              <v-btn
+                size="small"
+                color="warning"
+                variant="flat"
+                class="mr-2 fa-accept-held"
+                @click="decideHeld(true)"
+              >
+                Accept it
+              </v-btn>
+              <v-btn size="small" variant="tonal" @click="decideHeld(false)">
+                Reject it
+              </v-btn>
+            </div>
+          </v-alert>
           <v-textarea
             v-model="satDialog.tle"
             label="TLE"
@@ -626,8 +696,11 @@
             hide-details
           />
           <div class="text-caption text-medium-emphasis">
-            TLE source: pasted here. Other sources (files, URLs, telemetry) plug
-            into the same update path.
+            <template v-if="satDialog.source">
+              Current TLE from {{ satDialog.source }}.
+            </template>
+            Pasting here applies it as is. Other apps can send TLEs through the
+            TLE inputs (the import button next to Satellites).
           </div>
           <v-alert
             v-if="satDialog.error"
@@ -660,6 +733,9 @@
         </v-card-actions>
       </v-card>
     </v-dialog>
+
+    <tle-upload-dialog v-model="showUpload" @applied="refresh" />
+    <tle-inputs-dialog v-model="showInputs" />
 
     <!-- Station -->
     <v-dialog v-model="stationDialog.show" max-width="520">
@@ -1165,6 +1241,8 @@
 <script>
 import flowApi, { errorInfo } from './flowApi'
 import ParamForm from './ParamForm.vue'
+import TleUploadDialog from './TleUploadDialog.vue'
+import TleInputsDialog from './TleInputsDialog.vue'
 import { MODES } from './nodeTypes'
 
 const POLL_MS = 2000
@@ -1198,7 +1276,7 @@ function blankActivity() {
 }
 
 export default {
-  components: { ParamForm },
+  components: { ParamForm, TleUploadDialog, TleInputsDialog },
   props: {
     flows: { type: Array, default: () => [] },
   },
@@ -1226,6 +1304,8 @@ export default {
       stationDialog: { show: false },
       actDialog: blankActivity(),
       ruleDialog: { show: false },
+      showUpload: false,
+      showInputs: false,
       timer: null,
     }
   },
@@ -1473,6 +1553,10 @@ export default {
         enabled: sat ? sat.enabled !== false : true,
         tle: sat?.tle ? `${sat.tle.line1}\n${sat.tle.line2}` : '',
         original: sat?.tle ? `${sat.tle.line1}\n${sat.tle.line2}` : '',
+        catalog: sat?.catalog ?? '',
+        preferred_source: sat?.preferred_source || '',
+        held: sat?.held_tle || null,
+        source: sat?.tle?.source || '',
         error: '',
         busy: false,
       }
@@ -1482,7 +1566,13 @@ export default {
       d.busy = true
       d.error = ''
       try {
-        const body = { name: d.name, target: d.target, enabled: d.enabled }
+        const body = {
+          name: d.name,
+          target: d.target,
+          enabled: d.enabled,
+          catalog: String(d.catalog ?? '').trim(),
+          preferred_source: d.preferred_source,
+        }
         if (d.tle.trim() && d.tle.trim() !== d.original) body.tle = d.tle
         await flowApi.saveSatellite(d.id, body)
         d.show = false
@@ -1491,6 +1581,17 @@ export default {
         d.error = errorInfo(error).message
       } finally {
         d.busy = false
+      }
+    },
+    async decideHeld(accept) {
+      const d = this.satDialog
+      try {
+        if (accept) await flowApi.acceptHeldTle(d.id)
+        else await flowApi.rejectHeldTle(d.id)
+        d.show = false
+        await this.refresh()
+      } catch (error) {
+        d.error = errorInfo(error).message
       }
     },
     async deleteSatellite() {

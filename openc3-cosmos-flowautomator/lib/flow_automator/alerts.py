@@ -46,6 +46,7 @@ EVENTS = {
     "scheduler_paused": ("notification", "The contact scheduler was paused or resumed"),
     "tle_stale": ("notification", "A satellite's TLE is getting old"),
     "prediction_failed": ("alert", "Pass prediction failed for a satellite"),
+    "tle_held": ("alert", "An automated TLE was held for review (big jump, or can't compare)"),
     "flow_notify": ("notification", "A flow's Notify node"),
 }
 APPROVAL_ESCALATE_AFTER = 30  # seconds an approval waits before it's alerted (someone in the tool answers sooner)
@@ -58,6 +59,7 @@ DEFAULT_COSMOS_EVENTS = [
     "stop_all",
     "tle_stale",
     "prediction_failed",
+    "tle_held",
     "flow_notify",
 ]
 FORMATS = ("slack", "teams", "generic")

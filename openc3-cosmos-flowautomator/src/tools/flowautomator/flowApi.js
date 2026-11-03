@@ -110,6 +110,11 @@ export default {
   deleteActivity: (id) => del(`/activities/${id}`),
   acceptActivity: (id) => post(`/activities/${id}/accept`),
   refreshActivityTemplate: (id) => post(`/activities/${id}/refresh_template`),
+  ingestTles: (text, source) => post('/tles', { tle: text, source }),
+  tleInputs: () => get('/tle_inputs'),
+  saveTleInputs: (settings) => put('/tle_inputs', settings),
+  acceptHeldTle: (id) => post(`/satellites/${id}/tle/accept`),
+  rejectHeldTle: (id) => post(`/satellites/${id}/tle/reject`),
   rehearseActivity: (id, skipWaits = true) =>
     post(`/activities/${id}/rehearse`, { skip_waits: skipWaits }),
   alerts: () => get('/alerts'),

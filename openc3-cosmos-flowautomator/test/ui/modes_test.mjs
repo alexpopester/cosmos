@@ -205,7 +205,6 @@ try {
   await page.screenshot({ path: `${SHOTS}/modes_error.png` }).catch(() => {})
 } finally {
   await api('PUT', '/alerts', savedAlerts).catch(() => {})
-  await api('POST', '/stop_all', {}).catch(() => {})
   for (const id of created) await api('DELETE', `/flows/${id}`).catch(() => {})
   await browser.close()
 }

@@ -71,6 +71,17 @@ await api('PUT', '/alerts', { ...savedAlerts, cosmos: { ...savedAlerts.cosmos, e
 await page.waitForTimeout(1500)
 await ackToasts(page)
 
+// Leave the COSMOS as we found it: which flows were armed, and whether the contact scheduler ran
+const snapshot = await (async () => {
+  const [, list] = await api('GET', '/flows')
+  const [, status] = await api('GET', '/status')
+  return { armed: list.filter((f) => f.armed).map((f) => f.id), paused: !!status.contacts?.paused }
+})()
+const restore = async () => {
+  for (const id of snapshot.armed) await api('POST', `/flows/${id}/arm`, {}).catch(() => {})
+  await api('POST', snapshot.paused ? '/scheduler/pause' : '/scheduler/resume', { reason: 'Restored after a test' }).catch(() => {})
+}
+
 try {
   // ---- engine: big chains ----
   for (const size of [500, 2000]) {
@@ -215,8 +226,8 @@ try {
   check('unexpected error', false, error.message.split('\n')[0])
   await page.screenshot({ path: `${SHOTS}/large_error.png` }).catch(() => {})
 } finally {
+  await restore()
   await api('PUT', '/alerts', savedAlerts).catch(() => {})
-  await api('POST', '/stop_all', {}).catch(() => {})
   for (const id of created) await api('DELETE', `/flows/${id}`).catch(() => {})
   await browser.close()
 }

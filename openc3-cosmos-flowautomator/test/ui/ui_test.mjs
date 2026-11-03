@@ -40,6 +40,17 @@ const api = async (method, path, body) => {
 }
 const created = []
 
+// Leave the COSMOS as we found it: which flows were armed, and whether the contact scheduler ran
+const snapshot = await (async () => {
+  const [, list] = await api('GET', '/flows')
+  const [, status] = await api('GET', '/status')
+  return { armed: list.filter((f) => f.armed).map((f) => f.id), paused: !!status.contacts?.paused }
+})()
+const restore = async () => {
+  for (const id of snapshot.armed) await api('POST', `/flows/${id}/arm`, {}).catch(() => {})
+  await api('POST', snapshot.paused ? '/scheduler/pause' : '/scheduler/resume', { reason: 'Restored after a test' }).catch(() => {})
+}
+
 try {
   // ---- login ----
   await page.goto(`${BASE}/login`)
@@ -226,6 +237,7 @@ try {
   check('unexpected error', false, error.message.split('\n')[0])
   await shot(page, 'zz_error').catch(() => {})
 } finally {
+  await restore()
   for (const id of created) await api('DELETE', `/flows/${id}`).catch(() => {})
   await browser.close()
 }

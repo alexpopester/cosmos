@@ -45,6 +45,7 @@ from .orbit import (
     parse_tle,
 )
 from .templates import fill_parameters
+from .tle_inputs import TleIntake
 from .tle_sources import get_source
 
 
@@ -136,6 +137,7 @@ class ContactPlanner:
         self.last_polled = {}
         self.last_pruned = 0.0
         self.last_rules = 0.0
+        self.intake = TleIntake(self)
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread = None
@@ -161,6 +163,7 @@ class ContactPlanner:
             self.activities = self.store.records("activities")
             self.rules = self.store.records("rules")
             self.settings.update(self.store.records("planner_settings").get("settings", {}))
+            self.intake.load()
             now = self.clock()
             for activity in self.activities.values():
                 if activity["status"] == "running":
@@ -385,6 +388,11 @@ class ContactPlanner:
             sat["name"] = name
             sat["target"] = str(payload.get("target", sat.get("target")) or "").strip().upper()
             sat["enabled"] = bool(payload.get("enabled", sat.get("enabled", True)))
+            catalog = str(payload.get("catalog", sat.get("catalog")) or "").strip()
+            sat["catalog"] = int(catalog) if catalog.isdigit() else (catalog or None)
+            sat["preferred_source"] = (
+                str(payload.get("preferred_source", sat.get("preferred_source")) or "").strip() or None
+            )
             source = payload.get("tle_source", sat.get("tle_source")) or {"kind": "manual"}
             try:
                 problems = get_source(source.get("kind")).check_config(source)
@@ -406,7 +414,21 @@ class ContactPlanner:
             return self._satellite_json(sat, self.clock())
 
     def set_tle(self, sat_id, text, source="manual", user=None):
-        """Apply a new TLE to a satellite (from any TLE source) and queue its contacts for prediction."""
+        """Apply a new TLE to a satellite and queue its contacts for prediction.
+
+        Pasted ("manual") TLEs apply directly; any other source goes through the safeguards in tle_inputs
+        and the result says what happened.
+        """
+        if source != "manual":
+            if sat_id not in self.satellites:
+                raise PlannerNotFoundError(f"Satellite '{sat_id}' not found")
+            outcome = self.intake.ingest(text, source, user, satellite_id=sat_id)
+            if not outcome["results"]:
+                raise PlannerError("; ".join(outcome["problems"]) or "No TLE in the text")
+            with self.lock:
+                result = self._satellite_json(self.satellites[sat_id], self.clock())
+            result["ingest"] = outcome["results"][0]
+            return result
         with self.lock:
             sat = self.satellites.get(sat_id)
             if sat is None:
@@ -428,6 +450,8 @@ class ContactPlanner:
         tle["source"] = source
         tle["applied_at"] = self.clock()
         tle["applied_by"] = user_name(user) if user is not None else source
+        if not sat.get("catalog"):
+            sat["catalog"] = tle["norad_id"]
         if old:
             sat["tle_history"] = ([old] + list(sat.get("tle_history") or []))[:TLE_HISTORY]
         sat["tle"] = tle
@@ -1032,6 +1056,10 @@ class ContactPlanner:
         elif not self.background and self.pending:
             self.predict_pending()
         self._poll_sources(now)
+        try:
+            self.intake.poll(now)
+        except Exception as error:  # noqa: BLE001 - a bad input mustn't stop scheduling
+            self.engine.log("error", f"TLE inputs: {error}")
         if now - self.last_pruned >= 300:
             self.prune(now)
             self._check_stale_tles(now)

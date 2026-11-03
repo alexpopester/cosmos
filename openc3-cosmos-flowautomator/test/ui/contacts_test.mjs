@@ -69,6 +69,17 @@ await api('PUT', '/alerts', { ...savedAlerts, cosmos: { ...savedAlerts.cosmos, e
 await page.waitForTimeout(1500)
 await ackToasts(page)
 
+// Leave the COSMOS as we found it: which flows were armed, and whether the contact scheduler ran
+const snapshot = await (async () => {
+  const [, list] = await api('GET', '/flows')
+  const [, status] = await api('GET', '/status')
+  return { armed: list.filter((f) => f.armed).map((f) => f.id), paused: !!status.contacts?.paused }
+})()
+const restore = async () => {
+  for (const id of snapshot.armed) await api('POST', `/flows/${id}/arm`, {}).catch(() => {})
+  await api('POST', snapshot.paused ? '/scheduler/pause' : '/scheduler/resume', { reason: 'Restored after a test' }).catch(() => {})
+}
+
 try {
   // ---- templates (made through the API; the template settings UI is checked below) ----
   const [, pass] = await api('POST', '/flows', {
@@ -293,8 +304,10 @@ try {
   check('unexpected error', false, error.message.split('\n')[0])
   await shot(page, 'error').catch(() => {})
 } finally {
+  await restore()
   await api('PUT', '/alerts', savedAlerts).catch(() => {})
-  for (const a of await activities().catch(() => [])) await api('DELETE', `/activities/${a.id}`).catch(() => {})
+  for (const a of await activities().catch(() => []))
+    if (flows.includes(a.template_id)) await api('DELETE', `/activities/${a.id}`).catch(() => {})
   const [, schedule] = await api('GET', '/schedule').catch(() => [0, { satellites: [], stations: [] }])
   for (const s of schedule.satellites.filter((x) => x.name === 'FA-TEST')) await api('DELETE', `/satellites/${s.id}`)
   for (const s of schedule.stations.filter((x) => x.name === 'Test Site')) await api('DELETE', `/stations/${s.id}`)

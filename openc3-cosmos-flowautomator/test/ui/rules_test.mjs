@@ -66,7 +66,6 @@ try {
     created.sats.push(body.satellite.id)
   }
 
-  await api('POST', '/scheduler/resume', {}) // earlier tests may have pressed Stop all
   await page.goto(`${BASE}/tools/flowautomator?view=contacts`)
   await page.locator('.fa-contacts').waitFor({ timeout: 60000 })
 
@@ -169,7 +168,8 @@ try {
 } finally {
   const [, rules] = await api('GET', '/rules').catch(() => [0, []])
   for (const r of rules) if (['A passes', 'B passes'].includes(r.name)) await api('DELETE', `/rules/${r.id}`)
-  for (const a of (await api('GET', '/activities').catch(() => [0, []]))[1]) await api('DELETE', `/activities/${a.id}`).catch(() => {})
+  for (const a of (await api('GET', '/activities').catch(() => [0, []]))[1])
+    if (created.flows.includes(a.template_id)) await api('DELETE', `/activities/${a.id}`).catch(() => {})
   for (const id of created.sats) await api('DELETE', `/satellites/${id}`).catch(() => {})
   for (const id of created.stations) await api('DELETE', `/stations/${id}`).catch(() => {})
   for (const id of created.flows) await api('DELETE', `/flows/${id}`).catch(() => {})

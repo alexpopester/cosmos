@@ -50,7 +50,14 @@ which every write records in the audit log.
     POST   <prefix>/api/satellites               {"name", "target", "tle"}
     PUT    <prefix>/api/satellites/<id>
     DELETE <prefix>/api/satellites/<id>
-    POST   <prefix>/api/satellites/<id>/tle      {"tle": "line1\nline2", "source"?}
+    POST   <prefix>/api/satellites/<id>/tle      {"tle": "line1\nline2", "source"?}: a source other than
+                                                 "manual" goes through the safeguards (tle_inputs.py)
+    POST   <prefix>/api/satellites/<id>/tle/accept   apply a held TLE
+    POST   <prefix>/api/satellites/<id>/tle/reject
+    POST   <prefix>/api/tles                     {"tle": text with any number of TLEs, "source"}: matched by
+                                                 catalog number then name; returns what happened to each
+    GET    <prefix>/api/tle_inputs               stash key, watched files and packets, safeguards, status
+    PUT    <prefix>/api/tle_inputs
     POST   <prefix>/api/stations                 {"name", "latitude", "longitude", "altitude", "min_elevation"}
     PUT    <prefix>/api/stations/<id>
     DELETE <prefix>/api/stations/<id>
@@ -79,6 +86,7 @@ from .audit import user_name
 from .contacts import PlannerError
 from .engine import EngineError
 from .graph import validate_flow
+from .tle_inputs import TleInputError
 
 
 MAX_BODY_BYTES = 5 * 1024 * 1024
@@ -126,6 +134,11 @@ def _routes():
         ("PUT", r"/api/satellites/(?P<item_id>[\w-]+)", "update_satellite", True),
         ("DELETE", r"/api/satellites/(?P<item_id>[\w-]+)", "delete_satellite", True),
         ("POST", r"/api/satellites/(?P<item_id>[\w-]+)/tle", "set_tle", True),
+        ("POST", r"/api/satellites/(?P<item_id>[\w-]+)/tle/accept", "accept_held_tle", True),
+        ("POST", r"/api/satellites/(?P<item_id>[\w-]+)/tle/reject", "reject_held_tle", True),
+        ("POST", r"/api/tles", "ingest_tles", True),
+        ("GET", r"/api/tle_inputs", "get_tle_inputs", False),
+        ("PUT", r"/api/tle_inputs", "save_tle_inputs", True),
         ("POST", r"/api/stations", "create_station", True),
         ("PUT", r"/api/stations/(?P<item_id>[\w-]+)", "update_station", True),
         ("DELETE", r"/api/stations/(?P<item_id>[\w-]+)", "delete_station", True),
@@ -178,6 +191,8 @@ class FlowApi:
             except PlannerError as error:
                 return error.status, {"error": str(error), "problems": []}
             except AlertError as error:
+                return error.status, {"error": str(error), "problems": []}
+            except TleInputError as error:
                 return error.status, {"error": str(error), "problems": []}
             except json.JSONDecodeError as error:
                 return 400, {"error": f"Invalid JSON: {error}"}
@@ -453,9 +468,47 @@ class FlowApi:
         return {"deleted": item_id}
 
     def set_tle(self, item_id, payload, user, **_):
-        sat = self.planner.set_tle(item_id, payload.get("tle"), payload.get("source") or "manual", user=user)
-        self._audit(user, "updated TLE", "satellite", item_id, sat["name"], self._tle_detail(sat))
-        return {"satellite": sat}
+        source = payload.get("source") or "manual"
+        sat = self.planner.set_tle(item_id, payload.get("tle"), source, user=user)
+        if source == "manual":
+            self._audit(user, "updated TLE", "satellite", item_id, sat["name"], self._tle_detail(sat))
+        return {"satellite": sat, "result": sat.pop("ingest", None)}
+
+    def ingest_tles(self, payload, user, **_):
+        text = payload.get("tle") or payload.get("text") or payload.get("tles")
+        if isinstance(text, list):
+            text = "\n".join(str(t) for t in text)
+        if not isinstance(text, str) or not text.strip():
+            raise PlannerError("Send the TLEs as text in 'tle' (2 or 3 lines each, any number)")
+        return self.planner.intake.ingest(text, payload.get("source") or "api", user)
+
+    def accept_held_tle(self, item_id, user, **_):
+        held = self.planner.intake.accept_held(item_id, user)
+        sat = self.planner.satellites[item_id]
+        self._audit(
+            user, "accepted held TLE", "satellite", item_id, sat["name"], f"from {held['source']}: {held['reason']}"
+        )
+        return {"satellite": self.planner._satellite_json(sat, self.planner.clock())}
+
+    def reject_held_tle(self, item_id, user, **_):
+        held = self.planner.intake.reject_held(item_id)
+        sat = self.planner.satellites[item_id]
+        self._audit(user, "rejected held TLE", "satellite", item_id, sat["name"], f"from {held['source']}")
+        return {"satellite": self.planner._satellite_json(sat, self.planner.clock())}
+
+    def get_tle_inputs(self, **_):
+        return self.planner.intake.settings_json()
+
+    def save_tle_inputs(self, payload, user, **_):
+        result = self.planner.intake.save_settings(payload)
+        self._audit(
+            user,
+            "saved",
+            "tle inputs",
+            detail=f"stash {result['stash_key'] or 'off'}, {len(result['files'])} files, "
+            f"{len(result['packets'])} packets, max jump {result['max_jump_km']:g} km",
+        )
+        return result
 
     @staticmethod
     def _station_detail(station):

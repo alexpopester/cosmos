@@ -61,7 +61,6 @@ const flows = []
 let alertsBefore = null
 
 try {
-  await api('POST', '/scheduler/resume', {})
   const [, saved] = await api('POST', '/flows', {
     name: 'HIST collect',
     mode: 'run',
@@ -205,8 +204,6 @@ try {
   await shot(page, 'error').catch(() => {})
 } finally {
   if (alertsBefore) await api('PUT', '/alerts', { cosmos: alertsBefore.cosmos, base_url: alertsBefore.base_url, webhooks: [] }).catch(() => {})
-  await api('POST', '/stop_all', {}).catch(() => {})
-  await api('POST', '/scheduler/resume', {}).catch(() => {})
   for (const id of flows) await api('DELETE', `/flows/${id}`).catch(() => {})
   await browser.close()
 }

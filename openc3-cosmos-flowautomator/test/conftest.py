@@ -28,6 +28,7 @@ class FakeBackend:
         self.set_calls = []
         self.bad_commands = {}  # command name -> problems check_cmd reports
         self.stash = {}  # what scripts stash_set
+        self.files = {}  # target files in the bucket: path -> text
         self.lock = threading.Lock()
 
     def tlm(self, item, value_type="CONVERTED"):
@@ -54,6 +55,12 @@ class FakeBackend:
 
     def put_script(self, path, text):
         self.scripts_saved = {**getattr(self, "scripts_saved", {}), path: text}
+
+    def stash_set(self, key, value):
+        self.stash[key] = value
+
+    def read_target_file(self, path):
+        return self.files.get(path)
 
     def stash_take(self, key):
         return self.stash.pop(key, None)

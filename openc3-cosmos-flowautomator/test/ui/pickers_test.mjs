@@ -52,7 +52,6 @@ const flows = []
 const SCRIPT = 'INST/procedures/flow_result_test.py'
 
 try {
-  await api('POST', '/scheduler/resume', {})
   await page.goto(`${BASE}/tools/flowautomator`)
   await page.locator('.fa-palette').waitFor({ timeout: 60000 })
   const palette = await page.locator('.fa-palette').innerText()
@@ -255,8 +254,6 @@ try {
   check('unexpected error', false, error.message.split('\n')[0])
   await shot(page, 'error').catch(() => {})
 } finally {
-  await api('POST', '/stop_all', {}).catch(() => {})
-  await api('POST', '/scheduler/resume', {}).catch(() => {})
   for (const id of flows) await api('DELETE', `/flows/${id}`).catch(() => {})
   await page.request.delete(`${BASE}/script-api/scripts/${SCRIPT}?scope=DEFAULT`, { headers: { Authorization: token } }).catch(() => {})
   await browser.close()
