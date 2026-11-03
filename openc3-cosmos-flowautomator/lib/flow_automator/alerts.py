@@ -3,7 +3,12 @@
 Events (approval waiting, run failed, activity missed ...) go to:
 
 * COSMOS notifications: the bell in every COSMOS tool. "alert" level events
-  also pop up as toasts until read. Each links back to the Flow Automator.
+  also pop up as toasts, and COSMOS shows them again on every page load until
+  someone acknowledges them, so only events that need someone to act are
+  alerts: an approval still waiting after ``approval_escalate_after`` seconds,
+  an unattended run (trigger, activity) failing, a missed or stuck activity,
+  failed prediction. Everything else goes to the bell only. Each links back
+  to the Flow Automator.
 * Webhooks: an HTTP POST per event, as Slack/Teams incoming-webhook JSON
   ({"text": ...}) or a generic JSON body for anything else (PagerDuty via a
   relay, a ticketing system, a script).
@@ -37,12 +42,13 @@ EVENTS = {
     "activity_needs_review": ("alert", "A scheduled activity's pass moved and it needs review"),
     "activity_started": ("notification", "A scheduled activity started"),
     "activity_done": ("notification", "A scheduled activity finished"),
-    "stop_all": ("alert", "Someone pressed Stop all"),
+    "stop_all": ("notification", "Someone pressed Stop all"),
     "scheduler_paused": ("notification", "The contact scheduler was paused or resumed"),
     "tle_stale": ("notification", "A satellite's TLE is getting old"),
     "prediction_failed": ("alert", "Pass prediction failed for a satellite"),
     "flow_notify": ("notification", "A flow's Notify node"),
 }
+APPROVAL_ESCALATE_AFTER = 30  # seconds an approval waits before it's alerted (someone in the tool answers sooner)
 DEFAULT_COSMOS_EVENTS = [
     "approval_waiting",
     "run_failed",
@@ -87,7 +93,12 @@ class Alerter:
 
     @staticmethod
     def _defaults():
-        return {"cosmos": {"enabled": True, "events": list(DEFAULT_COSMOS_EVENTS)}, "webhooks": [], "base_url": ""}
+        return {
+            "cosmos": {"enabled": True, "events": list(DEFAULT_COSMOS_EVENTS)},
+            "webhooks": [],
+            "base_url": "",
+            "approval_escalate_after": APPROVAL_ESCALATE_AFTER,
+        }
 
     def load(self):
         saved = self.store.records("alert_settings").get("settings")
@@ -131,6 +142,7 @@ class Alerter:
             },
             "base_url": str(payload.get("base_url") or "").rstrip("/"),
             "webhooks": [],
+            "approval_escalate_after": self._seconds(payload.get("approval_escalate_after", APPROVAL_ESCALATE_AFTER)),
         }
         if settings["base_url"] and urlparse(settings["base_url"]).scheme not in ("http", "https"):
             raise AlertError("COSMOS address must start with http:// or https://")
@@ -157,6 +169,20 @@ class Alerter:
             self.settings = settings
         self.store.save_record("alert_settings", "settings", settings)
         return self.settings_json()
+
+    @staticmethod
+    def _seconds(value):
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError):
+            raise AlertError("Approval alert delay must be a number of seconds") from None
+        if not 0 <= seconds <= 3600:
+            raise AlertError("Approval alert delay must be between 0 and 3600 seconds")
+        return seconds
+
+    @property
+    def approval_delay(self):
+        return float(self.settings.get("approval_escalate_after", APPROVAL_ESCALATE_AFTER))
 
     @staticmethod
     def _events(events):

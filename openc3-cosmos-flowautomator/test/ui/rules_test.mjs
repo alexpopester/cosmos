@@ -97,6 +97,10 @@ try {
   await page.locator('.fa-rule-dialog .v-select', { hasText: 'Satellites' }).click()
   await page.locator('.v-overlay .v-list-item', { hasText: 'RULE-A' }).click()
   await page.keyboard.press('Escape')
+  // Other stations may exist (the demo's): keep the rule to this test's station
+  await page.locator('.fa-rule-dialog .v-select', { hasText: 'Stations' }).click()
+  await page.locator('.v-overlay .v-list-item', { hasText: 'Rule Site' }).click()
+  await page.keyboard.press('Escape')
   await page.locator('[data-field="rule-min-el"] input').fill('0')
   await page.locator('[data-field="rule-offset"] input').fill('-30')
   await page.locator('.fa-rule-dialog [data-param="rate"] input').fill('8')
@@ -113,11 +117,12 @@ try {
   check('rule chip shown on activities', (await page.locator('.fa-activities .fa-rule-chip', { hasText: 'A passes' }).count()) === aActs.length)
 
   // ---- a lower-priority rule for RULE-B skips passes where the station is busy ----
-  const [, ruleB] = await api('POST', '/rules', { name: 'B passes', template_id: flow.flow.id, satellite_ids: [created.sats[1]], min_elevation: 0, offset: -30 })
+  const [, ruleB] = await api('POST', '/rules', { name: 'B passes', template_id: flow.flow.id, satellite_ids: [created.sats[1]], station_ids: [created.stations[0]], min_elevation: 0, offset: -30 })
   const bPasses = contacts.filter((c) => c.satellite === 'RULE-B' && !c.partial && c.aos - 30 > Date.now() / 1000 + 10)
   check('busy station: lower priority rule skips overlapping passes', ruleB.created < bPasses.length && ruleB.created + ruleB.rule.skipped_full >= bPasses.length - 1, `${ruleB.created} scheduled, skipped ${ruleB.rule.skipped_full} of ${bPasses.length}`)
   activities = (await api('GET', '/activities'))[1]
-  check('no station conflicts while rules skip busy passes', activities.every((a) => !a.conflicts.length))
+  const ours = (list) => list.filter((a) => ['A passes', 'B passes'].includes(a.rule_name))
+  check('no station conflicts while rules skip busy passes', ours(activities).every((a) => !a.conflicts.length))
 
   // ---- forcing it creates conflicts that are flagged ----
   await api('PUT', `/rules/${ruleB.rule.id}`, { skip_full_stations: false })
@@ -128,7 +133,8 @@ try {
   // Capacity 2 clears them
   await api('PUT', `/stations/${created.stations[0]}`, { capacity: 2 })
   await page.waitForTimeout(2500)
-  check('raising capacity clears the conflicts', (await page.locator('.fa-activities .fa-conflict').count()) === 0)
+  const afterCapacity = ours((await api('GET', '/activities'))[1])
+  check('raising capacity clears the conflicts', afterCapacity.length > 0 && afterCapacity.every((a) => !a.conflicts.length))
 
   // ---- deleting a rule activity cancels it and the rule leaves it ----
   const victim = (await api('GET', '/activities'))[1].find((a) => a.rule_name === 'A passes' && a.status === 'scheduled')

@@ -132,6 +132,7 @@ try {
   if (WEBHOOK_URL) {
     const [status] = await api('PUT', '/alerts', {
       ...alerts,
+      approval_escalate_after: 0, // the test checks the approval alert at once
       webhooks: [{ name: 'Test receiver', url: WEBHOOK_URL, format: 'generic', events: ['approval_waiting', 'run_failed'], include_dry_runs: false }],
     })
     check('alerts saved with a webhook', status === 200)

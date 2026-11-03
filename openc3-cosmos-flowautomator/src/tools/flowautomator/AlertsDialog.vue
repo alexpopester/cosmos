@@ -19,8 +19,12 @@
       <v-card-text v-if="settings">
         <div class="text-subtitle-2 mb-1">COSMOS notifications</div>
         <div class="text-caption text-medium-emphasis mb-2">
-          The bell in every COSMOS tool. Alert-level events also pop up until
-          someone reads them. Dry runs never ring the bell.
+          The bell in every COSMOS tool. Only events someone has to act on pop
+          up as alerts (COSMOS shows them again on every page until
+          acknowledged): approvals nobody has answered, unattended runs that
+          failed, missed activities, failed predictions. Runs you start
+          yourself, Stop all and routine events only go to the bell. Dry runs
+          never ring it.
         </div>
         <div class="d-flex align-center">
           <v-switch
@@ -40,6 +44,17 @@
             Send test
           </v-btn>
         </div>
+        <v-text-field
+          v-model.number="settings.approval_escalate_after"
+          type="number"
+          min="0"
+          label="Alert about an approval after (s)"
+          hint="Someone watching the tool answers sooner; 0 alerts at once"
+          persistent-hint
+          density="compact"
+          variant="outlined"
+          class="mt-3 fa-approval-delay"
+        />
         <v-select
           v-model="settings.cosmos.events"
           :items="eventItems"
@@ -268,6 +283,7 @@ export default {
       return {
         cosmos: this.settings.cosmos,
         base_url: this.settings.base_url,
+        approval_escalate_after: Number(this.settings.approval_escalate_after),
         webhooks: this.settings.webhooks.map((h) => ({
           id: h.id,
           name: h.name,

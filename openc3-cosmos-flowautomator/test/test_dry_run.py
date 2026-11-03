@@ -175,6 +175,7 @@ def alerts(engine):
     engine.alerts.post = lambda url, payload: posted.append((url, payload))
     engine.alerts.sent_log = sent
     engine.alerts.posted_log = posted
+    engine.alerts.settings["approval_escalate_after"] = 0  # alert at once (the delay is tested below)
     return engine.alerts
 
 
@@ -437,3 +438,59 @@ def test_item_parameter_in_a_condition_and_command_parameter_sent_raw(engine, ba
         variables={"sensor": "INST HEALTH_STATUS TEMP1", "setup": "INST COLLECT with TYPE NORMAL, DURATION 1"},
     )
     assert record["status"] == "success" and backend.commands == ["INST COLLECT with TYPE NORMAL, DURATION 1"]
+
+
+# ---- which events become COSMOS alerts (toasts) ----------------------------------
+
+
+def test_approval_alert_waits_and_skips_answered_approvals(engine, alerts):
+    alerts.settings["approval_escalate_after"] = 0.4
+    flow, _ = engine.save_flow(
+        chain(node("a", "log", message="a"), node("b", "log", message="b")) | {"mode": "crawl", "name": "Quick"}
+    )
+    run_id = engine.trigger(flow["id"], manual=True)["run"]["id"]
+    assert wait_until(lambda: engine.status()["approvals"])
+    engine.approve(run_id, engine.status()["approvals"][0]["id"], "go")  # answered at once
+    assert wait_until(lambda: engine.status()["approvals"])  # the next step asks
+    time.sleep(0.6)
+    approvals = [m for _l, m, _u in alerts.sent_log if "waiting for approval" in m]
+    assert len(approvals) == 1 and "(0.4s)" in approvals[0]  # only the one nobody answered in time
+    engine.stop_all()
+
+
+def test_only_unattended_failures_and_real_problems_toast(engine, backend, alerts):
+    from flow_automator.triggers import TriggerManager
+
+    backend.fail_commands.add("X")
+    run_to_end(engine, chain(node("c", "send_cmd", command="INST X")) | {"name": "Mine"})
+    flow, _ = engine.save_flow(
+        make_flow(
+            [
+                node("t", "trigger_tlm", condition="INST HEALTH_STATUS TEMP1 > 50"),
+                node("c", "send_cmd", command="INST X"),
+            ],
+            [edge("t", "c")],
+            name="Watcher",
+        )
+    )
+    engine.set_armed(flow["id"], True)
+    manager = TriggerManager(engine)
+    backend.values["INST HEALTH_STATUS TEMP1"] = 10
+    manager.tick()
+    backend.values["INST HEALTH_STATUS TEMP1"] = 60
+    manager.tick()
+    assert wait_until(lambda: any("'Watcher' failed" in m for _l, m, _u in alerts.sent_log))
+    levels = {m.split(": ", 1)[1].split(":")[0]: level for level, m, _u in alerts.sent_log}
+    assert levels["'Mine' failed"] == "notification"  # you pressed Run, you're watching
+    assert levels["'Watcher' failed"] == "alert"  # nobody was
+    engine.stop_all("alice")
+    assert (
+        "notification",
+        "Flow Automator: STOP ALL by alice: Disarmed 1 flows, stopped 0 runs, paused the contact scheduler",
+    ) in [(level, m) for level, m, _u in alerts.sent_log]
+
+
+def test_approval_alert_delay_setting(engine, alerts):
+    assert alerts.save_settings({"approval_escalate_after": 45})["approval_escalate_after"] == 45
+    with pytest.raises(AlertError, match="between 0 and 3600"):
+        alerts.save_settings({"approval_escalate_after": -1})

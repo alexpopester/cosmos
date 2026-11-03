@@ -253,8 +253,14 @@ since they were scheduled (*template v3 → v5*).
 
 **View → Alerts** sets where events go:
 
-- **COSMOS notifications**, the bell in every COSMOS tool; alert-level events
-  pop up until acknowledged and link back to the run.
+- **COSMOS notifications**, the bell in every COSMOS tool, linking back to the
+  run. COSMOS shows *alerts* as toasts again on every page load until someone
+  acknowledges them, so only events someone has to act on are alerts: an
+  approval nobody has answered after *Alert about an approval after* seconds
+  (default 30; someone in the tool answers sooner), a failed run nobody
+  started by hand (triggers, activities), a missed or stuck activity, failed
+  prediction, and Notify nodes set to alert. Runs you start yourself, Stop all
+  and routine events only go to the bell. Dry runs never ring it.
 - **Webhooks**: Slack or Teams incoming webhooks, or generic JSON for
   anything else. URLs are shown masked once saved. Set the COSMOS address so
   links in messages open the tool.

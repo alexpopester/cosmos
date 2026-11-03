@@ -8,13 +8,26 @@ import { Api } from '@openc3/js-common/services'
 export const ROUTE_PREFIX = '/flow-automator'
 const BASE = `${ROUTE_PREFIX}/api`
 
-// Errors the tool shows itself (validation problems, missing flows)
-// instead of the generic network error banner
+// COSMOS shows a red error toast for any failed request unless it lists the
+// status in Ignore-Errors. 401 is never ignored, so an expired session still
+// goes to the login page.
+//
+// Actions the tool reports itself (save, run, approve ... all catch and show
+// their own message): validation problems, conflicts, missing items, engine down.
 const handled = {
   Accept: 'application/json',
   'Content-Type': 'application/json',
-  'Ignore-Errors': '400,404,409,503',
+  'Ignore-Errors': '400,403,404,409,500,502,503,504',
 }
+// Background reads (polling status and the schedule every second or two, lists):
+// while the engine restarts these fail every poll, and the tool already shows
+// "Engine offline", so a toast per poll would only bury the screen.
+const quiet = {
+  Accept: 'application/json',
+  'Ignore-Errors': '400,403,404,409,500,502,503,504',
+}
+const get = (path, params) =>
+  Api.get(`${BASE}${path}`, { params, headers: quiet }).then(unwrap)
 
 const unwrap = (response) => response.data
 const post = (path, data = {}) =>
@@ -25,8 +38,8 @@ const del = (path) =>
   Api.delete(`${BASE}${path}`, { headers: handled }).then(unwrap)
 
 export default {
-  status: () => Api.get(`${BASE}/status`).then(unwrap),
-  listFlows: () => Api.get(`${BASE}/flows`).then(unwrap),
+  status: () => get('/status'),
+  listFlows: () => get('/flows'),
   getFlow: (id) =>
     Api.get(`${BASE}/flows/${id}`, { headers: handled }).then(unwrap),
   createFlow: (flow) =>
@@ -53,23 +66,17 @@ export default {
       data: { trigger_node: triggerNode, variables, ...options },
       headers: handled,
     }).then(unwrap),
-  listRuns: (flowId, limit = 50) =>
-    Api.get(`${BASE}/runs`, { params: { flow_id: flowId, limit } }).then(
-      unwrap,
-    ),
+  listRuns: (flowId, limit = 50) => get('/runs', { flow_id: flowId, limit }),
   // filters: { flow_id, status, trigger, user, activity_id, dry_run, since, until, search, limit }
-  searchRuns: (filters) =>
-    Api.get(`${BASE}/runs`, { params: filters }).then(unwrap),
+  searchRuns: (filters) => get('/runs', filters),
 
   // Version history
-  versions: (id) => Api.get(`${BASE}/flows/${id}/versions`).then(unwrap),
-  version: (id, version) =>
-    Api.get(`${BASE}/flows/${id}/versions/${version}`).then(unwrap),
-  diff: (id, from, to = 'current') =>
-    Api.get(`${BASE}/flows/${id}/diff`, { params: { from, to } }).then(unwrap),
+  versions: (id) => get(`/flows/${id}/versions`),
+  version: (id, version) => get(`/flows/${id}/versions/${version}`),
+  diff: (id, from, to = 'current') => get(`/flows/${id}/diff`, { from, to }),
   restoreVersion: (id, version, note) =>
     post(`/flows/${id}/versions/${version}/restore`, { note }),
-  deletedFlows: () => Api.get(`${BASE}/flows/deleted`).then(unwrap),
+  deletedFlows: () => get('/flows/deleted'),
   undelete: (id) => post(`/flows/${id}/undelete`),
   getRun: (id) =>
     Api.get(`${BASE}/runs/${id}`, { headers: handled }).then(unwrap),
@@ -83,14 +90,13 @@ export default {
       headers: handled,
     }).then(unwrap),
   stopAll: () => Api.post(`${BASE}/stop_all`, { data: {} }).then(unwrap),
-  whoami: () => Api.get(`${BASE}/whoami`).then(unwrap),
+  whoami: () => get('/whoami'),
   loadDemo: () => post('/demo'),
   clearDemo: () => del('/demo'),
-  audit: (params) => Api.get(`${BASE}/audit`, { params }).then(unwrap),
+  audit: (params) => get('/audit', params),
 
   // Contacts: satellites, stations, predicted passes and scheduled activities
-  schedule: (start, end) =>
-    Api.get(`${BASE}/schedule`, { params: { start, end } }).then(unwrap),
+  schedule: (start, end) => get('/schedule', { start, end }),
   recompute: () => post('/contacts/recompute'),
   saveSatellite: (id, satellite) =>
     id ? put(`/satellites/${id}`, satellite) : post('/satellites', satellite),
@@ -106,7 +112,7 @@ export default {
   refreshActivityTemplate: (id) => post(`/activities/${id}/refresh_template`),
   rehearseActivity: (id, skipWaits = true) =>
     post(`/activities/${id}/rehearse`, { skip_waits: skipWaits }),
-  alerts: () => Api.get(`${BASE}/alerts`).then(unwrap),
+  alerts: () => get('/alerts'),
   saveAlerts: (settings) => put('/alerts', settings),
   testAlert: (webhookId) => post('/alerts/test', { webhook_id: webhookId }),
   saveRule: (id, rule) =>
@@ -115,7 +121,8 @@ export default {
   pauseScheduler: () => post('/scheduler/pause'),
   resumeScheduler: () => post('/scheduler/resume'),
   // Script Runner's file list, for the Run script node
-  listScripts: () => Api.get('/script-api/scripts').then(unwrap),
+  listScripts: () =>
+    Api.get('/script-api/scripts', { headers: quiet }).then(unwrap),
 }
 
 // Pull a readable message (and validation problems) out of an API error

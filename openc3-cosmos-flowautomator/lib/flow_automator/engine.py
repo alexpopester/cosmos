@@ -493,12 +493,15 @@ class FlowEngine:
         self.log(level, f"Flow '{run.flow.get('name')}' run {run.id} {run.status}{detail}")
         if run.parent is None and run.status in ("failed", "stopped"):
             event = "run_failed" if run.status == "failed" else "run_stopped"
+            # Someone who pressed Run is watching it; unattended runs (triggers, activities) need an alert
+            attended = (run.trigger_info or {}).get("kind") in ("manual", "rehearsal")
             self.alerts.emit(
                 event,
                 f"'{run.flow.get('name')}' {run.status}",
                 run.message,
                 path=run_path(run.flow.get("id"), run.id),
                 key=f"{event}:{run.id}",
+                level="notification" if attended or event == "run_stopped" else "alert",
                 data={"run_id": run.id, "flow_id": run.flow.get("id"), "trigger": run.trigger_info},
                 dry_run=run.dry_run,
             )
@@ -512,13 +515,30 @@ class FlowEngine:
                 self._start_run(*next_start)
 
     def on_approval_requested(self, run, approval):
-        """A run is waiting for an operator: tell them wherever they are."""
+        """A run is waiting for an operator: if it's still waiting after a while, tell them wherever they are.
+
+        Someone watching the tool answers in seconds, and a COSMOS alert stays until acknowledged even once
+        the approval is answered, so it only goes out if nobody has answered after approval_escalate_after.
+        """
+        delay = self.alerts.approval_delay
+        if delay <= 0:
+            return self._alert_approval(run, approval)
+
+        def escalate():
+            if any(a["id"] == approval["id"] for a in run.pending_approvals()):
+                self._alert_approval(run, approval, waited=delay)
+
+        timer = threading.Timer(delay, escalate)
+        timer.daemon = True
+        timer.start()
+
+    def _alert_approval(self, run, approval, waited=0):
         root = run
         while root.parent is not None:
             root = root.parent
         self.alerts.emit(
             "approval_waiting",
-            f"'{run.flow.get('name')}' is waiting for approval",
+            f"'{run.flow.get('name')}' is waiting for approval" + (f" ({waited:g}s)" if waited else ""),
             f"{approval['label']}: {approval['preview'][:200]} ({approval['reason']})",
             path=run_path(root.flow.get("id"), root.id),
             key=f"approval:{approval['id']}",
