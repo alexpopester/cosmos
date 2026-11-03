@@ -79,6 +79,10 @@ class FlowRun:
         # Set when an operator chooses "go and run the rest": routine steps stop
         # asking, hazardous commands still do
         self.auto_approve = False
+        # Scheduled activity runs: approvals must come before this wall-clock time
+        # (LOS minus a margin). Sub-flows inherit it.
+        self.approval_deadline = parent.approval_deadline if parent is not None else None
+        self.activity_id = None
         self._cancel = threading.Event()
         self._lock = threading.RLock()
         self.thread = None
@@ -278,6 +282,7 @@ class FlowRun:
             "reason": reason,
             "preview": preview,
             "requested_at": time.time(),
+            "deadline": None,
             "event": threading.Event(),
             "decision": None,
         }
@@ -287,6 +292,8 @@ class FlowRun:
             self.approvals[approval["id"]] = approval
         self.log("info", f"waiting for operator approval at '{approval['label']}' ({reason})")
         deadline = time.monotonic() + self.approval_timeout if self.approval_timeout > 0 else None
+        if self.approval_deadline is not None:
+            approval["deadline"] = self.approval_deadline
         try:
             while not approval["event"].wait(0.1):
                 if self.cancelled():
@@ -294,6 +301,10 @@ class FlowRun:
                 if deadline is not None and time.monotonic() > deadline:
                     raise RunFailedError(
                         f"No operator approval for '{approval['label']}' within {self.approval_timeout:g}s"
+                    )
+                if self.approval_deadline is not None and time.time() > self.approval_deadline:
+                    raise RunFailedError(
+                        f"No operator approval for '{approval['label']}' before the contact's approval cut-off"
                     )
         finally:
             with self._lock:
@@ -401,6 +412,8 @@ class FlowRun:
                 "ended_at": self.ended_at,
                 "active_nodes": list(self.active.keys()),
                 "mode": self.mode,
+                "activity_id": self.activity_id,
+                "approval_deadline": self.approval_deadline,
                 "auto_approve": self.auto_approve,
                 "approvals": self.pending_approvals(),
                 "children": list(self.children),
@@ -508,6 +521,12 @@ def _preview(run, node, data):
             return f"Wait {data.get('seconds')}s"
         if kind == "log":
             return run.evaluator().render(data.get("message") or "")
+        if kind == "wait_contact":
+            anchor = str(data.get("anchor") or "aos").upper()
+            offset = _float(data, "offset", 0)
+            return f"Wait until {anchor} {'+' if offset >= 0 else '-'} {abs(offset):g}s"
+        if kind == "contact_check":
+            return f"Need {_float(data, 'min_remaining', 0):g}s of contact left"
         if kind == "subflow":
             return f"Run sub-flow {data.get('flow_id')}"
         if kind == "end":
@@ -613,6 +632,42 @@ def exec_wait_check(run, node, data, step):
     raise RuntimeError(f"Wait check failed: {step['message']}")
 
 
+CONTACT_ANCHORS = {"aos": "contact_aos", "tca": "contact_tca", "los": "contact_los"}
+
+
+def _contact_time(run, name):
+    value = run.variables.get(name)
+    if not isinstance(value, (int, float)):
+        raise RuntimeError(
+            "This run has no contact: schedule it from the Contacts view (or set contact_aos/contact_los)"
+        )
+    return float(value)
+
+
+def exec_wait_contact(run, node, data, step):
+    anchor = str(data.get("anchor") or "aos").lower()
+    target = _contact_time(run, CONTACT_ANCHORS[anchor]) + _float(data, "offset", 0)
+    remaining = target - time.time()
+    label = f"{anchor.upper()} {'+' if _float(data, 'offset', 0) >= 0 else '-'} {abs(_float(data, 'offset', 0)):g}s"
+    if remaining <= 0:
+        step["message"] = f"{label} was {-remaining:.1f}s ago, continuing"
+        return "out"
+    step["message"] = f"Waiting {remaining:.1f}s for {label}"
+    run.sleep(remaining)
+    step["message"] = f"Reached {label}"
+    return "out"
+
+
+def exec_contact_check(run, node, data, step):
+    los = _contact_time(run, "contact_los")
+    aos = _contact_time(run, "contact_aos")
+    now = time.time()
+    remaining = los - max(now, aos)
+    needed = _float(data, "min_remaining", 0)
+    step["message"] = f"{max(0.0, remaining):.0f}s of contact left (need {needed:g}s)"
+    return "ok" if remaining >= needed else "short"
+
+
 def exec_subflow(run, node, data, step):
     child = run.engine.run_subflow(run, data["flow_id"], dict(run.variables))
     step["message"] = f"Sub-flow '{child.flow.get('name')}' run {child.id} {child.status}"
@@ -652,6 +707,8 @@ EXECUTORS = {
     "wait_time": exec_wait_time,
     "wait_tlm": exec_wait_tlm,
     "wait_check": exec_wait_check,
+    "wait_contact": exec_wait_contact,
+    "contact_check": exec_contact_check,
     "subflow": exec_subflow,
     "end": exec_end,
 }

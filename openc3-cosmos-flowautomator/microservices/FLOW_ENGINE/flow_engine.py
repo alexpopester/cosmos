@@ -33,12 +33,21 @@ class FlowEngineMicroservice(Microservice):
         super().__init__(name)
         self.trigger_period = 0.25
         self.history = 50
+        self.planner_options = {}
+        planner_keys = {
+            "CONTACT_HORIZON_DAYS": "horizon_days",
+            "CONTACT_RECOMPUTE_HOURS": "recompute_hours",
+            "CONTACT_RETIME_TOLERANCE": "retime_tolerance",
+            "STALE_TLE_DAYS": "stale_tle_days",
+        }
         for option in self.config.get("options", []):
             match option[0].upper():
                 case "TRIGGER_PERIOD":
                     self.trigger_period = float(option[1])
                 case "HISTORY":
                     self.history = int(option[1])
+                case key if key in planner_keys:
+                    self.planner_options[planner_keys[key]] = float(option[1])
                 case _:
                     self.logger.error(f"Unknown option passed to microservice {name}: {option}")
         ports = self.config.get("ports") or [[7790]]
@@ -47,7 +56,9 @@ class FlowEngineMicroservice(Microservice):
         self.sleeper = Sleeper()
 
         store = FlowStore(Store.instance(), self.scope, history_limit=self.history)
-        self.engine = FlowEngine(store, CosmosBackend(self.scope, self.logger), self.logger, self.trigger_period)
+        self.engine = FlowEngine(
+            store, CosmosBackend(self.scope, self.logger), self.logger, self.trigger_period, self.planner_options
+        )
         api_url = f"{OPENC3_API_SCHEMA}://{OPENC3_API_HOSTNAME}:{OPENC3_API_PORT}"
         api = FlowApi(self.engine, TokenAuthorizer(self.scope, api_url), self.prefix)
         self.http = FlowHttpServer(api, self.port, self.logger)
@@ -57,7 +68,11 @@ class FlowEngineMicroservice(Microservice):
         self.http.start()
         self.logger.info(f"Flow Automator engine listening on port {self.port} at {self.prefix}")
         while not self.cancel_thread:
-            self.state = f"RUNNING ({len(self.engine.armed_flows())} armed, {len(self.engine.runs)} active runs)"
+            scheduled = self.engine.planner.status()["scheduled"]
+            self.state = (
+                f"RUNNING ({len(self.engine.armed_flows())} armed, {len(self.engine.runs)} active runs, "
+                f"{scheduled} scheduled activities)"
+            )
             if self.sleeper.sleep(5):
                 break
             self.count += 1

@@ -6,8 +6,10 @@ import threading
 import time
 import uuid
 
+from .contacts import ContactPlanner
 from .graph import MODES, POLICIES, is_trigger, validate_flow
 from .runner import FlowRun
+from .templates import CONTACT_VARIABLES, fill_parameters
 from .triggers import TriggerManager
 
 
@@ -29,7 +31,7 @@ class NotFoundError(EngineError):
 
 
 class FlowEngine:
-    def __init__(self, store, backend, logger=None, trigger_period=0.25):
+    def __init__(self, store, backend, logger=None, trigger_period=0.25, planner_options=None):
         self.store = store
         self.backend = backend
         self.logger = logger
@@ -38,17 +40,24 @@ class FlowEngine:
         self.queues = collections.defaultdict(collections.deque)
         self.lock = threading.RLock()
         self.triggers = TriggerManager(self, period=trigger_period)
+        self.planner = ContactPlanner(self, store, **(planner_options or {}))
 
     def start(self, start_triggers=True):
         with self.lock:
             self.flows = self.store.all_flows()
         armed = [flow["name"] for flow in self.flows.values() if flow.get("armed")]
         self.log("info", f"Flow engine loaded {len(self.flows)} flows ({len(armed)} armed)")
+        try:
+            self.planner.load()
+        except Exception as error:  # noqa: BLE001 - flows still run without contact planning
+            self.log("error", f"Contact planner could not load: {error}")
         if start_triggers:
             self.triggers.start()
+            self.planner.start()
 
     def shutdown(self):
         self.triggers.stop()
+        self.planner.stop()
         with self.lock:
             runs = list(self.runs.values())
         for run in runs:
@@ -77,6 +86,9 @@ class FlowEngine:
                     "description": flow.get("description", ""),
                     "armed": bool(flow.get("armed")),
                     "policy": flow.get("policy", "skip"),
+                    "mode": flow.get("mode", "run"),
+                    "template": bool(flow.get("template")),
+                    "parameters": copy.deepcopy(flow.get("parameters") or []),
                     "node_count": len(flow.get("nodes") or []),
                     "triggers": [n["type"] for n in flow.get("nodes") or [] if is_trigger(n)],
                     "problems": len(validate_flow(flow)),
@@ -120,6 +132,8 @@ class FlowEngine:
             if flow.get("policy") not in POLICIES:
                 flow["policy"] = "skip"
             flow.setdefault("variables", {})
+            flow["template"] = bool(flow.get("template"))
+            flow["parameters"] = list(flow.get("parameters") or []) if isinstance(flow.get("parameters"), list) else []
             flow["nodes"] = list(flow.get("nodes") or [])
             flow["edges"] = list(flow.get("edges") or [])
             problems = validate_flow(flow)
@@ -188,6 +202,14 @@ class FlowEngine:
                 problems = validate_flow(flow)
                 if problems:
                     raise EngineError("Fix the flow's problems before running it", problems)
+            if mode is not None and mode not in MODES:
+                raise EngineError(f"Mode must be one of {', '.join(MODES)}")
+            variables, param_problems = fill_parameters(flow.get("parameters"), variables)
+            if param_problems:
+                raise EngineError("Parameters: " + "; ".join(param_problems))
+            if flow.get("template"):
+                for name in CONTACT_VARIABLES:
+                    variables.setdefault(name, None)
             running = [r for r in self.runs.values() if r.flow.get("id") == flow_id and r.parent is None]
             if running:
                 policy = flow.get("policy", "skip")
@@ -204,8 +226,6 @@ class FlowEngine:
                         return {"result": "skipped", "run": None, "message": message}
                     queue.append((node_id, reason, variables, mode))
                     return {"result": "queued", "run": None, "message": f"Queued ({len(queue)} waiting)"}
-            if mode is not None and mode not in MODES:
-                raise EngineError(f"Mode must be one of {', '.join(MODES)}")
             return self._start_run(flow, node_id, reason, variables, mode)
 
     def _start_run(self, flow, node_id, reason, variables, mode=None):
@@ -218,6 +238,25 @@ class FlowEngine:
         self.log("info", f"Flow '{flow['name']}' run {run.id} started: {reason}")
         run.start_thread()
         return {"result": "started", "run": run.as_json(include_steps=False), "message": ""}
+
+    def start_scheduled_run(self, flow, reason, variables, mode, approval_deadline=None, activity_id=None):
+        """Start a run of a flow snapshot for a scheduled activity. Re-trigger policies don't apply."""
+        problems = validate_flow(flow)
+        if problems:
+            raise EngineError(f"The flow has problems: {problems[0]['message']}")
+        entry = next((n for n in flow.get("nodes") or [] if n["type"] == "trigger_manual"), None)
+        if entry is None:
+            raise EngineError("The flow needs a Manual trigger to be scheduled")
+        with self.lock:
+            if len(self.runs) >= MAX_ACTIVE_RUNS:
+                raise EngineError(f"Too many active runs ({MAX_ACTIVE_RUNS})")
+            run = FlowRun(self, flow, entry["id"], reason, variables, mode=mode)
+            run.approval_deadline = approval_deadline
+            run.activity_id = activity_id
+            self.runs[run.id] = run
+        self.log("info", f"Flow '{flow.get('name')}' run {run.id} started: {reason}")
+        run.start_thread()
+        return run
 
     def run_subflow(self, parent, flow_id, variables):
         if parent.depth + 1 > MAX_SUBFLOW_DEPTH:
@@ -254,6 +293,11 @@ class FlowEngine:
         level = {"success": "info", "stopped": "warn"}.get(run.status, "error")
         detail = f": {run.message}" if run.message else ""
         self.log(level, f"Flow '{run.flow.get('name')}' run {run.id} {run.status}{detail}")
+        if getattr(run, "activity_id", None):
+            try:
+                self.planner.on_run_finished(run)
+            except Exception as error:  # noqa: BLE001
+                self.log("error", f"Could not record activity result for run {run.id}: {error}")
         if next_start:
             with self.lock:
                 self._start_run(*next_start)
@@ -281,7 +325,7 @@ class FlowEngine:
         run.stop()
 
     def stop_all(self):
-        """Safety stop: disarm every flow, drop queued triggers and stop every run."""
+        """Safety stop: disarm every flow, drop queued triggers, pause scheduled activities, stop every run."""
         with self.lock:
             disarmed = 0
             for flow in self.flows.values():
@@ -293,8 +337,9 @@ class FlowEngine:
             runs = list(self.runs.values())
         for run in runs:
             run.stop()
-        self.log("warn", f"STOP ALL: disarmed {disarmed} flows and stopped {len(runs)} runs")
-        return {"disarmed": disarmed, "stopped": len(runs)}
+        self.planner.set_paused(True, "STOP ALL")
+        self.log("warn", f"STOP ALL: disarmed {disarmed} flows, paused the contact scheduler, stopped {len(runs)} runs")
+        return {"disarmed": disarmed, "stopped": len(runs), "scheduler_paused": True}
 
     def get_run(self, run_id):
         with self.lock:
@@ -325,6 +370,7 @@ class FlowEngine:
         return runs[:limit]
 
     def status(self):
+        contacts = self.planner.status()  # outside the engine lock: the planner calls into the engine
         with self.lock:
             return {
                 "flows": len(self.flows),
@@ -333,5 +379,6 @@ class FlowEngine:
                 "approvals": [a for run in self.runs.values() for a in run.pending_approvals()],
                 "queued": {flow_id: len(queue) for flow_id, queue in self.queues.items() if queue},
                 "triggers": self.triggers.status(),
+                "contacts": contacts,
                 "time": time.time(),
             }

@@ -7,6 +7,8 @@ Expressions are a small, side-effect free subset of Python:
 * whitelisted functions: ``tlm('INST HEALTH_STATUS TEMP1')``, ``tlm_raw``,
   ``tlm_formatted``, ``abs``, ``min``, ``max``, ``round``, ``int``, ``float``,
   ``str``, ``bool``, ``len``, ``now``, ``var('name', default)``
+* in runs of scheduled activities: ``time_to_aos()``, ``time_to_tca()``,
+  ``time_to_los()`` (seconds, negative once passed)
 
 COSMOS check syntax is also accepted: any three upper case words in a row,
 ``INST HEALTH_STATUS TEMP1``, are read as ``tlm('INST HEALTH_STATUS TEMP1')``,
@@ -65,6 +67,9 @@ _CMP_OPS = {
     ast.In: lambda a, b: a in b,
     ast.NotIn: lambda a, b: a not in b,
 }
+
+# Seconds until a point of the run's contact, from the contact_* run variables
+CONTACT_FUNCTIONS = {"time_to_aos": "contact_aos", "time_to_tca": "contact_tca", "time_to_los": "contact_los"}
 
 _SAFE_FUNCTIONS = {
     "abs": abs,
@@ -142,7 +147,8 @@ def _check_nodes(tree, source):
             if not isinstance(node.func, ast.Name):
                 raise ExpressionError(f"Only simple function calls are allowed in '{source}'")
             name = node.func.id
-            if name not in _SAFE_FUNCTIONS and name not in TLM_FUNCTIONS and name != "var":
+            known = name in _SAFE_FUNCTIONS or name in TLM_FUNCTIONS or name in CONTACT_FUNCTIONS
+            if not known and name != "var":
                 raise ExpressionError(f"Unknown function '{name}' in '{source}'")
             if node.keywords:
                 raise ExpressionError(f"Keyword arguments are not supported in '{source}'")
@@ -287,6 +293,13 @@ class Evaluator:
                 raise ExpressionError(f"{name}() takes 'TARGET PACKET ITEM' and an optional type")
             value_type = TLM_FUNCTIONS[name] if len(args) == 1 else str(args[1]).upper()
             return self.tlm_lookup(normalize_item(args[0]), value_type)
+        if name in CONTACT_FUNCTIONS:
+            if args:
+                raise ExpressionError(f"{name}() takes no arguments")
+            moment = self.variables.get(CONTACT_FUNCTIONS[name])
+            if not isinstance(moment, (int, float)):
+                raise ExpressionError(f"{name}(): this run has no contact (it wasn't started by a scheduled activity)")
+            return moment - time.time()
         if name == "var":
             if len(args) not in (1, 2):
                 raise ExpressionError("var() takes a name and an optional default")

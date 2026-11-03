@@ -23,7 +23,7 @@ Gem::Specification.new do |s|
     s.version = '0.0.0' + ".#{time}"
   end
   s.files = Dir.glob("{targets,lib,public,tools,microservices}/**/*").reject { |f| f.include?('__pycache__') } +
-            %w(Rakefile README.md LICENSE.md plugin.txt)
+            %w(Rakefile README.md LICENSE.md plugin.txt requirements.txt)
 
   s.metadata = {
     # These fields are used when you submit your plugin to the OpenC3 Store at store.openc3.com

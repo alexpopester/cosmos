@@ -265,6 +265,23 @@
         class="mb-3"
         @update:model-value="changed"
       />
+      <v-switch
+        v-model="settings.template"
+        label="Template for scheduled activities"
+        hint="Templates can be scheduled into contacts from the Contacts view. Runs started that way also get contact_aos, contact_los and the other contact variables."
+        persistent-hint
+        color="primary"
+        density="compact"
+        class="mb-3 fa-template-switch"
+        @update:model-value="changed"
+      />
+      <div v-if="settings.template" class="mb-4">
+        <div class="text-caption mb-1">Parameters</div>
+        <parameter-editor
+          v-model="settings.parameters"
+          @update:model-value="changed"
+        />
+      </div>
       <key-value-editor
         v-model="settings.variables"
         label="Starting variables"
@@ -283,9 +300,10 @@
 <script>
 import { MODES, NODE_TYPES, categoryColor } from './nodeTypes'
 import KeyValueEditor from './KeyValueEditor.vue'
+import ParameterEditor from './ParameterEditor.vue'
 
 export default {
-  components: { KeyValueEditor },
+  components: { KeyValueEditor, ParameterEditor },
   props: {
     node: { type: Object, default: null },
     flow: { type: Object, default: null },

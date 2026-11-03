@@ -3,6 +3,9 @@
 Keys (per scope):
     flow_automator__<scope>__flows            hash: flow id -> flow JSON
     flow_automator__<scope>__runs__<flow id>  list: newest first, run JSON
+    flow_automator__<scope>__<kind>           hash: id -> record JSON, for the contact
+                                              planner's satellites, stations,
+                                              activities and settings
 """
 
 import json
@@ -41,6 +44,21 @@ class FlowStore:
     def runs(self, flow_id, limit=None):
         end = (limit or self.history_limit) - 1
         return [json.loads(_text(item)) for item in self.redis.lrange(self._runs_key(flow_id), 0, end) or []]
+
+    # ---- contact planner records ---------------------------------------------
+
+    def _records_key(self, kind):
+        return f"flow_automator__{self.scope}__{kind}"
+
+    def records(self, kind):
+        raw = self.redis.hgetall(self._records_key(kind)) or {}
+        return {_text(k): json.loads(_text(v)) for k, v in raw.items()}
+
+    def save_record(self, kind, record_id, record):
+        self.redis.hset(self._records_key(kind), record_id, json.dumps(record))
+
+    def delete_record(self, kind, record_id):
+        self.redis.hdel(self._records_key(kind), record_id)
 
 
 class MemoryRedis:

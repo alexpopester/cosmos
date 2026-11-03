@@ -9,6 +9,7 @@ export const CATEGORIES = [
   { key: 'logic', label: 'Logic', color: '#9c6ade' },
   { key: 'action', label: 'Actions', color: '#3d8fd6' },
   { key: 'wait', label: 'Waits', color: '#2bb3a3' },
+  { key: 'contact', label: 'Contacts', color: '#e07b39' },
   { key: 'flow', label: 'Flow control', color: '#8a96a3' },
 ]
 
@@ -465,6 +466,54 @@ export const NODE_TYPES = {
       { key: 'poll', label: 'Poll (s)', type: 'number', default: 0.25 },
     ],
     summary: (d) => `${d.condition} (${d.timeout}s)`,
+  },
+  wait_contact: {
+    category: 'contact',
+    label: 'Wait for contact',
+    icon: 'mdi-satellite-uplink',
+    description:
+      "Wait until a time relative to the run's contact (AOS, TCA or LOS). Only in runs of scheduled activities.",
+    outputs: ['out'],
+    errors: true,
+    fields: [
+      {
+        key: 'anchor',
+        label: 'Wait until',
+        type: 'select',
+        options: ['aos', 'tca', 'los'],
+        default: 'aos',
+        hint: 'AOS: satellite rises over the mask. TCA: closest approach. LOS: it sets.',
+      },
+      {
+        key: 'offset',
+        label: 'Offset (s)',
+        type: 'number',
+        default: 0,
+        hint: 'Negative for before, e.g. -10 is 10 seconds before',
+      },
+    ],
+    summary: (d) => {
+      const offset = Number(d.offset) || 0
+      return `${String(d.anchor || 'aos').toUpperCase()}${offset ? (offset > 0 ? ' + ' : ' - ') + Math.abs(offset) + 's' : ''}`
+    },
+  },
+  contact_check: {
+    category: 'contact',
+    label: 'Contact time left',
+    icon: 'mdi-timer-sand',
+    description:
+      'Branch on how much of the contact is left: ok if at least this many seconds, else short',
+    outputs: ['ok', 'short'],
+    errors: true,
+    fields: [
+      {
+        key: 'min_remaining',
+        label: 'Need at least (s)',
+        type: 'number',
+        default: 60,
+      },
+    ],
+    summary: (d) => `needs ${d.min_remaining}s before LOS`,
   },
   subflow: {
     category: 'flow',

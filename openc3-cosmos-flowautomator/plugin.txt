@@ -10,16 +10,26 @@
 #                      and the tool expects /flow-automator.
 #   trigger_period     seconds between trigger polls
 #   run_history        runs kept per flow
+#   contact_horizon_days  how far ahead contacts (passes) are predicted
+#   retime_tolerance      seconds a contact may move after a TLE update and
+#                         still carry its scheduled activities with it
+#   stale_tle_days        TLEs older than this are flagged in the Contacts view
 
 VARIABLE flow_engine_port 7790
 VARIABLE flow_route_prefix /flow-automator
 VARIABLE trigger_period 0.25
 VARIABLE run_history 50
+VARIABLE contact_horizon_days 7
+VARIABLE retime_tolerance 120
+VARIABLE stale_tle_days 3
 
 MICROSERVICE FLOW_ENGINE flow-engine
   CMD python flow_engine.py
   OPTION TRIGGER_PERIOD <%= trigger_period %>
   OPTION HISTORY <%= run_history %>
+  OPTION CONTACT_HORIZON_DAYS <%= contact_horizon_days %>
+  OPTION CONTACT_RETIME_TOLERANCE <%= retime_tolerance %>
+  OPTION STALE_TLE_DAYS <%= stale_tle_days %>
   PORT <%= flow_engine_port %>
   ROUTE_PREFIX <%= flow_route_prefix %>
 

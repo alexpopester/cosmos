@@ -8,154 +8,194 @@
   <div class="fa-root">
     <top-bar :menus="menus" :title="title" />
     <v-toolbar density="compact" class="fa-toolbar px-2" color="surface">
-      <!-- Always empty so typing searches from scratch; the open flow's name
-           shows as the placeholder -->
-      <v-autocomplete
-        v-model:search="flowSearch"
-        :model-value="null"
-        :items="flows"
-        item-title="name"
-        item-value="id"
-        :placeholder="
-          flowId ? flowSettings.name : 'Open a flow (type to search)'
-        "
-        persistent-placeholder
-        auto-select-first
-        density="compact"
-        variant="outlined"
-        hide-details
-        class="fa-flow-select mr-2"
-        @update:model-value="(id) => id && openFlow(id)"
-        @update:menu="(open) => open && refreshFlows()"
-      >
-        <template #item="{ props: itemProps, item }">
-          <v-list-item v-bind="itemProps">
-            <template #append>
-              <v-chip
-                v-if="item.raw.armed"
-                size="x-small"
-                color="success"
-                label
-              >
-                armed
-              </v-chip>
-              <v-chip
-                v-if="item.raw.active_runs"
-                size="x-small"
-                color="primary"
-                label
-                class="ml-1"
-              >
-                running
-              </v-chip>
-            </template>
-          </v-list-item>
-        </template>
-      </v-autocomplete>
-      <v-btn
-        size="small"
-        variant="tonal"
-        prepend-icon="mdi-plus"
-        class="mr-2"
-        @click="newFlow"
-      >
-        New
-      </v-btn>
-      <v-btn
-        size="small"
-        variant="tonal"
-        prepend-icon="mdi-content-save"
-        :color="dirty ? 'primary' : undefined"
-        class="mr-2"
-        :loading="saving"
-        @click="save"
-      >
-        Save
-      </v-btn>
-      <span v-if="dirty" class="text-caption text-medium-emphasis mr-3">
-        unsaved changes
-      </span>
-      <v-divider vertical class="mx-2" />
-      <v-switch
-        :model-value="armed"
-        :disabled="!flowId"
-        color="success"
-        density="compact"
-        hide-details
-        inset
-        class="flex-grow-0 mr-1"
-        @update:model-value="setArmed"
-      />
-      <span class="text-body-2 mr-3" :class="armed ? 'text-success' : ''">
-        {{ armed ? 'Armed' : 'Disarmed' }}
-      </span>
       <v-btn-toggle
-        v-model="flowSettings.mode"
+        v-model="view"
         mandatory
         density="compact"
         variant="outlined"
         divided
-        class="fa-mode-toggle mr-3"
-        @update:model-value="changed"
+        class="fa-view-toggle mr-3"
+        @update:model-value="viewChanged"
       >
+        <v-btn value="flows" size="small" prepend-icon="mdi-sitemap-outline">
+          Flows
+        </v-btn>
         <v-btn
-          v-for="m in modes"
-          :key="m.value"
-          :value="m.value"
+          value="contacts"
           size="small"
-          :title="m.hint"
-          :prepend-icon="m.icon"
+          prepend-icon="mdi-satellite-uplink"
         >
-          {{ m.title }}
+          Contacts
+          <v-badge
+            v-if="contactStatus.needs_review"
+            :content="contactStatus.needs_review"
+            color="warning"
+            inline
+          />
         </v-btn>
       </v-btn-toggle>
-      <v-menu v-if="triggerNodes.length > 1">
-        <template #activator="{ props: menuProps }">
+      <template v-if="view === 'flows'">
+        <!-- Always empty so typing searches from scratch; the open flow's name
+           shows as the placeholder -->
+        <v-autocomplete
+          v-model:search="flowSearch"
+          :model-value="null"
+          :items="flows"
+          item-title="name"
+          item-value="id"
+          :placeholder="
+            flowId ? flowSettings.name : 'Open a flow (type to search)'
+          "
+          persistent-placeholder
+          auto-select-first
+          density="compact"
+          variant="outlined"
+          hide-details
+          class="fa-flow-select mr-2"
+          @update:model-value="(id) => id && openFlow(id)"
+          @update:menu="(open) => open && refreshFlows()"
+        >
+          <template #item="{ props: itemProps, item }">
+            <v-list-item v-bind="itemProps">
+              <template #append>
+                <v-chip
+                  v-if="item.raw.armed"
+                  size="x-small"
+                  color="success"
+                  label
+                >
+                  armed
+                </v-chip>
+                <v-chip
+                  v-if="item.raw.active_runs"
+                  size="x-small"
+                  color="primary"
+                  label
+                  class="ml-1"
+                >
+                  running
+                </v-chip>
+              </template>
+            </v-list-item>
+          </template>
+        </v-autocomplete>
+        <v-btn
+          size="small"
+          variant="tonal"
+          prepend-icon="mdi-plus"
+          class="mr-2"
+          @click="newFlow"
+        >
+          New
+        </v-btn>
+        <v-btn
+          size="small"
+          variant="tonal"
+          prepend-icon="mdi-content-save"
+          :color="dirty ? 'primary' : undefined"
+          class="mr-2"
+          :loading="saving"
+          @click="save"
+        >
+          Save
+        </v-btn>
+        <span v-if="dirty" class="text-caption text-medium-emphasis mr-3">
+          unsaved changes
+        </span>
+        <v-divider vertical class="mx-2" />
+        <v-switch
+          :model-value="armed"
+          :disabled="!flowId"
+          color="success"
+          density="compact"
+          hide-details
+          inset
+          class="flex-grow-0 mr-1"
+          @update:model-value="setArmed"
+        />
+        <span class="text-body-2 mr-3" :class="armed ? 'text-success' : ''">
+          {{ armed ? 'Armed' : 'Disarmed' }}
+        </span>
+        <v-btn-toggle
+          v-model="flowSettings.mode"
+          mandatory
+          density="compact"
+          variant="outlined"
+          divided
+          class="fa-mode-toggle mr-3"
+          @update:model-value="changed"
+        >
           <v-btn
-            v-bind="menuProps"
+            v-for="m in modes"
+            :key="m.value"
+            :value="m.value"
             size="small"
-            color="primary"
-            variant="flat"
-            prepend-icon="mdi-play"
-            append-icon="mdi-menu-down"
-            class="mr-2"
+            :title="m.hint"
+            :prepend-icon="m.icon"
           >
-            Run now
+            {{ m.title }}
           </v-btn>
-        </template>
-        <v-list density="compact">
-          <v-list-item
-            v-for="n in triggerNodes"
-            :key="n.id"
-            :title="n.data.config.label || nodeTypes[n.data.kind].label"
-            :subtitle="'Start from this trigger'"
-            @click="runNow(n.id)"
-          />
-        </v-list>
-      </v-menu>
-      <v-btn
-        v-else
-        size="small"
-        color="primary"
-        variant="flat"
-        prepend-icon="mdi-play"
-        class="mr-2"
-        :disabled="!triggerNodes.length"
-        @click="runNow(triggerNodes[0] && triggerNodes[0].id)"
-      >
-        Run now
-      </v-btn>
-      <v-btn
-        size="small"
-        variant="tonal"
-        color="warning"
-        prepend-icon="mdi-stop"
-        class="mr-2"
-        :disabled="!activeRunIds.length"
-        @click="stopFlowRuns"
-      >
-        Stop
-      </v-btn>
+        </v-btn-toggle>
+        <v-menu v-if="triggerNodes.length > 1">
+          <template #activator="{ props: menuProps }">
+            <v-btn
+              v-bind="menuProps"
+              size="small"
+              color="primary"
+              variant="flat"
+              prepend-icon="mdi-play"
+              append-icon="mdi-menu-down"
+              class="mr-2"
+            >
+              Run now
+            </v-btn>
+          </template>
+          <v-list density="compact">
+            <v-list-item
+              v-for="n in triggerNodes"
+              :key="n.id"
+              :title="n.data.config.label || nodeTypes[n.data.kind].label"
+              :subtitle="'Start from this trigger'"
+              @click="runNow(n.id)"
+            />
+          </v-list>
+        </v-menu>
+        <v-btn
+          v-else
+          size="small"
+          color="primary"
+          variant="flat"
+          prepend-icon="mdi-play"
+          class="mr-2"
+          :disabled="!triggerNodes.length"
+          @click="runNow(triggerNodes[0] && triggerNodes[0].id)"
+        >
+          Run now
+        </v-btn>
+        <v-btn
+          size="small"
+          variant="tonal"
+          color="warning"
+          prepend-icon="mdi-stop"
+          class="mr-2"
+          :disabled="!activeRunIds.length"
+          @click="stopFlowRuns"
+        >
+          Stop
+        </v-btn>
+      </template>
+      <template v-else>
+        <span class="text-body-2 text-medium-emphasis">
+          <template v-if="contactStatus.paused">
+            <v-icon color="warning" size="small">mdi-pause-circle</v-icon>
+            Scheduler paused
+          </template>
+          <template v-else>
+            {{ contactStatus.scheduled || 0 }} scheduled ·
+            {{ contactStatus.running || 0 }} running
+          </template>
+        </span>
+      </template>
       <v-spacer />
       <v-menu v-if="allApprovals.length" max-width="560">
         <template #activator="{ props: menuProps }">
@@ -223,7 +263,16 @@
       </v-btn>
     </v-toolbar>
 
-    <div class="fa-main">
+    <div v-if="view === 'contacts'" class="fa-contacts-wrap">
+      <approval-panel
+        :approvals="allApprovals"
+        :now="engineStatus.time"
+        show-flow
+        @decided="pollStatus"
+      />
+      <contacts-view :flows="flows" @open-run="openActivityRun" />
+    </div>
+    <div v-show="view === 'flows'" class="fa-main">
       <div class="fa-palette">
         <div v-for="category in categories" :key="category.key" class="mb-2">
           <div
@@ -326,7 +375,8 @@
         <v-card-text>
           This disarms every flow and stops every run in this scope, including
           flows you don't have open. Scripts started by runs that are waiting on
-          them are stopped too.
+          them are stopped too. The contact scheduler is paused, so scheduled
+          activities won't start until you resume it.
         </v-card-text>
         <v-card-actions>
           <v-spacer />
@@ -354,6 +404,34 @@
       </v-card>
     </v-dialog>
 
+    <v-dialog v-model="paramDialog.show" max-width="480">
+      <v-card class="fa-param-dialog">
+        <v-card-title>Run '{{ flowSettings.name }}'</v-card-title>
+        <v-card-text>
+          <param-form
+            v-model="paramDialog.values"
+            :parameters="flowSettings.parameters || []"
+          />
+          <div class="text-caption text-medium-emphasis">
+            Contact variables (contact_aos, contact_los ...) are only set when
+            the run is started by a scheduled activity.
+          </div>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" @click="paramDialog.show = false">Cancel</v-btn>
+          <v-btn
+            color="primary"
+            variant="flat"
+            prepend-icon="mdi-play"
+            @click="runWithParams"
+          >
+            Run
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
     <input
       ref="importInput"
       type="file"
@@ -375,6 +453,8 @@ import FlowNode from './FlowNode.vue'
 import NodeInspector from './NodeInspector.vue'
 import RunPanel from './RunPanel.vue'
 import ApprovalPanel from './ApprovalPanel.vue'
+import ContactsView from './ContactsView.vue'
+import ParamForm from './ParamForm.vue'
 import flowApi, { ROUTE_PREFIX, errorInfo } from './flowApi'
 import {
   CATEGORIES,
@@ -396,6 +476,8 @@ function blankSettings() {
     mode: 'walk',
     approval_timeout: 0,
     variables: {},
+    template: false,
+    parameters: [],
   }
 }
 
@@ -410,6 +492,8 @@ export default {
     NodeInspector,
     RunPanel,
     ApprovalPanel,
+    ContactsView,
+    ParamForm,
   },
   provide() {
     return { flowContext: this.flowContext }
@@ -422,6 +506,8 @@ export default {
   data() {
     return {
       title: 'Flow Automator',
+      view: 'flows',
+      paramDialog: { show: false, triggerNode: null, values: {} },
       routePrefix: ROUTE_PREFIX,
       nodeTypes: NODE_TYPES,
       categories: CATEGORIES,
@@ -516,6 +602,9 @@ export default {
         },
       ]
     },
+    contactStatus() {
+      return this.engineStatus.contacts || {}
+    },
     selectedNode() {
       return this.nodes.find((n) => n.id === this.selectedNodeId) || null
     },
@@ -555,6 +644,7 @@ export default {
     },
   },
   created() {
+    if (this.$route?.query?.view === 'contacts') this.view = 'contacts'
     this.refreshFlows()
     this.pollStatus()
     this.timers.push(setInterval(this.pollStatus, STATUS_POLL_MS))
@@ -631,6 +721,8 @@ export default {
             mode: flow.mode || 'run',
             approval_timeout: flow.approval_timeout || 0,
             variables: { ...(flow.variables || {}) },
+            template: !!flow.template,
+            parameters: JSON.parse(JSON.stringify(flow.parameters || [])),
           }
         : blankSettings()
       this.nodes = (flow ? flow.nodes : []).map((n) => ({
@@ -774,10 +866,19 @@ export default {
         this.$notify.caution({ title: 'Not armed', body: info.message })
       }
     },
-    async runNow(triggerNode) {
+    async runNow(triggerNode, variables = null) {
       if (!(await this.ensureSaved())) return
+      const parameters = this.flowSettings.parameters || []
+      if (variables === null && parameters.length) {
+        this.paramDialog = { show: true, triggerNode, values: {} }
+        return
+      }
       try {
-        const result = await flowApi.run(this.flowId, triggerNode, {})
+        const result = await flowApi.run(
+          this.flowId,
+          triggerNode,
+          variables || {},
+        )
         if (result.result === 'started') {
           this.selectRun(result.run.id)
         } else {
@@ -795,6 +896,32 @@ export default {
         }
         this.$notify.caution({ title: 'Run not started', body: info.message })
       }
+    },
+    runWithParams() {
+      this.paramDialog.show = false
+      this.runNow(this.paramDialog.triggerNode, this.paramDialog.values)
+    },
+    viewChanged(view) {
+      if (view === 'contacts') this.refreshFlows()
+    },
+    openActivityRun(flowId, runId) {
+      this.view = 'flows'
+      if (flowId === this.flowId) {
+        this.selectRun(runId)
+        return
+      }
+      this.guardUnsaved(async () => {
+        try {
+          const { flow } = await flowApi.getFlow(flowId)
+          this.loadFlow(flow)
+          this.selectRun(runId)
+        } catch (error) {
+          this.$notify.caution({
+            title: 'Could not open the template',
+            body: errorInfo(error).message,
+          })
+        }
+      })
     },
     async stopRun(id) {
       try {
@@ -815,7 +942,7 @@ export default {
       this.armed = false
       this.$notify.caution({
         title: 'All flows stopped',
-        body: `Disarmed ${result.disarmed} flows and stopped ${result.stopped} runs.`,
+        body: `Disarmed ${result.disarmed} flows, stopped ${result.stopped} runs and paused the contact scheduler.`,
       })
       this.refreshFlows()
     },
@@ -1116,6 +1243,12 @@ export default {
   flex: 1;
   display: flex;
   min-height: 0;
+}
+.fa-contacts-wrap {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  position: relative;
 }
 .fa-palette {
   width: 190px;

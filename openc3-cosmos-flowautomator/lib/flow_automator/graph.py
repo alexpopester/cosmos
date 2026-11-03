@@ -19,6 +19,7 @@ per edge.
 
 from .cron import check_cron
 from .expressions import check_syntax, check_template
+from .templates import check_parameters
 
 
 POLICIES = ("skip", "queue", "parallel")
@@ -59,6 +60,9 @@ NODE_TYPES = {
     "wait_time": {"outputs": ["out"]},
     "wait_tlm": {"outputs": ["ok", "timeout"], "expressions": ["condition"], "errors": True},
     "wait_check": {"outputs": ["out"], "expressions": ["condition"], "errors": True},
+    # Contacts (runs started by a scheduled activity know their pass)
+    "wait_contact": {"outputs": ["out"], "errors": True},
+    "contact_check": {"outputs": ["ok", "short"], "errors": True},
     # Flow control
     "subflow": {"outputs": ["out"], "required": ["flow_id"], "errors": True},
     "end": {"outputs": []},
@@ -96,6 +100,9 @@ def validate_flow(flow):
             raise ValueError
     except (TypeError, ValueError):
         problem("Approval timeout must be zero (wait forever) or a positive number of seconds")
+    problems.extend({"node": None, "message": message} for message in check_parameters(flow.get("parameters")))
+    if flow.get("template") and not any(n.get("type") == "trigger_manual" for n in flow.get("nodes") or []):
+        problem("A template needs a Manual trigger, which is where scheduled runs start")
     variables = flow.get("variables") or {}
     if not isinstance(variables, dict):
         problem("Variables must be an object")
@@ -196,6 +203,16 @@ def _validate_node_data(node):
     elif node_type in ("wait_tlm", "wait_check"):
         if not _positive(data.get("timeout")):
             messages.append("Timeout must be a positive number of seconds")
+    elif node_type == "wait_contact":
+        if str(data.get("anchor") or "aos").lower() not in ("aos", "tca", "los"):
+            messages.append("Wait until must be AOS, TCA or LOS")
+        try:
+            float(data.get("offset") or 0)
+        except (TypeError, ValueError):
+            messages.append("Offset must be a number of seconds")
+    elif node_type == "contact_check":
+        if not _non_negative(data.get("min_remaining") or 0):
+            messages.append("Time left must be zero or more seconds")
     elif node_type == "end" and data.get("status", "success") not in ("success", "failed"):
         messages.append("End status must be success or failed")
     return messages

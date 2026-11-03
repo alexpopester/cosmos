@@ -17,6 +17,12 @@ const handled = {
 }
 
 const unwrap = (response) => response.data
+const post = (path, data = {}) =>
+  Api.post(`${BASE}${path}`, { data, headers: handled }).then(unwrap)
+const put = (path, data) =>
+  Api.put(`${BASE}${path}`, { data, headers: handled }).then(unwrap)
+const del = (path) =>
+  Api.delete(`${BASE}${path}`, { headers: handled }).then(unwrap)
 
 export default {
   status: () => Api.get(`${BASE}/status`).then(unwrap),
@@ -62,6 +68,24 @@ export default {
       headers: handled,
     }).then(unwrap),
   stopAll: () => Api.post(`${BASE}/stop_all`, { data: {} }).then(unwrap),
+
+  // Contacts: satellites, stations, predicted passes and scheduled activities
+  schedule: () => Api.get(`${BASE}/schedule`).then(unwrap),
+  recompute: () => post('/contacts/recompute'),
+  saveSatellite: (id, satellite) =>
+    id ? put(`/satellites/${id}`, satellite) : post('/satellites', satellite),
+  deleteSatellite: (id) => del(`/satellites/${id}`),
+  setTle: (id, tle) => post(`/satellites/${id}/tle`, { tle }),
+  saveStation: (id, station) =>
+    id ? put(`/stations/${id}`, station) : post('/stations', station),
+  deleteStation: (id) => del(`/stations/${id}`),
+  saveActivity: (id, activity) =>
+    id ? put(`/activities/${id}`, activity) : post('/activities', activity),
+  deleteActivity: (id) => del(`/activities/${id}`),
+  acceptActivity: (id) => post(`/activities/${id}/accept`),
+  refreshActivityTemplate: (id) => post(`/activities/${id}/refresh_template`),
+  pauseScheduler: () => post('/scheduler/pause'),
+  resumeScheduler: () => post('/scheduler/resume'),
   // Script Runner's file list, for the Run script node
   listScripts: () => Api.get('/script-api/scripts').then(unwrap),
 }

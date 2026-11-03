@@ -309,7 +309,7 @@ def test_stop_all_disarms_and_stops(engine, backend):
     engine.trigger(saved["id"], manual=True)
     engine.trigger(saved["id"], manual=True)
     assert len(engine.runs) == 2
-    assert engine.stop_all() == {"disarmed": 1, "stopped": 2}
+    assert engine.stop_all() == {"disarmed": 1, "stopped": 2, "scheduler_paused": True}
     assert wait_until(lambda: not engine.runs)
     assert not engine.get_flow(saved["id"])["armed"]
 

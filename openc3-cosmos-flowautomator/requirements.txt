@@ -1,0 +1,2 @@
+# Pass prediction for the contact planner (numpy comes with COSMOS)
+sgp4>=2.23

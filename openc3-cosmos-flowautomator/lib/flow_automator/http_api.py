@@ -20,7 +20,27 @@ good enough.
     GET    <prefix>/api/runs/<id>
     POST   <prefix>/api/runs/<id>/stop
     POST   <prefix>/api/runs/<id>/approve     {"approval_id": id, "decision": "go" | "run" | "abort"}
-    POST   <prefix>/api/stop_all
+    POST   <prefix>/api/stop_all                 also pauses the contact scheduler
+
+  Contacts (see contacts.py):
+    GET    <prefix>/api/schedule                 satellites, stations, contacts, activities
+    GET    <prefix>/api/contacts?start=&end=&satellite_id=&station_id=
+    POST   <prefix>/api/contacts/recompute
+    POST   <prefix>/api/satellites               {"name", "target", "tle"}
+    PUT    <prefix>/api/satellites/<id>
+    DELETE <prefix>/api/satellites/<id>
+    POST   <prefix>/api/satellites/<id>/tle      {"tle": "line1\nline2", "source"?}
+    POST   <prefix>/api/stations                 {"name", "latitude", "longitude", "altitude", "min_elevation"}
+    PUT    <prefix>/api/stations/<id>
+    DELETE <prefix>/api/stations/<id>
+    GET    <prefix>/api/activities
+    POST   <prefix>/api/activities               {"template_id", "contact_id", "params", "anchor", "offset", "mode", ...}
+    PUT    <prefix>/api/activities/<id>
+    DELETE <prefix>/api/activities/<id>          stops its run if it's running
+    POST   <prefix>/api/activities/<id>/accept   move a needs-review activity to the suggested contact
+    POST   <prefix>/api/activities/<id>/refresh_template
+    POST   <prefix>/api/scheduler/pause
+    POST   <prefix>/api/scheduler/resume
 """
 
 import json
@@ -29,6 +49,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+from .contacts import PlannerError
 from .engine import EngineError
 from .graph import validate_flow
 
@@ -61,6 +82,24 @@ def _routes():
         ("POST", r"/api/runs/(?P<run_id>[\w-]+)/stop", "stop_run", True),
         ("POST", r"/api/runs/(?P<run_id>[\w-]+)/approve", "approve", True),
         ("POST", r"/api/stop_all", "stop_all", True),
+        ("GET", r"/api/schedule", "schedule", False),
+        ("GET", r"/api/contacts", "list_contacts", False),
+        ("POST", r"/api/contacts/recompute", "recompute", True),
+        ("POST", r"/api/satellites", "create_satellite", True),
+        ("PUT", r"/api/satellites/(?P<item_id>[\w-]+)", "update_satellite", True),
+        ("DELETE", r"/api/satellites/(?P<item_id>[\w-]+)", "delete_satellite", True),
+        ("POST", r"/api/satellites/(?P<item_id>[\w-]+)/tle", "set_tle", True),
+        ("POST", r"/api/stations", "create_station", True),
+        ("PUT", r"/api/stations/(?P<item_id>[\w-]+)", "update_station", True),
+        ("DELETE", r"/api/stations/(?P<item_id>[\w-]+)", "delete_station", True),
+        ("GET", r"/api/activities", "list_activities", False),
+        ("POST", r"/api/activities", "create_activity", True),
+        ("PUT", r"/api/activities/(?P<item_id>[\w-]+)", "update_activity", True),
+        ("DELETE", r"/api/activities/(?P<item_id>[\w-]+)", "delete_activity", True),
+        ("POST", r"/api/activities/(?P<item_id>[\w-]+)/accept", "accept_activity", True),
+        ("POST", r"/api/activities/(?P<item_id>[\w-]+)/refresh_template", "refresh_template", True),
+        ("POST", r"/api/scheduler/pause", "pause_scheduler", True),
+        ("POST", r"/api/scheduler/resume", "resume_scheduler", True),
     ]
 
 
@@ -88,6 +127,8 @@ class FlowApi:
                 return error.status, {"error": str(error)}
             except EngineError as error:
                 return error.status, {"error": str(error), "problems": error.problems}
+            except PlannerError as error:
+                return error.status, {"error": str(error), "problems": []}
             except json.JSONDecodeError as error:
                 return 400, {"error": f"Invalid JSON: {error}"}
         if any(pattern.match(path) for _m, pattern, _h, _w in self.routes):
@@ -163,6 +204,85 @@ class FlowApi:
 
     def stop_all(self, **_):
         return self.engine.stop_all()
+
+    # ---- contacts --------------------------------------------------------
+
+    @property
+    def planner(self):
+        return self.engine.planner
+
+    @staticmethod
+    def _query_number(query, name):
+        value = (query.get(name) or [None])[0]
+        if value in (None, ""):
+            return None
+        try:
+            return float(value)
+        except ValueError:
+            raise PlannerError(f"{name} must be a number (Unix seconds)") from None
+
+    def schedule(self, query, **_):
+        return self.planner.schedule(self._query_number(query, "start"), self._query_number(query, "end"))
+
+    def list_contacts(self, query, **_):
+        return self.planner.list_contacts(
+            self._query_number(query, "start"),
+            self._query_number(query, "end"),
+            (query.get("satellite_id") or [None])[0],
+            (query.get("station_id") or [None])[0],
+        )
+
+    def recompute(self, **_):
+        self.planner.recompute()
+        return self.planner.status()
+
+    def create_satellite(self, payload, **_):
+        return {"satellite": self.planner.save_satellite(payload)}
+
+    def update_satellite(self, item_id, payload, **_):
+        return {"satellite": self.planner.save_satellite(payload, item_id)}
+
+    def delete_satellite(self, item_id, **_):
+        self.planner.delete_satellite(item_id)
+        return {"deleted": item_id}
+
+    def set_tle(self, item_id, payload, **_):
+        return {"satellite": self.planner.set_tle(item_id, payload.get("tle"), payload.get("source") or "manual")}
+
+    def create_station(self, payload, **_):
+        return {"station": self.planner.save_station(payload)}
+
+    def update_station(self, item_id, payload, **_):
+        return {"station": self.planner.save_station(payload, item_id)}
+
+    def delete_station(self, item_id, **_):
+        self.planner.delete_station(item_id)
+        return {"deleted": item_id}
+
+    def list_activities(self, **_):
+        return self.planner.list_activities()
+
+    def create_activity(self, payload, **_):
+        return {"activity": self.planner.create_activity(payload)}
+
+    def update_activity(self, item_id, payload, **_):
+        return {"activity": self.planner.update_activity(item_id, payload)}
+
+    def delete_activity(self, item_id, **_):
+        self.planner.delete_activity(item_id)
+        return {"deleted": item_id}
+
+    def accept_activity(self, item_id, **_):
+        return {"activity": self.planner.accept_suggestion(item_id)}
+
+    def refresh_template(self, item_id, **_):
+        return {"activity": self.planner.refresh_template(item_id)}
+
+    def pause_scheduler(self, payload, **_):
+        return self.planner.set_paused(True, payload.get("reason") or "Paused by operator")
+
+    def resume_scheduler(self, **_):
+        return self.planner.set_paused(False)
 
 
 def make_handler(api, logger=None):
