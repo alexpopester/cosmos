@@ -13,7 +13,7 @@ function walk(dir) {
 }
 
 const sha = (data) => createHash('sha256').update(data).digest('hex')
-const files = [...walk('src'), ...['package.json', 'pnpm-lock.yaml', 'vite.config.js'].filter((f) => existsSync(f))]
+const files = [...walk('src'), ...['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'vite.config.js'].filter((f) => existsSync(f))]
   .map((f) => Buffer.from(f))
   .sort(Buffer.compare)
   .map((f) => f.toString())

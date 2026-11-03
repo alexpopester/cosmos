@@ -397,6 +397,11 @@ it. It checks the build matches the current source (`pnpm run build` writes a
 hash of it to `tools/flowautomator/.source-hash`) and stops with a message if
 the tool hasn't been built or the source changed since.
 
+Both pnpm 10 and 11 install from the lockfile. `pnpm-workspace.yaml` pins the
+d3 packages Vue Flow uses to their long-standing releases: new releases of all
+of them appeared on 2026-11-03, and pnpm 11 refuses packages that new (its
+`minimumReleaseAge` policy).
+
 Engine tests (no COSMOS needed):
 
 ```

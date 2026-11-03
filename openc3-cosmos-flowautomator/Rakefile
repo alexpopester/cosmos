@@ -7,7 +7,7 @@ SOURCE_STAMP = File.join(TOOL_DIR, '.source-hash')
 
 def tool_source_hash
   # Same as scripts/source-hash.mjs, which pnpm run build uses to write SOURCE_STAMP
-  files = (Dir['src/**/*'] + %w[package.json pnpm-lock.yaml vite.config.js]).select { |f| File.file?(f) }.sort
+  files = (Dir['src/**/*'] + %w[package.json pnpm-lock.yaml pnpm-workspace.yaml vite.config.js]).select { |f| File.file?(f) }.sort
   Digest::SHA256.hexdigest(files.map { |f| "#{f}:#{Digest::SHA256.file(f).hexdigest}" }.join("\n"))
 end
 
