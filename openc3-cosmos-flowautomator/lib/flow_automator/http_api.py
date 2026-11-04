@@ -75,6 +75,7 @@ which every write records in the audit log.
     POST   <prefix>/api/scheduler/resume
 """
 
+import contextlib
 import json
 import re
 import threading
@@ -90,6 +91,8 @@ from .tle_inputs import TleInputError
 
 
 MAX_BODY_BYTES = 5 * 1024 * 1024
+MAX_CONCURRENT_REQUESTS = 64
+SOCKET_TIMEOUT_SECONDS = 30
 
 
 def _unverified_user(token):
@@ -196,6 +199,8 @@ class FlowApi:
                             raise
                         user = _unverified_user(token)
                 payload = json.loads(body) if body else {}
+                if not isinstance(payload, dict):
+                    return 400, {"error": "The request body must be a JSON object"}
                 return 200, getattr(self, handler)(payload=payload, query=query, user=user, **match.groupdict())
             except AuthError as error:
                 return error.status, {"error": str(error)}
@@ -663,20 +668,36 @@ class FlowApi:
 def make_handler(api, logger=None):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
+        timeout = SOCKET_TIMEOUT_SECONDS  # a client that stops sending doesn't hold a thread forever
+        server_version = "FlowEngine"
+        sys_version = ""
 
         def _dispatch(self, method):
             parsed = urlparse(self.path)
-            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = -1
+            if length < 0:
+                self.close_connection = True
+                self._send(400, {"error": "Bad Content-Length"})
+                return
             if length > MAX_BODY_BYTES:
+                self.close_connection = True
                 self._send(413, {"error": "Request body too large"})
                 return
-            body = self.rfile.read(length).decode("utf-8") if length else ""
+            if length and not (self.headers.get("Authorization") or self.headers.get("authorization")):
+                # Every route with a body needs a token: refuse before reading (and holding) the body
+                self.close_connection = True
+                self._send(401, {"error": "Token is required"})
+                return
+            body = self.rfile.read(length).decode("utf-8", errors="replace") if length else ""
             try:
                 status, result = api.handle(method, parsed.path, parse_qs(parsed.query), self.headers, body)
             except Exception as error:  # noqa: BLE001 - never drop the connection without a response
                 if logger:
-                    logger.error(f"Flow API {method} {parsed.path} failed: {error}")
-                status, result = 500, {"error": f"{type(error).__name__}: {error}"}
+                    logger.error(f"Flow API {method} {parsed.path} failed: {type(error).__name__}: {error}")
+                status, result = 500, {"error": "Internal error in the flow engine (details are in its log)"}
             self._send(status, result)
 
         def _send(self, status, result):
@@ -706,9 +727,31 @@ def make_handler(api, logger=None):
     return Handler
 
 
+class _BoundedHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer with a cap on concurrent requests: past it, new connections get a quick 503."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._slots = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            with contextlib.suppress(OSError):
+                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            self.shutdown_request(request)
+            return
+        super().process_request(request, client_address)
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+
 class FlowHttpServer:
     def __init__(self, api, port, logger=None, host="0.0.0.0"):  # noqa: S104 - must be reachable by Traefik
-        self.server = ThreadingHTTPServer((host, port), make_handler(api, logger))
+        self.server = _BoundedHTTPServer((host, port), make_handler(api, logger))
         self.server.daemon_threads = True
         self.thread = None
 

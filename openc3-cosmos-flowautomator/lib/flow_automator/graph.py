@@ -94,6 +94,9 @@ def validate_flow(flow):
     def problem(message, node=None):
         problems.append({"node": node, "message": message})
 
+    shape = _shape_problem(flow)
+    if shape:
+        return [{"node": None, "message": shape}]
     if not str(flow.get("name") or "").strip():
         problem("Flow needs a name")
     if flow.get("policy", "skip") not in POLICIES:
@@ -160,6 +163,26 @@ def validate_flow(flow):
         if node.get("type") == "parallel" and used_handles.get((node["id"], "out"), 0) > MAX_PARALLEL_BRANCHES:
             problem(f"Parallel can start at most {MAX_PARALLEL_BRANCHES} branches", node["id"])
     return problems
+
+
+def _shape_problem(flow):
+    """What's wrong with the flow's JSON structure (not an object, nodes not a list of objects ...), or None."""
+    if not isinstance(flow, dict):
+        return "A flow must be a JSON object"
+    for key in ("nodes", "edges"):
+        items = flow.get(key)
+        if items is None:
+            continue
+        if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+            return f"'{key}' must be a list of objects"
+    for node in flow.get("nodes") or []:
+        if not isinstance(node.get("data", {}), dict):
+            return f"Node '{node.get('id')}': 'data' must be an object"
+    for key in ("variables", "parameters"):
+        value = flow.get(key)
+        if value is not None and not isinstance(value, dict if key == "variables" else list):
+            return f"'{key}' must be {'an object' if key == 'variables' else 'a list'}"
+    return None
 
 
 def _validate_node_data(node):

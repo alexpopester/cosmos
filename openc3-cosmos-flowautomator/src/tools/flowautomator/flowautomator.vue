@@ -275,7 +275,12 @@
         <span class="text-body-2 mr-3" :class="armed ? 'text-success' : ''">
           {{ armed ? 'Armed' : 'Disarmed' }}
         </span>
-        <span class="fa-group-label">Mode</span>
+        <span
+          class="fa-group-label"
+          title="The flow's mode, saved with the flow (a run can be more cautious, never less)"
+        >
+          Flow mode
+        </span>
         <v-btn-toggle
           v-model="flowSettings.mode"
           mandatory
@@ -698,6 +703,50 @@
       </v-card>
     </v-dialog>
 
+    <v-dialog
+      :model-value="saveFirst.show"
+      max-width="460"
+      @update:model-value="(open) => !open && answerSaveFirst('cancel')"
+    >
+      <v-card>
+        <v-card-title>Save changes first?</v-card-title>
+        <v-card-text>
+          <template v-if="flowId">
+            '{{ flowSettings.name }}' has changes that aren't saved. Save them
+            as a new version and {{ saveFirst.action }} it, or
+            {{ saveFirst.action }} the last saved version (v{{ flowVersion }})
+            and keep editing.
+          </template>
+          <template v-else>
+            The flow has to be saved before you can
+            {{ saveFirst.action }} it.
+          </template>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" @click="answerSaveFirst('cancel')">
+            Cancel
+          </v-btn>
+          <v-btn
+            v-if="flowId"
+            variant="tonal"
+            class="fa-use-saved"
+            @click="answerSaveFirst('saved')"
+          >
+            {{ saveFirst.action === 'arm' ? 'Arm' : 'Run' }} v{{ flowVersion }}
+          </v-btn>
+          <v-btn
+            variant="flat"
+            color="primary"
+            class="fa-save-and-go"
+            @click="answerSaveFirst('save')"
+          >
+            Save and {{ saveFirst.action }}
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
     <v-dialog v-model="confirmDiscard.show" max-width="420">
       <v-card>
         <v-card-title>Discard unsaved changes?</v-card-title>
@@ -729,6 +778,7 @@
       :current-version="flowVersion"
       :initial-version="historyVersion"
       :start-tab="historyTab"
+      :dirty="dirty"
       @restored="onRestored"
     />
     <run-history
@@ -1086,6 +1136,7 @@ export default {
       stoppingAll: false,
       stopAllFailed: { show: false, message: '' },
       confirmDiscard: { show: false, action: null },
+      saveFirst: { show: false, action: '', resolve: null },
       defaultEdgeOptions: {
         type: 'smoothstep',
         markerEnd: 'arrowclosed',
@@ -1528,9 +1579,16 @@ export default {
     },
     async reloadTheirs() {
       this.conflict.show = false
-      const { flow } = await flowApi.getFlow(this.flowId)
-      this.dirty = false
-      this.loadFlow(flow)
+      try {
+        const { flow } = await flowApi.getFlow(this.flowId)
+        this.dirty = false
+        this.loadFlow(flow)
+      } catch (error) {
+        this.$notify.serious({
+          title: 'Could not reload the flow',
+          body: errorInfo(error).message,
+        })
+      }
     },
     async loadDemo() {
       if (
@@ -1568,13 +1626,20 @@ export default {
     },
     async clearDemo() {
       if (!window.confirm('Remove everything the demo added?')) return
-      const removed = await flowApi.clearDemo()
-      if (this.flowSettings.name?.startsWith('Demo: ')) this.loadFlow(null)
-      await this.refreshFlows()
-      this.$notify.normal({
-        title: 'Demo removed',
-        body: `${removed.flows} flows, ${removed.satellites} satellites, ${removed.stations} stations`,
-      })
+      try {
+        const removed = await flowApi.clearDemo()
+        if (this.flowSettings.name?.startsWith('Demo: ')) this.loadFlow(null)
+        await this.refreshFlows()
+        this.$notify.normal({
+          title: 'Demo removed',
+          body: `${removed.flows} flows, ${removed.satellites} satellites, ${removed.stations} stations`,
+        })
+      } catch (error) {
+        this.$notify.serious({
+          title: 'Demo not removed',
+          body: errorInfo(error).message,
+        })
+      }
     },
     openHistory(version = null) {
       this.historyVersion = typeof version === 'number' ? version : null
@@ -1592,11 +1657,29 @@ export default {
       })
     },
     async saveCopy() {
-      this.flowId = null
-      this.flowVersion = null
-      this.armed = false
-      this.flowSettings.name = `${this.flowSettings.name} (copy)`
-      await this.save()
+      // Create the copy first; only then switch the editor to it, so a failed save leaves things as they were
+      const body = {
+        ...this.toEngine(),
+        name: `${this.flowSettings.name} (copy)`,
+        note: `Copy of '${this.flowSettings.name}'`,
+      }
+      delete body.id
+      try {
+        const result = await flowApi.createFlow(body)
+        this.dirty = false
+        this.loadFlow(result.flow)
+        this.applyProblems(result.problems)
+        await this.refreshFlows()
+        this.$notify.normal({
+          title: 'Copy saved',
+          body: `'${result.flow.name}' is open.`,
+        })
+      } catch (error) {
+        this.$notify.serious({
+          title: 'Copy not saved',
+          body: errorInfo(error).message,
+        })
+      }
     },
     async deleteFlow() {
       if (!this.flowId) return
@@ -1607,7 +1690,15 @@ export default {
         )
       )
         return
-      await flowApi.deleteFlow(this.flowId)
+      try {
+        await flowApi.deleteFlow(this.flowId)
+      } catch (error) {
+        this.$notify.serious({
+          title: 'Flow not deleted',
+          body: errorInfo(error).message,
+        })
+        return
+      }
       this.dirty = false
       this.loadFlow(null)
       this.refreshFlows()
@@ -1621,7 +1712,8 @@ export default {
       link.href = URL.createObjectURL(blob)
       link.download = `${flow.name.replace(/[^\w-]+/g, '_')}.json`
       link.click()
-      URL.revokeObjectURL(link.href)
+      // Revoking at once can cancel the download in some browsers
+      setTimeout(() => URL.revokeObjectURL(link.href), 10000)
     },
     importFile(event) {
       const file = event.target.files[0]
@@ -1631,7 +1723,19 @@ export default {
         this.guardUnsaved(() => {
           try {
             const flow = JSON.parse(text)
+            if (
+              !flow ||
+              typeof flow !== 'object' ||
+              !Array.isArray(flow.nodes) ||
+              !Array.isArray(flow.edges || [])
+            ) {
+              throw new Error(
+                "This isn't a Flow Automator flow file (it has no list of nodes). Export one with File > Export.",
+              )
+            }
             delete flow.id
+            // A file without a mode starts in walk, not run: imported flows ask before hazardous steps
+            if (!flow.mode) flow.mode = 'walk'
             flow.armed = false
             this.setEditing(true)
             this.loadFlow(flow)
@@ -1639,7 +1743,10 @@ export default {
           } catch (error) {
             this.$notify.serious({
               title: 'Import failed',
-              body: String(error),
+              body:
+                error instanceof SyntaxError
+                  ? `Not valid JSON: ${error.message}`
+                  : error.message || String(error),
             })
           }
         })
@@ -1653,14 +1760,22 @@ export default {
     },
 
     // ---- arming and running --------------------------------------------
-    ensureSaved() {
-      if (this.dirty || !this.flowId) {
-        return this.save()
-      }
-      return Promise.resolve(true)
+    // Running or arming needs the flow saved. With unsaved edits, ask: save them (a new version) and go
+    // on, go on with the last saved version, or cancel. Resolves true to go on.
+    ensureSaved(action = 'run') {
+      if (!this.dirty && this.flowId) return Promise.resolve(true)
+      return new Promise((resolve) => {
+        this.saveFirst = { show: true, action, resolve }
+      })
+    },
+    async answerSaveFirst(choice) {
+      const { resolve } = this.saveFirst
+      this.saveFirst = { show: false, action: '', resolve: null }
+      if (choice === 'save') resolve(await this.save())
+      else resolve(choice === 'saved' && !!this.flowId)
     },
     async setArmed(value) {
-      if (value && !(await this.ensureSaved())) return
+      if (value && !(await this.ensureSaved('arm'))) return
       try {
         const { flow } = value
           ? await flowApi.arm(this.flowId)
@@ -1946,6 +2061,7 @@ export default {
       }
     },
     openApproval(approval) {
+      this.view = 'flows'
       if (approval.flow_id === this.flowId) return
       const run = this.engineStatus.active_runs.find(
         (r) => r.id === approval.run_id,

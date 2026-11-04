@@ -68,10 +68,11 @@
             rows="2"
             auto-grow
             append-inner-icon="mdi-satellite-variant"
-            class="mb-1 fa-mono"
+            class="mb-3 fa-mono"
             :class="`fa-field-${field.key}`"
             @click:append-inner="pickTlm(field)"
             @update:model-value="changed"
+            @focusout="rememberCaret(field.key, $event)"
           />
           <div v-if="field.builder" class="mb-3">
             <v-btn
@@ -391,6 +392,7 @@ export default {
   emits: ['changed', 'delete-node'],
   data() {
     return {
+      carets: {}, // field key -> cursor position when it last lost focus
       picker: {
         show: false,
         key: null,
@@ -467,12 +469,26 @@ export default {
       } else if (insertAs === 'item') {
         this.config[key] = selection.text
       } else {
+        // Insert where the cursor was (the end if the field was never focused), with spaces around it
         const existing = String(this.config[key] || '')
-        this.config[key] = existing.trim()
-          ? `${existing.replace(/\s+$/, '')} ${selection.text}`
-          : selection.text
+        const at = Math.min(
+          this.carets[key] ?? existing.length,
+          existing.length,
+        )
+        const before = existing.slice(0, at)
+        const after = existing.slice(at)
+        const left = before && !/\s$/.test(before) ? ' ' : ''
+        const right = after && !/^\s/.test(after) ? ' ' : ''
+        this.config[key] = `${before}${left}${selection.text}${right}${after}`
+        this.carets[key] = at + left.length + selection.text.length
       }
       this.changed()
+    },
+    rememberCaret(key, event) {
+      const target = event.target
+      if (target && typeof target.selectionStart === 'number') {
+        this.carets[key] = target.selectionStart
+      }
     },
     onBuild(command) {
       this.config[this.builder.key] = command

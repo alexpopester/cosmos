@@ -86,7 +86,8 @@ installed in). Inside it:
 | `flow-triggers` | `TriggerManager._loop` | Every `trigger_period` (0.25 s) evaluates all armed triggers |
 | `flow-run-<id>` | `FlowRun.start_thread` | One per top-level run |
 | `flow-run-<id>-b<n>` | `FlowRun._run_parallel` | One per Parallel branch, joined before continuing |
-| `flow-contacts` | `ContactPlanner._loop` | Scheduler tick every 1 s: start/miss/stop activities, rules every 60 s, prune and stale-TLE check every 300 s, TLE input polling |
+| `flow-contacts` | `ContactPlanner._loop` | Scheduler tick every 1 s: start/miss/stop activities, rules every 60 s, prune and stale-TLE check every 300 s |
+| `flow-tle-inputs` | `ContactPlanner._poll_loop` | TLE inputs and sources every 1 s (stash, bucket files, packets): kept off the scheduler tick so slow reads can't delay activity starts |
 | `flow-predict` | `ContactPlanner._predict_loop` | Predicts queued satellites one at a time |
 | alert worker | `Alerter` | Delivers webhooks with retries |
 | `threading.Timer`s | `FlowEngine.on_approval_requested` | Escalate an unanswered approval to an alert after the delay |
@@ -120,6 +121,7 @@ memory and are rebuilt (or lost) on restart.
 | `…__audit` | list, newest first | Audit entries (limit 10,000) |
 | `…__satellites`, `…__stations`, `…__activities`, `…__rules` | hash id → record | Contact planner records |
 | `…__deleted_flows` | hash id → summary | Deleted flows that can be restored |
+| `…__active_runs` | hash run id → small record | Runs in progress (flow, trigger, scripts started). Deleted when a run ends; leftovers at startup are runs a crash interrupted: recorded as failed, their scripts stopped |
 | `…__planner_settings` | hash | `settings` (paused, reason), `tle_inputs` |
 | `…__alert_settings` | hash | Alert destinations and event choices |
 

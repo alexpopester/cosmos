@@ -111,7 +111,9 @@ except in two cases, which disarm it:
   hazardous* or *Allow raw values* turned on. Arm it again to accept the
   change, so a relaxed flow never fires unreviewed.
 
-Arm a flow to let its triggers fire; **Run now** works either way.
+Arm a flow to let its triggers fire; **Run now** works either way. With unsaved
+edits, Run now and Arm ask first. You can save them as a new version, use the
+last saved version, or cancel.
 
 **Stop all** does four things:
 
@@ -363,7 +365,12 @@ time, and only for what changed; the Contacts view shows the progress.
 Predictions agree with skyfield to well under a second.
 
 TLEs older than `stale_tle_days` are flagged. Each satellite keeps its last 5
-TLEs and records where each came from.
+TLEs and records where each came from. A TLE that SGP4 can't propagate (a
+decayed orbit, bad elements) shows a prediction problem and raises an alert.
+
+A satellite that never sets over a station, such as a GEO satellite, gets one
+contact per UTC day there: AOS at 00:00 and LOS at 24:00. Schedule it with an
+offset from AOS, for example `AOS + 3600` for 01:00 UTC.
 
 ### Feeding TLEs from other apps
 
@@ -376,6 +383,9 @@ next to Satellites), or let another app keep them current through any of:
 | COSMOS stash | from any COSMOS script or microservice: `stash_set("flow_automator_tles", {"tle": text, "source": "fds"})` (or just the text, or a list); the outcome appears in `flow_automator_tles_result` | `source`, or `stash` |
 | Bucket file | list target paths (e.g. `INST/tle/latest.tle`) in **TLE inputs**; write them with `put_target_file(...)` or Bucket Explorer; read again whenever they change | `file:<path>` |
 | Telemetry | list packets in **TLE inputs**: one item holding the TLE text, or line 1 and line 2 items; read whenever the packet's count goes up | `tlm:<TGT PKT>` |
+
+The stash key must start with `flow_automator_`, because the input deletes
+what it reads.
 
 Text may hold any number of 2- or 3-line TLEs. Each is matched to a satellite
 by catalog number (the satellite dialog shows it; it's set from the first TLE),
@@ -419,10 +429,13 @@ the first packet, with **Contact time left** guarding the long steps.
 
 Click **Schedule** on a pass: pick a template, fill its parameters, and set
 the start relative to AOS, TCA or LOS (`AOS - 120` starts two minutes before
-the satellite rises). Options:
+the satellite rises). A pass that is only partly inside the prediction window
+can't be scheduled yet: one in progress, or one past the horizon. Its times
+aren't known. Options:
 
 - **Mode**: crawl, walk or run. Approvals close *Approvals close before LOS*
-  seconds before LOS, then the step fails.
+  seconds before LOS, then the step fails. A crawl or walk activity, or one
+  whose template asks the operator, must start before approvals close.
 - **May start late by**: if the engine couldn't start it on time (restart,
   scheduler paused) it starts late within this, else it's marked missed.
 - **Stop the run at LOS**, and an **expected duration** for overlap warnings.
@@ -442,11 +455,18 @@ until then.
 A rule schedules a template into every matching pass as passes are
 predicted: chosen satellites and stations (empty means all), passes above a
 maximum elevation and at least a duration, with the same start, mode and
-parameters as an activity. Saving a rule re-plans its activities that
-haven't started. Deleting one of its activities cancels it, and the rule won't
-put it back. Higher **priority** rules claim passes first, and with *Skip
-passes when the station is already busy* a rule leaves passes whose station
-is at capacity.
+parameters as an activity.
+
+Saving a change that affects which passes a rule takes re-plans that rule
+and every lower-priority rule, highest first. That way a higher **priority**
+rule claims station capacity before lower ones, even when it's added later.
+Renaming a rule keeps its activities.
+
+A rule activity you edit by hand is *detached*: saving the rule leaves it as
+you set it. Deleting one of its activities cancels it, and the rule won't put
+it back, even after a TLE update moves the pass a little. With *Skip passes
+when the station is already busy*, a rule leaves passes whose station is at
+capacity.
 
 ### Station conflicts
 
@@ -543,7 +563,9 @@ AOS; it takes about five minutes.
 
 ## Limits
 
-- A run that's in progress when the engine restarts fails; it isn't resumed.
+- A run that's in progress when the engine restarts or crashes isn't resumed.
+  At the next start it's recorded as failed (with an alert), and the
+  Script Runner scripts it started are stopped.
 - Each run keeps its last 1,000 steps; each flow its last `run_history` runs.
 - Predicting 50 satellites × 20 stations for 7 days takes about a minute in
   the background after a restart or a full recompute.

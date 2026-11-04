@@ -9,7 +9,7 @@ import uuid
 from .alerts import Alerter
 from .audit import AuditLog, user_name
 from .contacts import ContactPlanner
-from .graph import MODES, POLICIES, is_trigger, validate_flow
+from .graph import MODES, POLICIES, _shape_problem, is_trigger, validate_flow
 from .runner import FlowRun
 from .templates import CONTACT_VARIABLES, fill_parameters
 from .triggers import TriggerManager
@@ -278,6 +278,9 @@ class FlowEngine:
         """
         if not isinstance(flow, dict):
             raise EngineError("Flow must be a JSON object")
+        shape = _shape_problem(flow)
+        if shape:
+            raise EngineError(shape)
         flow = copy.deepcopy(flow)
         with self.lock:
             existing = None
@@ -286,7 +289,11 @@ class FlowEngine:
                 if existing is None:
                     raise NotFoundError(f"Flow '{flow_id}' not found")
                 current = int(existing.get("version") or 0)
-                if base_version is not None and int(base_version) != current and not force:
+                try:
+                    base_version = None if base_version in (None, "") else int(base_version)
+                except (TypeError, ValueError):
+                    raise EngineError("base_version must be a version number") from None
+                if base_version is not None and base_version != current and not force:
                     raise ConflictError(
                         f"'{existing['name']}' was saved by {existing.get('saved_by') or 'someone'} "
                         f"(version {current}) after you opened version {base_version}",

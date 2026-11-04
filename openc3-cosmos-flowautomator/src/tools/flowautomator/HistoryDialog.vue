@@ -243,6 +243,8 @@ export default {
     // Open with this version selected (a run's "v3" link)
     initialVersion: { type: Number, default: null },
     startTab: { type: String, default: 'versions' },
+    // The editor has unsaved changes, which opening the restored version replaces
+    dirty: { type: Boolean, default: false },
   },
   emits: ['update:modelValue', 'restored'],
   data() {
@@ -305,9 +307,12 @@ export default {
     },
     async restore() {
       const v = this.selected.version
+      const unsaved = this.dirty
+        ? ' Your unsaved changes in the editor will be lost (save them first to keep them in the history).'
+        : ''
       if (
         !window.confirm(
-          `Restore v${v}? It's saved as a new version; nothing is lost.`,
+          `Restore v${v}? It's saved as a new version, so no saved version is lost.${unsaved}`,
         )
       )
         return
@@ -323,6 +328,13 @@ export default {
       }
     },
     async undelete(d) {
+      if (
+        this.dirty &&
+        !window.confirm(
+          `Restore '${d.name}'? It opens in the editor, and your unsaved changes there will be lost.`,
+        )
+      )
+        return
       try {
         const result = await flowApi.undelete(d.id)
         this.$emit('restored', result.flow)
@@ -335,7 +347,16 @@ export default {
       }
     },
     async exportVersion() {
-      const entry = await flowApi.version(this.flowId, this.selected.version)
+      let entry
+      try {
+        entry = await flowApi.version(this.flowId, this.selected.version)
+      } catch (error) {
+        this.$notify.caution({
+          title: 'Export failed',
+          body: errorInfo(error).message,
+        })
+        return
+      }
       const blob = new Blob([JSON.stringify(entry.flow, null, 2)], {
         type: 'application/json',
       })
@@ -343,7 +364,8 @@ export default {
       link.href = URL.createObjectURL(blob)
       link.download = `${this.flowName || 'flow'}-v${this.selected.version}.json`
       link.click()
-      URL.revokeObjectURL(link.href)
+      // Revoking at once can cancel the download in some browsers
+      setTimeout(() => URL.revokeObjectURL(link.href), 10000)
     },
     show(value) {
       if (value === undefined || value === null || value === '') return '—'

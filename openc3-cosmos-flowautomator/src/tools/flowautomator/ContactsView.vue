@@ -1670,11 +1670,25 @@ export default {
       }
     },
     async pause() {
-      await flowApi.pauseScheduler()
+      try {
+        await flowApi.pauseScheduler()
+      } catch (error) {
+        this.$notify.serious({
+          title: 'Scheduler not paused',
+          body: errorInfo(error).message,
+        })
+      }
       await this.refresh()
     },
     async resume() {
-      await flowApi.resumeScheduler()
+      try {
+        await flowApi.resumeScheduler()
+      } catch (error) {
+        this.$notify.caution({
+          title: 'Scheduler not resumed',
+          body: errorInfo(error).message,
+        })
+      }
       await this.refresh()
     },
 

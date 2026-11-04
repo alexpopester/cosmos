@@ -205,6 +205,19 @@ try {
   const markIcons = await page.locator('.fa-node .mdi-hand-back-right-outline').count()
   check('marked node shows the ask-operator icon', markIcons === 1)
   await page.screenshot({ path: `${SHOTS}/modes_04_walk.png` })
+
+  // Run now with unsaved edits asks first instead of saving them silently
+  await page.locator('.fa-inspector .v-switch', { hasText: 'Ask operator first' }).locator('input').uncheck()
+  await page.getByRole('button', { name: 'Run now' }).click()
+  const asked = await page
+    .locator('.v-dialog', { hasText: 'Save changes first?' })
+    .waitFor({ timeout: 5000 })
+    .then(() => true, () => false)
+  const offersSaved = await page.locator('.fa-use-saved').isVisible()
+  check('Run now with unsaved edits asks to save first', asked && offersSaved)
+  await page.locator('.v-dialog button', { hasText: 'Cancel' }).click()
+  const [, after] = await api('GET', `/flows/${uiId}`)
+  check('cancelling saves nothing', after.flow.version === saved.flow.version, `v${after.flow.version}`)
 } catch (error) {
   check('unexpected error', false, error.message.split('\n')[0])
   await page.screenshot({ path: `${SHOTS}/modes_error.png` }).catch(() => {})

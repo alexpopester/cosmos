@@ -20,7 +20,17 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-11-04
+
+Sub-flow pinning, plus the correctness fixes from the evaluation
+(`docs/EVALUATION-2026-11-04.md`, section 2.2).
+
 ### Changed
+- **Run now and Arm ask before saving unsaved edits.** You can save them as
+  a new version and go on, use the last saved version, or cancel. The
+  toolbar's mode control is labelled *Flow mode*, because it changes the
+  saved flow.
+- **Imported flow files without a mode open in walk**, not run.
 - **Rules re-plan only when it matters.** Renaming a rule keeps its
   activities. Saving a change that affects which passes it takes re-plans
   that rule and every lower-priority rule, highest priority first. A
@@ -80,6 +90,32 @@ versions follow [Semantic Versioning](https://semver.org/).
   one alert instead of one each.
 - **Webhooks:** a webhook that keeps failing is skipped for 5 minutes, so it
   doesn't hold up the others, and pending deliveries are capped at 1,000.
+- **HTTP API:**
+  - Malformed requests (a body that isn't a JSON object, nodes or edges
+    that aren't lists of objects, a bad `base_version`) get a 400 that says
+    what's wrong, instead of a 500.
+  - Internal errors no longer return exception text.
+  - A token check that can't reach COSMOS no longer names internal hosts.
+  - The engine's HTTP server limits concurrent requests to 64 and times
+    out idle sockets after 30 s.
+  - A request with a body but no token, or a bad `Content-Length`, is
+    refused before the body is read.
+  - The `Server` header no longer shows the Python version.
+- **Editor:**
+  - Restoring a version or a deleted flow now warns that unsaved edits in
+    the editor will be lost.
+  - *Save As Copy* creates the copy before switching to it, so a failed
+    save no longer leaves the editor on a renamed, unsaved flow.
+  - Delete flow, Clear demo, Reload theirs, scheduler Pause/Resume and
+    version Export now report failures instead of failing silently.
+  - Opening an approval from the toolbar while in Contacts switches to
+    Flows.
+  - The telemetry picker inserts at the cursor instead of at the end.
+  - Importing a file that isn't a flow says so, instead of showing a
+    TypeError.
+  - Exports no longer risk being cancelled by revoking the download link
+    too early.
+  - A condition's hint no longer overlaps the next field.
 - **Demo:** the demo's stations are now *Demo Wallops* and *Demo Svalbard*.
   Clearing the demo no longer deletes a station of yours with an old demo
   name.
@@ -89,6 +125,12 @@ versions follow [Semantic Versioning](https://semver.org/).
   changed tonight's passes. A changed sub-flow shows as *sub-flow changed*;
   **Update** copies the current versions. Activity runs record the sub-flow
   versions they used (D11).
+
+### Docs
+- README: scheduling (priority, detached activities, GEO, partial contacts,
+  approval timing), the stash key prefix, saving before Run/Arm, and
+  interrupted runs. ARCHITECTURE: the `flow-tle-inputs` thread and the
+  `active_runs` key. DECISIONS: D11 amended; D23–D25 added.
 
 ## [1.8.0] - 2026-11-04
 

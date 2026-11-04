@@ -250,3 +250,41 @@ interface (SEC-1, SEC-4, ENG-5).
 *Consequences:* new safe functions must be bounded in the same way. Check
 the size before building the result, not after.
 
+## D23. Rule priority pre-empts; hand-edited rule activities are detached
+
+Saving a rule that changes which passes it takes re-plans that rule and every
+lower-priority rule, highest priority first. Renaming a rule keeps its
+activities. An activity a rule made, then edited by hand, is marked
+`detached`: a re-plan leaves it alone, and deleting the rule keeps it as a
+manual activity. Cancelled rule activities (tombstones) are matched to passes
+by satellite, station and TCA within `retime_tolerance`, not by contact id.
+
+*Why:* priority that didn't pre-empt meant a higher-priority rule added later
+scheduled nothing. Re-planning on every save threw away operators' edits. A
+routine TLE update changed contact ids and brought cancelled passes back
+(CON-1, CON-6, CON-17).
+
+## D24. A satellite that never sets gets one contact per UTC day
+
+If a pass covers the whole prediction window, it's split into UTC days
+(`continuous: true`, AOS 00:00, LOS 24:00). Days cut by the window's edges
+stay partial. Partial contacts can't be scheduled.
+
+*Why:* a single window-long partial contact could never be scheduled, so GEO
+satellites couldn't be used at all (CON-5). Daily windows let activities
+anchor to a time of day with the existing AOS + offset model.
+*Rejected for now:* wall-clock or cron activities with no contact. That's a
+bigger feature (evaluation, scheduling gap 3).
+
+## D25. Interrupted runs are recorded, not resumed
+
+Every active run has a small record in `active_runs`, which is deleted when
+it ends. At startup, leftovers are recorded as failed runs (`interrupted:
+true`), their Script Runner scripts are stopped, and unattended ones raise
+an alert. Runs are not resumed.
+
+*Why:* after a crash, runs used to vanish without history or alert, and
+their scripts kept running unsupervised (ENG-8). Resuming safely needs
+durable step state and an operator decision, which is a larger feature
+(evaluation GAP-2).
+

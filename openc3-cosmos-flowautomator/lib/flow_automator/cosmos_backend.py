@@ -246,8 +246,9 @@ class TokenAuthorizer:
                 headers={"Authorization": token, "Content-Type": "application/json-rpc"},
                 timeout=self.timeout,
             )
-        except requests.RequestException as error:
-            raise AuthError(f"Could not verify token: {error}", 503) from None
+        except requests.RequestException:
+            # Not the exception text: it names internal hosts and ports
+            raise AuthError("Could not verify the token: the COSMOS API didn't answer", 503) from None
         if response.status_code in (401, 403):
             raise AuthError(
                 "Not authorized" if not write else "Changing flows needs the script_run permission",
