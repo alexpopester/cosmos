@@ -167,6 +167,28 @@ Per-satellite polled sources: subclass `TleSource` in `tle_sources.py` and
 register it. Scope-wide feeds (like a new file format or protocol): add to
 `TleIntake` in `tle_inputs.py` so the safeguards apply.
 
+### Record or extend the demo walkthrough
+
+`demo/walkthrough.mjs` is a captioned tour of the demo (~12 min) for screen
+recording; `demo/walkthrough.sh` opens a separate Chrome window (remote
+debugging on 127.0.0.1:9222) and drives it from the Playwright container:
+
+```bash
+COSMOS_PASSWORD=... demo/walkthrough.sh                  # record that window yourself
+COSMOS_PASSWORD=... OBS_RECORD=1 demo/walkthrough.sh     # OBS starts/stops itself (enable its WebSocket server)
+COSMOS_PASSWORD=... HEADLESS=1 VIDEO_DIR=video demo/walkthrough.sh   # rehearse; video in demo/video/
+```
+
+`SPEED` scales every pause (default 0.75). To add a part, write another
+`await section('name', async () => { ... })` block in the main sequence; a
+failing section is logged and skipped. Build it from the helpers: `say()`
+for a caption (placed away from the last thing pointed at), `point()` to
+move the cursor and optionally click, `menu()`, `openFlow()`, `node()`,
+`show('flow'|'both'|'log')`, `typeInto()`, `waitRunEnd()`. Sections before
+"live downlink" are timed against the demo pass, so add new parts after it
+unless they're short. The script turns COSMOS alert toasts off while it runs
+and restores them, the scheduler and the armed temperature watch at the end.
+
 ### Add an expression function
 
 `_SAFE_FUNCTIONS` in `expressions.py`, its docstring, the README table,
