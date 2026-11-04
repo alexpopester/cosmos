@@ -4,9 +4,45 @@
 -->
 
 <template>
-  <div v-if="approvals.length" class="fa-approvals">
+  <div
+    v-if="approvals.length"
+    class="fa-approvals"
+    :class="{ 'fa-approvals-min': minimized }"
+  >
+    <!-- Minimized: a small pill, so the cards stop covering the flow. A new approval reopens it -->
+    <v-btn
+      v-if="minimized"
+      size="small"
+      color="warning"
+      variant="flat"
+      prepend-icon="mdi-hand-back-right"
+      append-icon="mdi-chevron-down"
+      class="fa-approvals-restore"
+      title="Show the approval cards"
+      @click="minimized = false"
+    >
+      {{ approvals.length }} awaiting approval
+    </v-btn>
+    <div v-else class="fa-approvals-head">
+      <v-icon size="16" color="warning" class="mr-1">
+        mdi-hand-back-right
+      </v-icon>
+      {{ approvals.length }} awaiting approval
+      <v-spacer />
+      <v-btn
+        size="x-small"
+        variant="text"
+        prepend-icon="mdi-chevron-up"
+        class="fa-approvals-minimize"
+        title="Shrink to a small button so you can see what's underneath"
+        @click="minimize"
+      >
+        Minimize
+      </v-btn>
+    </div>
     <v-card
       v-for="a in approvals"
+      v-show="!minimized"
       :key="a.id"
       class="fa-approval mb-2"
       :class="{ 'fa-approval-hazardous': a.reason.includes('HAZARDOUS') }"
@@ -158,9 +194,23 @@ export default {
   },
   emits: ['decided'],
   data() {
-    return { busy: null, answers: {} }
+    return { busy: null, answers: {}, minimized: false, minimizedIds: [] }
+  },
+  watch: {
+    approvals(list) {
+      if (
+        this.minimized &&
+        list.some((a) => !this.minimizedIds.includes(a.id))
+      ) {
+        this.minimized = false
+      }
+    },
   },
   methods: {
+    minimize() {
+      this.minimizedIds = this.approvals.map((a) => a.id)
+      this.minimized = true
+    },
     answer(approval, value) {
       const empty = value === undefined || value === null || value === ''
       const fallback = approval.ask.default
@@ -204,6 +254,22 @@ export default {
   z-index: 10;
   max-height: 70%;
   overflow-y: auto;
+}
+.fa-approvals.fa-approvals-min {
+  width: auto;
+  overflow: visible;
+}
+.fa-approvals-head {
+  display: flex;
+  align-items: center;
+  margin-bottom: 4px;
+  padding: 2px 4px 2px 10px;
+  border-radius: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  background: rgba(31, 47, 64, 0.95);
+  border: 1px solid #44515e;
 }
 .fa-approval {
   border-left: 4px solid rgb(var(--v-theme-warning));

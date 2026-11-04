@@ -253,7 +253,6 @@
     </template>
 
     <template v-else-if="flow">
-      <div class="text-subtitle-1 mb-3">Flow settings</div>
       <v-text-field
         v-model="settings.name"
         label="Name"

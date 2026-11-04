@@ -106,6 +106,32 @@ the saved version has problems, which disarms it. Arm a flow to let its
 triggers fire; **Run now** works either way. **Stop all** disarms every flow, stops every run and
 pauses the contact scheduler.
 
+### Finding your way around the Flows view
+
+- The toolbar has two rows. The first is what's open (Flows/Contacts, the
+  flow, View/Edit, New, Save) plus approvals, engine status and **Stop all**.
+  The second runs the open flow (Triggers armed, Mode, Run now, Dry run,
+  Stop) and, at the right, **Show: Flow / Both / Log**.
+- **View / Edit**: View hides the node palette and the settings panel and
+  locks the canvas (no dragging, wiring or deleting), for watching runs.
+  Edit brings them back. New and Import switch to Edit.
+- In Edit, each side panel folds to a thin rail with its **«/»** button;
+  click the rail to open it again. The palette has a filter box.
+- **Show: Flow / Both / Log** (also the View menu): show only the flow (the
+  log folds to its tab bar with a **Show log** button), both, or only the log
+  (with a **Show flow** button). Drag the bar between flow and log to
+  resize. Clicking a step in log-only brings the flow back to show it.
+- Approval cards float over the flow; **Minimize** shrinks them to a small
+  button so you can see the nodes underneath. A new approval opens them
+  again. In log-only and Contacts they sit above the content instead.
+- **All running** (first log tab, or click the engine chip in the toolbar):
+  every run in progress in every flow, with sub-flows counted under the run
+  that called them and runs awaiting approval marked. Click a row to open
+  that flow and follow the run. Finished runs are in View > Run History.
+- Wide flows open at a readable zoom showing their start; View > Fit to
+  Screen shows the whole flow.
+- The layout and View/Edit choice are remembered per browser.
+
 ### Execution modes
 
 | Mode | Operator approval |

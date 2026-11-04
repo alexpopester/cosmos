@@ -112,6 +112,11 @@ and clean up, and leave the scheduler and other flows as they found them.
 (~5 min). Non-alert tests turn COSMOS notifications off while they run,
 because a tool can't dismiss COSMOS alert toasts.
 
+The editor remembers its layout (View/Edit, folded panels, flow/split/log,
+log height) in `localStorage` under `openc3.flowautomator.layout`. Tests run
+in a fresh browser so they get the defaults (Edit, both panels, split);
+`layout_test.mjs` covers the layout and clears the key when it's done.
+
 ## Recipes
 
 ### Add a node type

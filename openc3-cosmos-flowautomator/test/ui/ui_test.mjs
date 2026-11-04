@@ -82,10 +82,10 @@ try {
   const box = await canvas.boundingBox()
   await page
     .locator('.fa-palette-item', { hasText: 'Send command' })
-    .dragTo(canvas, { targetPosition: { x: box.width * 0.55, y: box.height * 0.35 } })
+    .dragTo(canvas, { targetPosition: { x: box.width * 0.45, y: box.height * 0.18 } })
   await page
     .locator('.fa-palette-item', { hasText: 'Wait for telemetry' })
-    .dragTo(canvas, { targetPosition: { x: box.width * 0.55, y: box.height * 0.75 } })
+    .dragTo(canvas, { targetPosition: { x: box.width * 0.45, y: box.height * 0.82 } })
   const nodeCount = await page.locator('.vue-flow__node').count()
   check('drag nodes from palette onto canvas', nodeCount === 3, `${nodeCount} nodes`)
 

@@ -21,7 +21,7 @@
     />
     <div class="fa-header">
       <v-icon size="16" class="mr-1">{{ spec.icon }}</v-icon>
-      <span class="fa-title">{{ data.config.label || spec.label }}</span>
+      <span class="fa-title" :title="title">{{ title }}</span>
       <v-spacer />
       <v-icon
         v-if="data.config.require_approval && !spec.trigger"
@@ -102,6 +102,9 @@ export default {
     outputs() {
       return outputsFor(this.data.kind, this.data.config)
     },
+    title() {
+      return this.data.config.label || this.spec.label
+    },
     summary() {
       if (!this.spec.summary) return ''
       return this.spec.summary(this.data.config, this.flowContext) || ''
@@ -126,13 +129,13 @@ export default {
 
 <style>
 .fa-node {
-  width: 230px;
+  width: 240px;
   border-radius: 6px;
   border: 1px solid #44515e;
   border-left: 4px solid var(--fa-color);
   background: rgb(31, 47, 64);
   color: #e6edf3;
-  font-size: 12px;
+  font-size: 13px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
 }
 .fa-node.fa-selected {
@@ -187,19 +190,23 @@ export default {
 }
 .fa-title {
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow-wrap: anywhere;
+  line-height: 1.3;
 }
 .fa-summary {
   padding: 4px 8px;
   font-family: monospace;
-  font-size: 11px;
-  color: #b8c4cf;
+  font-size: 12px;
+  line-height: 1.35;
+  color: #d3dde6;
   overflow: hidden;
   display: -webkit-box;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
-  word-break: break-all;
+  overflow-wrap: anywhere;
   min-height: 14px;
 }
 .fa-outputs {
@@ -207,19 +214,21 @@ export default {
 }
 .fa-output {
   position: relative;
-  height: 18px;
+  min-height: 20px;
   display: flex;
   align-items: center;
   justify-content: flex-end;
   padding-right: 12px;
 }
 .fa-output-label {
-  font-size: 10px;
-  color: #9fb0bf;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: #c3d0dc;
   text-transform: uppercase;
 }
 .fa-output-error .fa-output-label {
-  color: #e57373;
+  color: #ff8a80;
 }
 .fa-node .fa-handle {
   width: 10px;

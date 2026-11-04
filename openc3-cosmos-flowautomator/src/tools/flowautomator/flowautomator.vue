@@ -5,125 +5,258 @@
 -->
 
 <template>
-  <div class="fa-root">
+  <div class="fa-root" :style="rootHeight ? { height: `${rootHeight}px` } : {}">
     <top-bar :menus="menus" :title="title" />
-    <v-toolbar density="compact" class="fa-toolbar px-2" color="surface">
-      <v-btn-toggle
-        v-model="view"
-        mandatory
-        density="compact"
-        variant="outlined"
-        divided
-        class="fa-view-toggle mr-3"
-        @update:model-value="viewChanged"
-      >
-        <v-btn value="flows" size="small" prepend-icon="mdi-sitemap-outline">
-          Flows
-        </v-btn>
-        <v-btn
-          value="contacts"
-          size="small"
-          prepend-icon="mdi-satellite-uplink"
-        >
-          Contacts
-          <v-badge
-            v-if="contactStatus.needs_review"
-            :content="contactStatus.needs_review"
-            color="warning"
-            inline
-          />
-        </v-btn>
-      </v-btn-toggle>
-      <template v-if="view === 'flows'">
-        <!-- Always empty so typing searches from scratch; the open flow's name
-           shows as the placeholder -->
-        <v-autocomplete
-          v-model:search="flowSearch"
-          :model-value="null"
-          :items="flows"
-          item-title="name"
-          item-value="id"
-          :placeholder="
-            flowId ? flowSettings.name : 'Open a flow (type to search)'
-          "
-          persistent-placeholder
-          auto-select-first
+    <!-- Row 1: what's open and global status. Row 2 (Flows): running the flow and the layout -->
+    <v-sheet class="fa-toolbar" color="surface">
+      <div class="fa-toolbar-row">
+        <v-btn-toggle
+          v-model="view"
+          mandatory
           density="compact"
           variant="outlined"
-          hide-details
-          class="fa-flow-select mr-2"
-          @update:model-value="(id) => id && openFlow(id)"
-          @update:menu="(open) => open && refreshFlows()"
+          divided
+          class="fa-view-toggle mr-3"
+          @update:model-value="viewChanged"
         >
-          <template #item="{ props: itemProps, item }">
-            <v-list-item v-bind="itemProps">
-              <template #append>
-                <v-chip
-                  v-if="item.raw.armed"
-                  size="x-small"
-                  color="success"
-                  label
-                >
-                  armed
-                </v-chip>
-                <v-chip
-                  v-if="item.raw.active_runs"
-                  size="x-small"
-                  color="primary"
-                  label
-                  class="ml-1"
-                >
-                  running
-                </v-chip>
-              </template>
-            </v-list-item>
-          </template>
-        </v-autocomplete>
-        <v-btn
-          size="small"
-          variant="tonal"
-          prepend-icon="mdi-plus"
-          class="mr-2"
-          @click="newFlow"
-        >
-          New
-        </v-btn>
-        <v-btn
-          size="small"
-          variant="tonal"
-          prepend-icon="mdi-content-save"
-          :color="dirty ? 'primary' : undefined"
-          class="mr-2"
-          :loading="saving"
-          @click="save"
-        >
-          Save
-        </v-btn>
-        <v-chip
-          v-if="flowVersion"
-          size="x-small"
-          label
-          class="mr-2 fa-version-chip"
-          :title="`Version ${flowVersion}. File > History shows every version.`"
-          @click="openHistory()"
-        >
-          v{{ flowVersion }}
-        </v-chip>
-        <span v-if="dirty" class="text-caption text-medium-emphasis mr-3">
-          unsaved changes
-        </span>
-        <v-chip
-          v-if="flowSettings.dry_run"
-          size="x-small"
-          label
-          color="info"
-          variant="flat"
-          class="mr-2 fa-dry-mode-chip"
-          title="Every run of this flow is a dry run: nothing is sent"
-        >
-          DRY-RUN MODE
-        </v-chip>
-        <v-divider vertical class="mx-2" />
+          <v-btn value="flows" size="small" prepend-icon="mdi-sitemap-outline">
+            Flows
+          </v-btn>
+          <v-btn
+            value="contacts"
+            size="small"
+            prepend-icon="mdi-satellite-uplink"
+          >
+            Contacts
+            <v-badge
+              v-if="contactStatus.needs_review"
+              :content="contactStatus.needs_review"
+              color="warning"
+              inline
+            />
+          </v-btn>
+        </v-btn-toggle>
+        <template v-if="view === 'flows'">
+          <!-- Always empty so typing searches from scratch; the open flow's name
+             shows as the placeholder -->
+          <v-autocomplete
+            v-model:search="flowSearch"
+            :model-value="null"
+            :items="flows"
+            item-title="name"
+            item-value="id"
+            :placeholder="
+              flowId ? flowSettings.name : 'Open a flow (type to search)'
+            "
+            persistent-placeholder
+            auto-select-first
+            density="compact"
+            variant="outlined"
+            hide-details
+            prepend-inner-icon="mdi-sitemap-outline"
+            class="fa-flow-select mr-2"
+            :class="{ 'fa-flow-open': flowId }"
+            :title="
+              flowId
+                ? `Open: ${flowSettings.name}. Type to open another flow.`
+                : ''
+            "
+            @update:model-value="(id) => id && openFlow(id)"
+            @update:menu="(open) => open && refreshFlows()"
+          >
+            <template #item="{ props: itemProps, item }">
+              <v-list-item v-bind="itemProps">
+                <template #append>
+                  <v-chip
+                    v-if="item.raw.armed"
+                    size="x-small"
+                    color="success"
+                    label
+                  >
+                    armed
+                  </v-chip>
+                  <v-chip
+                    v-if="item.raw.active_runs"
+                    size="x-small"
+                    color="primary"
+                    label
+                    class="ml-1"
+                  >
+                    running
+                  </v-chip>
+                </template>
+              </v-list-item>
+            </template>
+          </v-autocomplete>
+          <v-chip
+            v-if="flowVersion"
+            size="small"
+            label
+            class="mr-2 fa-version-chip"
+            :title="`Version ${flowVersion}. Click for every version.`"
+            @click="openHistory()"
+          >
+            v{{ flowVersion }}
+          </v-chip>
+          <v-chip
+            v-if="dirty"
+            size="small"
+            label
+            color="warning"
+            variant="tonal"
+            class="mr-2"
+          >
+            unsaved changes
+          </v-chip>
+          <v-chip
+            v-if="flowSettings.dry_run"
+            size="small"
+            label
+            color="info"
+            variant="flat"
+            class="mr-2 fa-dry-mode-chip"
+            title="Every run of this flow is a dry run: nothing is sent"
+          >
+            DRY-RUN MODE
+          </v-chip>
+          <v-divider vertical class="mx-2" />
+          <v-btn-toggle
+            :model-value="editing ? 'edit' : 'view'"
+            mandatory
+            density="compact"
+            variant="outlined"
+            divided
+            color="primary"
+            class="fa-edit-toggle mr-2"
+            @update:model-value="(v) => setEditing(v === 'edit')"
+          >
+            <v-btn
+              value="view"
+              size="small"
+              prepend-icon="mdi-eye-outline"
+              title="Watch runs: hides the node palette and settings and locks the canvas"
+            >
+              View
+            </v-btn>
+            <v-btn
+              value="edit"
+              size="small"
+              prepend-icon="mdi-pencil"
+              title="Change the flow: shows the node palette and settings"
+            >
+              Edit
+            </v-btn>
+          </v-btn-toggle>
+          <v-btn
+            size="small"
+            variant="tonal"
+            prepend-icon="mdi-plus"
+            class="mr-2"
+            title="Start a new flow"
+            @click="newFlow"
+          >
+            New
+          </v-btn>
+          <v-btn
+            v-if="editing || dirty"
+            size="small"
+            :variant="dirty ? 'flat' : 'tonal'"
+            prepend-icon="mdi-content-save"
+            :color="dirty ? 'primary' : undefined"
+            class="mr-2"
+            :loading="saving"
+            @click="save"
+          >
+            Save
+          </v-btn>
+        </template>
+        <template v-else>
+          <span class="text-body-2 fa-status-text">
+            <template v-if="contactStatus.paused">
+              <v-icon color="warning" size="small">mdi-pause-circle</v-icon>
+              Scheduler paused
+            </template>
+            <template v-else>
+              {{ contactStatus.scheduled || 0 }} scheduled ·
+              {{ contactStatus.running || 0 }} running
+            </template>
+          </span>
+        </template>
+        <!-- Status and Stop all stay together at the right, also when the row wraps -->
+        <div class="fa-toolbar-end">
+          <v-menu v-if="allApprovals.length" max-width="560">
+            <template #activator="{ props: menuProps }">
+              <v-chip
+                v-bind="menuProps"
+                size="small"
+                color="warning"
+                variant="flat"
+                class="mr-2 fa-approvals-chip"
+                prepend-icon="mdi-hand-back-right"
+              >
+                {{ allApprovals.length }} awaiting approval
+              </v-chip>
+            </template>
+            <v-list density="compact">
+              <v-list-item
+                v-for="a in allApprovals"
+                :key="a.id"
+                :title="`${a.flow_name}: ${a.label}`"
+                :subtitle="a.preview"
+                prepend-icon="mdi-hand-back-right"
+                @click="openApproval(a)"
+              />
+            </v-list>
+          </v-menu>
+          <!-- Opens to the left: below, it would cover the Show buttons on the second row -->
+          <v-tooltip location="start" open-delay="300">
+            <template #activator="{ props: tip }">
+              <v-chip
+                v-bind="tip"
+                size="small"
+                :color="engineOnline ? 'success' : 'error'"
+                variant="tonal"
+                class="mr-2 fa-engine-chip"
+                @click="showAllRunning"
+              >
+                <v-icon start size="small">
+                  {{ engineOnline ? 'mdi-engine' : 'mdi-engine-off' }}
+                </v-icon>
+                <template v-if="engineOnline">
+                  {{ engineStatus.armed }} armed ·
+                  {{ engineStatus.active_runs.length }} running
+                </template>
+                <template v-else>Engine offline</template>
+              </v-chip>
+            </template>
+            <span v-if="engineOnline">
+              Click to see every running flow. Flow engine is running. Triggers
+              checked
+              {{ engineStatus.triggers.watching }} ways.
+              <span v-if="engineStatus.triggers.error">
+                Last error: {{ engineStatus.triggers.error }}
+              </span>
+            </span>
+            <span v-else>
+              Can't reach the FLOW_ENGINE microservice at {{ routePrefix }}.
+              {{ engineError }}
+            </span>
+          </v-tooltip>
+          <v-btn
+            size="small"
+            color="error"
+            variant="flat"
+            prepend-icon="mdi-octagon"
+            title="Disarm every flow, stop every run and pause the contact scheduler"
+            @click="confirmStopAll = true"
+          >
+            Stop all
+          </v-btn>
+        </div>
+      </div>
+
+      <div v-if="view === 'flows'" class="fa-toolbar-row fa-run-row">
+        <span class="fa-group-label">Triggers</span>
         <v-switch
           :model-value="armed"
           :disabled="!flowId"
@@ -132,17 +265,24 @@
           hide-details
           inset
           class="flex-grow-0 mr-1"
+          :title="
+            armed
+              ? 'Armed: triggers can start runs'
+              : 'Disarmed: triggers are ignored'
+          "
           @update:model-value="setArmed"
         />
         <span class="text-body-2 mr-3" :class="armed ? 'text-success' : ''">
           {{ armed ? 'Armed' : 'Disarmed' }}
         </span>
+        <span class="fa-group-label">Mode</span>
         <v-btn-toggle
           v-model="flowSettings.mode"
           mandatory
           density="compact"
           variant="outlined"
           divided
+          color="primary"
           class="fa-mode-toggle mr-3"
           @update:model-value="changed"
         >
@@ -211,140 +351,149 @@
           color="warning"
           prepend-icon="mdi-stop"
           class="mr-2"
+          title="Stop this flow's runs"
           :disabled="!activeRunIds.length"
           @click="stopFlowRuns"
         >
           Stop
         </v-btn>
-      </template>
-      <template v-else>
-        <span class="text-body-2 text-medium-emphasis">
-          <template v-if="contactStatus.paused">
-            <v-icon color="warning" size="small">mdi-pause-circle</v-icon>
-            Scheduler paused
-          </template>
-          <template v-else>
-            {{ contactStatus.scheduled || 0 }} scheduled ·
-            {{ contactStatus.running || 0 }} running
-          </template>
-        </span>
-      </template>
-      <v-spacer />
-      <v-menu v-if="allApprovals.length" max-width="560">
-        <template #activator="{ props: menuProps }">
-          <v-chip
-            v-bind="menuProps"
+        <v-spacer />
+        <span class="fa-group-label">Show</span>
+        <v-btn-toggle
+          v-model="layout"
+          mandatory
+          density="compact"
+          variant="outlined"
+          divided
+          color="primary"
+          class="fa-layout-toggle"
+        >
+          <v-btn
+            value="flow"
             size="small"
-            color="warning"
-            variant="flat"
-            class="mr-2 fa-approvals-chip"
-            prepend-icon="mdi-hand-back-right"
+            prepend-icon="mdi-sitemap-outline"
+            title="Only the flow: the log folds to a bar at the bottom"
           >
-            {{ allApprovals.length }} awaiting approval
-          </v-chip>
-        </template>
-        <v-list density="compact">
-          <v-list-item
-            v-for="a in allApprovals"
-            :key="a.id"
-            :title="`${a.flow_name}: ${a.label}`"
-            :subtitle="a.preview"
-            prepend-icon="mdi-hand-back-right"
-            @click="openApproval(a)"
-          />
-        </v-list>
-      </v-menu>
-      <v-tooltip location="bottom">
-        <template #activator="{ props: tip }">
-          <v-chip
-            v-bind="tip"
+            Flow
+          </v-btn>
+          <v-btn
+            value="split"
             size="small"
-            :color="engineOnline ? 'success' : 'error'"
-            variant="tonal"
-            class="mr-2"
+            prepend-icon="mdi-view-split-horizontal"
+            title="The flow with the runs and log below it"
           >
-            <v-icon start size="small">
-              {{ engineOnline ? 'mdi-engine' : 'mdi-engine-off' }}
-            </v-icon>
-            <template v-if="engineOnline">
-              {{ engineStatus.armed }} armed ·
-              {{ engineStatus.active_runs.length }} running
-            </template>
-            <template v-else>Engine offline</template>
-          </v-chip>
-        </template>
-        <span v-if="engineOnline">
-          Flow engine is running. Triggers checked
-          {{ engineStatus.triggers.watching }} ways.
-          <span v-if="engineStatus.triggers.error">
-            Last error: {{ engineStatus.triggers.error }}
-          </span>
-        </span>
-        <span v-else>
-          Can't reach the FLOW_ENGINE microservice at {{ routePrefix }}.
-          {{ engineError }}
-        </span>
-      </v-tooltip>
-      <v-btn
-        size="small"
-        color="error"
-        variant="flat"
-        prepend-icon="mdi-octagon"
-        @click="confirmStopAll = true"
-      >
-        Stop all
-      </v-btn>
-    </v-toolbar>
+            Both
+          </v-btn>
+          <v-btn
+            value="log"
+            size="small"
+            prepend-icon="mdi-format-list-bulleted"
+            title="Only the runs and log, full height"
+          >
+            Log
+          </v-btn>
+        </v-btn-toggle>
+      </div>
+    </v-sheet>
 
     <div v-if="view === 'contacts'" class="fa-contacts-wrap">
       <approval-panel
         :approvals="allApprovals"
         :now="engineStatus.time"
         show-flow
+        class="fa-approvals-inline"
         @decided="pollStatus"
       />
       <contacts-view :flows="flows" @open-run="openActivityRun" />
     </div>
     <div v-show="view === 'flows'" class="fa-main">
-      <div class="fa-palette">
-        <div v-for="category in categories" :key="category.key" class="mb-2">
-          <div
-            class="text-caption text-uppercase px-2 pt-2 pb-1 fa-category"
-            :style="{ color: category.color }"
-          >
-            {{ category.label }}
+      <template v-if="editing">
+        <div v-if="showPalette" class="fa-palette">
+          <!-- Header and filter stay put while the list scrolls -->
+          <div class="fa-palette-top">
+            <div class="fa-panel-head">
+              <span>Add nodes</span>
+              <v-spacer />
+              <v-btn
+                icon="mdi-chevron-double-left"
+                size="x-small"
+                variant="text"
+                title="Hide the node palette"
+                class="fa-palette-hide"
+                @click="showPalette = false"
+              />
+            </div>
+            <v-text-field
+              v-model="paletteFilter"
+              placeholder="Filter nodes"
+              prepend-inner-icon="mdi-magnify"
+              density="compact"
+              variant="outlined"
+              hide-details
+              clearable
+              class="mx-2 mb-1 fa-palette-filter"
+            />
           </div>
-          <div
-            v-for="(spec, type) in typesIn(category.key)"
-            :key="type"
-            class="fa-palette-item"
-            :style="{ '--fa-color': category.color }"
-            draggable="true"
-            :title="spec.description"
-            @dragstart="onDragStart($event, type)"
-            @dblclick="addNode(type)"
-          >
-            <v-icon size="16" class="mr-2" :color="category.color">
-              {{ spec.icon }}
-            </v-icon>
-            {{ spec.label }}
+          <div v-for="category in paletteCategories" :key="category.key">
+            <div
+              class="px-2 pt-2 pb-1 fa-category"
+              :style="{ color: category.color }"
+            >
+              {{ category.label }}
+            </div>
+            <div
+              v-for="(spec, type) in category.types"
+              :key="type"
+              class="fa-palette-item"
+              :style="{ '--fa-color': category.color }"
+              draggable="true"
+              :title="spec.description"
+              @dragstart="onDragStart($event, type)"
+              @dblclick="addNode(type)"
+            >
+              <v-icon size="16" class="mr-2" :color="category.color">
+                {{ spec.icon }}
+              </v-icon>
+              {{ spec.label }}
+            </div>
+          </div>
+          <div class="text-caption fa-hint pa-2">
+            Drag a node onto the canvas, or double-click it.
           </div>
         </div>
-      </div>
+        <div
+          v-else
+          class="fa-rail fa-rail-left"
+          title="Show the node palette"
+          @click="showPalette = true"
+        >
+          <v-icon size="18">mdi-chevron-double-right</v-icon>
+          <span class="fa-rail-label">Add nodes</span>
+        </div>
+      </template>
 
-      <div class="fa-center">
-        <div class="fa-canvas" @drop="onDrop" @dragover.prevent>
-          <approval-panel
-            :approvals="flowApprovals"
-            :now="engineStatus.time"
-            @decided="pollStatus"
-          />
+      <div ref="center" class="fa-center">
+        <!-- Floats over the canvas; sits above the log instead of covering it in log-only -->
+        <approval-panel
+          :approvals="flowApprovals"
+          :now="engineStatus.time"
+          :class="{ 'fa-approvals-inline': layout === 'log' }"
+          @decided="pollStatus"
+        />
+        <div
+          v-show="layout !== 'log'"
+          class="fa-canvas"
+          @drop="onDrop"
+          @dragover.prevent
+        >
           <VueFlow
             id="flow-automator"
             v-model:nodes="nodes"
             v-model:edges="edges"
             :default-edge-options="defaultEdgeOptions"
-            :delete-key-code="['Delete', 'Backspace']"
+            :delete-key-code="editing ? ['Delete', 'Backspace'] : null"
+            :nodes-draggable="editing"
+            :nodes-connectable="editing"
             :snap-to-grid="true"
             :snap-grid="[10, 10]"
             :min-zoom="0.2"
@@ -363,42 +512,132 @@
               <flow-node v-bind="nodeProps" />
             </template>
             <Background pattern-color="#3a4a5a" :gap="20" />
-            <Controls />
+            <Controls :show-interactive="false" />
             <MiniMap pannable zoomable :node-color="miniMapColor" />
             <div v-if="!flowId && !nodes.length" class="fa-empty">
               <v-icon size="48" class="mb-2">mdi-sitemap-outline</v-icon>
-              <div>Open a flow, or drag nodes from the left to start one.</div>
+              <div>Open a flow, or click New to start one.</div>
+            </div>
+            <div v-if="!editing && flowId" class="fa-view-badge">
+              <v-icon size="14" class="mr-1">mdi-lock-outline</v-icon>
+              Viewing · switch to Edit to change this flow
             </div>
           </VueFlow>
         </div>
-        <div class="fa-bottom">
+        <div
+          v-if="layout === 'split'"
+          class="fa-splitter"
+          title="Drag to resize"
+          @pointerdown="startResize"
+        />
+        <div
+          class="fa-bottom"
+          :class="`fa-bottom-${layout}`"
+          :style="layout === 'split' ? { height: `${logHeight}px` } : {}"
+        >
           <run-panel
             ref="runPanel"
             :runs="runs"
             :run="selectedRun"
             :problems="problems"
             :node-label="nodeLabel"
+            :active-runs="engineStatus.active_runs"
+            :flow-id="flowId"
+            :collapsed="layout === 'flow'"
             @select-run="selectRun"
             @stop-run="stopRun"
             @focus-node="focusNode"
             @open-version="openHistory"
-          />
+            @open-run="openRunFromList"
+            @expand="layout = 'split'"
+          >
+            <template #actions>
+              <template v-if="layout === 'flow'">
+                <v-btn
+                  size="small"
+                  variant="tonal"
+                  color="primary"
+                  prepend-icon="mdi-chevron-up"
+                  class="fa-show-log"
+                  title="Show the runs and log under the flow"
+                  @click="layout = 'split'"
+                >
+                  Show log
+                </v-btn>
+              </template>
+              <template v-else-if="layout === 'split'">
+                <v-btn
+                  size="small"
+                  variant="text"
+                  icon="mdi-chevron-down"
+                  class="fa-hide-log"
+                  title="Hide the log (Show > Flow)"
+                  @click="layout = 'flow'"
+                />
+                <v-btn
+                  size="small"
+                  variant="text"
+                  icon="mdi-arrow-expand-up"
+                  class="fa-max-log"
+                  title="Log full height (Show > Log)"
+                  @click="layout = 'log'"
+                />
+              </template>
+              <v-btn
+                v-else
+                size="small"
+                variant="tonal"
+                color="primary"
+                prepend-icon="mdi-sitemap-outline"
+                class="fa-show-flow"
+                title="Show the flow above the log again"
+                @click="layout = 'split'"
+              >
+                Show flow
+              </v-btn>
+            </template>
+          </run-panel>
         </div>
       </div>
 
-      <div class="fa-side">
-        <node-inspector
-          :node="selectedNode"
-          :flow="flowSettings"
-          :flows="flows"
-          :scripts="scripts"
-          :problems="
-            selectedNode ? flowContext.nodeProblems[selectedNode.id] : []
-          "
-          @changed="onInspectorChange"
-          @delete-node="deleteSelected"
-        />
-      </div>
+      <template v-if="editing">
+        <div v-if="showInspector" class="fa-side">
+          <div class="fa-panel-head">
+            <span>{{ selectedNode ? 'Node settings' : 'Flow settings' }}</span>
+            <v-spacer />
+            <v-btn
+              icon="mdi-chevron-double-right"
+              size="x-small"
+              variant="text"
+              title="Hide the settings panel"
+              class="fa-inspector-hide"
+              @click="showInspector = false"
+            />
+          </div>
+          <node-inspector
+            :node="selectedNode"
+            :flow="flowSettings"
+            :flows="flows"
+            :scripts="scripts"
+            :problems="
+              selectedNode ? flowContext.nodeProblems[selectedNode.id] : []
+            "
+            @changed="onInspectorChange"
+            @delete-node="deleteSelected"
+          />
+        </div>
+        <div
+          v-else
+          class="fa-rail fa-rail-right"
+          title="Show the settings panel"
+          @click="showInspector = true"
+        >
+          <v-icon size="18">mdi-chevron-double-left</v-icon>
+          <span class="fa-rail-label">
+            {{ selectedNode ? 'Node settings' : 'Flow settings' }}
+          </span>
+        </div>
+      </template>
     </div>
 
     <v-dialog v-model="confirmStopAll" max-width="440">
@@ -679,6 +918,19 @@ import {
 
 const STATUS_POLL_MS = 1000
 const RUN_POLL_MS = 500
+const LAYOUT_KEY = 'openc3.flowautomator.layout'
+const LAYOUTS = ['flow', 'split', 'log']
+// Below this zoom node text is too small to read
+const READABLE_ZOOM = 0.6
+
+// Panel layout is a per-browser convenience; storage can be missing or blocked
+function loadLayout() {
+  try {
+    return JSON.parse(localStorage.getItem(LAYOUT_KEY)) || {}
+  } catch {
+    return {}
+  }
+}
 
 function blankSettings() {
   return {
@@ -716,14 +968,35 @@ export default {
     return { flowContext: this.flowContext }
   },
   setup() {
-    const { screenToFlowCoordinate, fitView, setCenter, findNode, viewport } =
-      useVueFlow('flow-automator')
-    return { screenToFlowCoordinate, fitView, setCenter, findNode, viewport }
+    const {
+      screenToFlowCoordinate,
+      fitView,
+      setCenter,
+      setViewport,
+      findNode,
+      viewport,
+    } = useVueFlow('flow-automator')
+    return {
+      screenToFlowCoordinate,
+      fitView,
+      setCenter,
+      setViewport,
+      findNode,
+      viewport,
+    }
   },
   data() {
+    const saved = loadLayout()
     return {
       title: 'Flow Automator',
       view: 'flows',
+      editing: saved.editing !== false,
+      showPalette: saved.showPalette !== false,
+      showInspector: saved.showInspector !== false,
+      layout: LAYOUTS.includes(saved.layout) ? saved.layout : 'split',
+      logHeight: Number(saved.logHeight) || 260,
+      paletteFilter: '',
+      rootHeight: null,
       showAudit: false,
       demoLoading: false,
       showHistory: false,
@@ -738,7 +1011,6 @@ export default {
       noteDialog: { show: false, note: '' },
       routePrefix: ROUTE_PREFIX,
       nodeTypes: NODE_TYPES,
-      categories: CATEGORIES,
       flows: [],
       flowSearch: '',
       flowId: null,
@@ -871,6 +1143,53 @@ export default {
                 this.showAudit = true
               },
             },
+            { divider: true },
+            {
+              label: 'Edit Mode',
+              checkbox: true,
+              checked: this.editing,
+              command: () => this.setEditing(!this.editing),
+            },
+            {
+              label: 'Show Node Palette',
+              checkbox: true,
+              checked: this.editing && this.showPalette,
+              command: () => this.togglePanel('showPalette'),
+            },
+            {
+              label: 'Show Settings Panel',
+              checkbox: true,
+              checked: this.editing && this.showInspector,
+              command: () => this.togglePanel('showInspector'),
+            },
+            { divider: true },
+            {
+              label: 'Flow Only',
+              icon: 'mdi-arrow-collapse-down',
+              command: () => {
+                this.layout = 'flow'
+              },
+            },
+            {
+              label: 'Flow and Log',
+              icon: 'mdi-view-split-horizontal',
+              command: () => {
+                this.layout = 'split'
+              },
+            },
+            {
+              label: 'Log Only',
+              icon: 'mdi-arrow-collapse-up',
+              command: () => {
+                this.layout = 'log'
+              },
+            },
+            {
+              label: 'All Running Flows',
+              icon: 'mdi-run-fast',
+              command: this.showAllRunning,
+            },
+            { divider: true },
             {
               label: 'Follow Live Runs',
               checkbox: true,
@@ -885,6 +1204,30 @@ export default {
     },
     contactStatus() {
       return this.engineStatus.contacts || {}
+    },
+    paletteCategories() {
+      const filter = (this.paletteFilter || '').trim().toLowerCase()
+      return CATEGORIES.map((category) => ({
+        ...category,
+        types: Object.fromEntries(
+          Object.entries(NODE_TYPES).filter(
+            ([, s]) =>
+              s.category === category.key &&
+              (!filter ||
+                s.label.toLowerCase().includes(filter) ||
+                (s.description || '').toLowerCase().includes(filter)),
+          ),
+        ),
+      })).filter((c) => Object.keys(c.types).length)
+    },
+    layoutState() {
+      return {
+        editing: this.editing,
+        showPalette: this.showPalette,
+        showInspector: this.showInspector,
+        layout: this.layout,
+        logHeight: this.logHeight,
+      }
     },
     selectedNode() {
       return this.nodes.find((n) => n.id === this.selectedNodeId) || null
@@ -934,6 +1277,13 @@ export default {
     selectedRun(run) {
       this.flowContext.nodeStatus = this.statusFromRun(run)
     },
+    layoutState(state) {
+      try {
+        localStorage.setItem(LAYOUT_KEY, JSON.stringify(state))
+      } catch {
+        // Storage blocked: the layout just isn't remembered
+      }
+    },
   },
   created() {
     const query = this.$route?.query || {}
@@ -954,7 +1304,16 @@ export default {
       .catch(() => {})
     window.addEventListener('beforeunload', this.beforeUnload)
   },
+  mounted() {
+    window.addEventListener('resize', this.fitHeight)
+    this.fitHeight()
+    // COSMOS's nav and banners can finish laying out after the tool mounts
+    this.fitHeightTimer = setTimeout(this.fitHeight, 600)
+  },
   beforeUnmount() {
+    window.removeEventListener('resize', this.fitHeight)
+    clearTimeout(this.fitHeightTimer)
+    this.stopResize()
     this.timers.forEach(clearInterval)
     clearTimeout(this.validateTimer)
     window.removeEventListener('beforeunload', this.beforeUnload)
@@ -985,6 +1344,7 @@ export default {
     },
     newFlow() {
       this.guardUnsaved(() => {
+        this.setEditing(true)
         this.loadFlow(null)
         this.addNode('trigger_manual', { x: 80, y: 120 })
         this.dirty = false
@@ -1208,6 +1568,7 @@ export default {
             const flow = JSON.parse(text)
             delete flow.id
             flow.armed = false
+            this.setEditing(true)
             this.loadFlow(flow)
             this.dirty = true
           } catch (error) {
@@ -1332,6 +1693,7 @@ export default {
     },
     openRunFromHistory(flowId, runId) {
       this.showRunHistory = false
+      if (runId) this.showLog()
       this.openActivityRun(flowId, runId)
     },
     viewChanged(view) {
@@ -1469,9 +1831,16 @@ export default {
     announceApprovals(approvals) {
       // Toast each new approval once, wherever it is, so operators notice
       // runs that triggers started in other flows
+      // Skip the ones already on screen as cards: the flow that's open, or all of them in Contacts
+      const onScreen = new Set(
+        (this.view === 'contacts' ? approvals : this.flowApprovals).map(
+          (a) => a.id,
+        ),
+      )
       for (const a of approvals) {
         if (this.seenApprovals.has(a.id)) continue
         this.seenApprovals.add(a.id)
+        if (onScreen.has(a.id)) continue
         const level = a.reason.includes('HAZARDOUS') ? 'serious' : 'caution'
         this.$notify[level]({
           title: `Approval needed: ${a.flow_name}`,
@@ -1515,19 +1884,80 @@ export default {
       this.flowContext.nodeProblems = byNode
     },
 
-    // ---- editing --------------------------------------------------------
-    typesIn(category) {
-      return Object.fromEntries(
-        Object.entries(NODE_TYPES).filter(([, s]) => s.category === category),
+    // ---- layout ---------------------------------------------------------
+    // Fill the window down to the COSMOS footer. A fixed calc(100vh - N) is wrong whenever the
+    // header, banners or footer differ, and pushed the log's bottom bar under the footer
+    fitHeight() {
+      if (!this.$el?.getBoundingClientRect) return
+      const top = this.$el.getBoundingClientRect().top + window.scrollY
+      const footer = document.getElementById('footer')
+      const footerHeight = footer ? footer.getBoundingClientRect().height : 0
+      this.rootHeight = Math.max(
+        420,
+        Math.floor(window.innerHeight - top - footerHeight - 8),
       )
     },
+    // View mode hides the palette and settings and locks the canvas; Edit brings back whichever
+    // side panels were open (both, if both had been folded away)
+    setEditing(value) {
+      this.editing = value
+      if (value && !this.showPalette && !this.showInspector) {
+        this.showPalette = true
+        this.showInspector = true
+      }
+    },
+    togglePanel(key) {
+      if (!this.editing) {
+        this.editing = true
+        this[key] = true
+      } else {
+        this[key] = !this[key]
+      }
+    },
+    showLog(tab) {
+      if (this.layout === 'flow') this.layout = 'split'
+      if (tab) this.$refs.runPanel.show(tab)
+    },
+    showAllRunning() {
+      this.view = 'flows'
+      this.showLog('running')
+    },
+    openRunFromList(flowId, runId) {
+      this.showLog()
+      this.openActivityRun(flowId, runId)
+    },
+    startResize(event) {
+      const center = this.$refs.center
+      if (!center) return
+      event.preventDefault()
+      const startY = event.clientY
+      const startHeight = this.logHeight
+      const max = center.clientHeight - 190 // keep the flow at its 180px minimum
+      this.resizeMove = (e) => {
+        const height = startHeight - (e.clientY - startY)
+        this.logHeight = Math.round(Math.max(90, Math.min(max, height)))
+      }
+      this.resizeEnd = () => this.stopResize()
+      window.addEventListener('pointermove', this.resizeMove)
+      window.addEventListener('pointerup', this.resizeEnd)
+      document.body.style.cursor = 'row-resize'
+    },
+    stopResize() {
+      if (!this.resizeMove) return
+      window.removeEventListener('pointermove', this.resizeMove)
+      window.removeEventListener('pointerup', this.resizeEnd)
+      this.resizeMove = null
+      document.body.style.cursor = ''
+    },
+
+    // ---- editing --------------------------------------------------------
     onDragStart(event, type) {
       event.dataTransfer.setData('application/x-flow-node', type)
       event.dataTransfer.effectAllowed = 'move'
     },
     onDrop(event) {
       const type = event.dataTransfer.getData('application/x-flow-node')
-      if (!type) return
+      if (!type || !this.editing) return
       event.preventDefault()
       const position = this.screenToFlowCoordinate({
         x: event.clientX,
@@ -1655,6 +2085,12 @@ export default {
       return node.data.config.label || NODE_TYPES[node.data.kind]?.label || id
     },
     focusNode(id) {
+      // From the log-only layout, bring the flow back so the node can be seen
+      if (this.layout === 'log') {
+        this.layout = 'split'
+        this.$nextTick(() => this.focusNode(id))
+        return
+      }
       const node = this.findNode(id)
       if (!node) return
       this.selectedNodeId = id
@@ -1666,8 +2102,27 @@ export default {
     onNodesInitialized() {
       if (this.fitPending) {
         this.fitPending = false
-        this.fitView({ padding: 0.15, maxZoom: 1 })
+        this.readableFit()
       }
+    },
+    // Fit the flow, but don't zoom out so far that node text can't be read: a wide flow opens at
+    // a readable zoom showing its start (the left), and View > Fit to Screen shows all of it
+    async readableFit() {
+      await this.fitView({ padding: 0.15, maxZoom: 1 })
+      if (!this.nodes.length || (this.viewport?.zoom || 1) >= READABLE_ZOOM) {
+        return
+      }
+      const canvas = this.$el.querySelector('.fa-canvas')
+      if (!canvas) return
+      const xs = this.nodes.map((n) => n.position.x)
+      const ys = this.nodes.map((n) => n.position.y)
+      const zoom = 0.8
+      const midY = (Math.min(...ys) + Math.max(...ys) + 90) / 2
+      this.setViewport({
+        x: 40 - Math.min(...xs) * zoom,
+        y: canvas.clientHeight / 2 - midY * zoom,
+        zoom,
+      })
     },
     miniMapColor(node) {
       return categoryColor(node.data?.kind)
@@ -1685,15 +2140,132 @@ export default {
 .fa-root {
   display: flex;
   flex-direction: column;
+  /* Until fitHeight() measures the real space */
   height: calc(100vh - 118px);
 }
 .fa-toolbar {
   flex: 0 0 auto;
   border-bottom: 1px solid rgba(255, 255, 255, 0.12);
 }
+/* Each row wraps on narrow screens instead of clipping buttons */
+.fa-toolbar-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  row-gap: 6px;
+  padding: 6px 8px;
+}
+.fa-run-row {
+  padding-top: 0;
+}
+.fa-toolbar-row > .v-divider--vertical {
+  align-self: stretch;
+}
+.fa-group-label {
+  margin-right: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #a9b8c6;
+}
+.fa-status-text {
+  color: #c9d4de;
+}
+/* The open flow's name is the placeholder: show it as normal text, not faded */
+.fa-flow-open input::placeholder {
+  color: #e6edf3;
+  opacity: 1;
+  font-weight: 600;
+}
 .fa-flow-select {
-  min-width: 220px;
-  max-width: 280px;
+  flex: 0 1 320px;
+  min-width: 240px;
+}
+.fa-toolbar-end {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+}
+/* Make the chosen option of every toggle obvious */
+.fa-toolbar .v-btn-group .v-btn.v-btn--active {
+  background: rgba(77, 172, 255, 0.3);
+  color: #fff;
+  font-weight: 700;
+}
+.fa-toolbar .v-btn-group .v-btn.v-btn--active .v-btn__overlay {
+  opacity: 0;
+}
+.fa-engine-chip {
+  cursor: pointer;
+}
+.fa-panel-head {
+  display: flex;
+  align-items: center;
+  padding: 6px 4px 6px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #e6edf3;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+.fa-rail {
+  flex: 0 0 30px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 8px;
+  cursor: pointer;
+  color: #c9d4de;
+  background: rgba(255, 255, 255, 0.03);
+  user-select: none;
+}
+.fa-rail:hover {
+  background: rgba(255, 255, 255, 0.09);
+  color: #fff;
+}
+.fa-rail-left {
+  border-right: 1px solid rgba(255, 255, 255, 0.12);
+}
+.fa-rail-right {
+  border-left: 1px solid rgba(255, 255, 255, 0.12);
+}
+.fa-rail-label {
+  writing-mode: vertical-rl;
+  margin-top: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.fa-rail-left .fa-rail-label {
+  transform: rotate(180deg);
+}
+.fa-hint {
+  color: #a9b8c6;
+}
+.fa-view-badge {
+  position: absolute;
+  left: 12px;
+  top: 10px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  color: #dbe5ee;
+  background: rgba(31, 47, 64, 0.92);
+  border: 1px solid #44515e;
+  pointer-events: none;
+}
+.fa-splitter {
+  flex: 0 0 6px;
+  cursor: row-resize;
+  background: rgba(255, 255, 255, 0.06);
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+}
+.fa-splitter:hover {
+  background: rgba(77, 172, 255, 0.5);
 }
 .fa-main {
   flex: 1;
@@ -1703,24 +2275,41 @@ export default {
 .fa-contacts-wrap {
   flex: 1;
   display: flex;
+  flex-direction: column;
   min-height: 0;
   position: relative;
 }
 .fa-palette {
-  width: 190px;
+  flex: 0 0 200px;
   overflow-y: auto;
   border-right: 1px solid rgba(255, 255, 255, 0.12);
 }
+.fa-palette-top {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding-bottom: 6px;
+  background: rgb(var(--v-theme-surface));
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.fa-palette-filter {
+  margin-top: 6px;
+}
 .fa-category {
-  font-weight: 600;
-  letter-spacing: 0.05em;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  filter: brightness(1.25);
 }
 .fa-palette-item {
   display: flex;
   align-items: center;
   margin: 2px 8px;
-  padding: 4px 8px;
+  padding: 5px 8px;
   font-size: 13px;
+  line-height: 1.3;
+  color: #e6edf3;
   border-radius: 4px;
   border-left: 3px solid var(--fa-color);
   background: rgba(255, 255, 255, 0.04);
@@ -1735,10 +2324,13 @@ export default {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  position: relative;
 }
 .fa-canvas {
   flex: 1;
-  min-height: 0;
+  /* The log shrinks before the flow goes below this (a remembered log height can be too tall
+     for a smaller window) */
+  min-height: 180px;
   position: relative;
 }
 .fa-flow {
@@ -1763,6 +2355,15 @@ export default {
 .fa-flow .vue-flow__minimap {
   background: rgb(31, 47, 64);
 }
+/* On a small canvas the minimap would cover the flow: hide it (View > Fit to Screen still works) */
+.fa-canvas {
+  container-type: size;
+}
+@container (max-height: 360px) or (max-width: 700px) {
+  .fa-flow .vue-flow__minimap {
+    display: none;
+  }
+}
 .fa-flow .vue-flow__minimap svg {
   width: 160px;
   height: 100px;
@@ -1783,12 +2384,38 @@ export default {
   pointer-events: none;
 }
 .fa-bottom {
-  height: 240px;
+  flex: 0 1 auto;
+  min-height: 0;
+}
+.fa-bottom-split {
+  min-height: 110px;
+}
+.fa-bottom-flow {
   border-top: 1px solid rgba(255, 255, 255, 0.12);
 }
+.fa-bottom-log {
+  flex: 1 1 0;
+}
+.fa-approvals.fa-approvals-inline {
+  position: static;
+  transform: none;
+  flex: 0 0 auto;
+  width: min(560px, 96%);
+  max-height: 45%;
+  margin: 8px auto 0;
+}
 .fa-side {
-  width: 320px;
+  flex: 0 0 340px;
   overflow-y: auto;
   border-left: 1px solid rgba(255, 255, 255, 0.12);
+}
+/* Laptop widths: slimmer side panels so the flow keeps room */
+@media (max-width: 1500px) {
+  .fa-palette {
+    flex-basis: 170px;
+  }
+  .fa-side {
+    flex-basis: 290px;
+  }
 }
 </style>
