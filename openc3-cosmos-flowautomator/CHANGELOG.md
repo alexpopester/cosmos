@@ -20,7 +20,69 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **Rules re-plan only when it matters.** Renaming a rule keeps its
+  activities. Saving a change that affects which passes it takes re-plans
+  that rule and every lower-priority rule, highest priority first. A
+  higher-priority rule now takes station capacity from lower-priority ones,
+  even when it is added later.
+- **Edited rule activities are kept.** An activity a rule made, then edited
+  by hand, is marked detached. Saving the rule no longer replaces it, and
+  deleting the rule keeps it as a manual activity.
+- **GEO satellites can be scheduled.** A satellite that never sets now gets
+  one contact per UTC day (AOS 00:00, LOS 24:00), so rules and activities can
+  anchor to a time of day. Before, it got a single window-long contact that
+  nothing could schedule into.
+- **Contacts only partly in the prediction window can't be scheduled.**
+  These are passes in progress or past the horizon, whose times aren't known
+  yet.
+- **Approvals must close after the activity starts.** A crawl or walk
+  activity (or one with an Ask node) is refused if approvals would close,
+  at LOS minus the margin, before it starts.
+- **The TLE stash key must start with `flow_automator_`.** It is read and
+  then deleted, so it can't be pointed at another app's key.
+
 ### Fixed
+- **Loops:** a loop left early (for example, breaking out of an inner loop)
+  starts again from 0 the next time it is entered. Before, it resumed at its
+  old count.
+- **Interrupted runs:** runs active when the engine dies are recorded as
+  failed at the next start, with an alert, and the Script Runner scripts they
+  started are stopped. Before, they vanished without history. On a graceful
+  shutdown, runs are stopped before alerts, so their alerts go out.
+- **Run status:** `/status` no longer fails now and then with "dictionary
+  changed size" while a run is adding variables.
+- **Ask and approvals:**
+  - An Ask with no timeout of its own follows *timeout* after the flow's
+    approval timeout, or at the activity's approval cut-off. Before, it could
+    wait forever.
+  - An answer that arrives just as an approval times out is refused, instead
+    of being reported as accepted while the run failed.
+- **Sub-flows:** aborting a sub-flow stops its caller with the reason
+  ("Aborted by …"), and the sub-flow step shows *stopped*.
+- **Numbers in templates:** text like "nan", "inf", "1_000" or "007" in a
+  multi-part template stays text.
+- **Packet triggers:** one packet trigger naming a missing packet no longer
+  breaks every packet trigger. Bad telemetry items or packets are left out
+  of the batch read for 30 s instead of being retried on every tick.
+- **TLE inputs:**
+  - Polling now runs on its own thread, so a slow bucket or API call can't
+    make activities miss their start.
+  - A packet resending the same TLE isn't ingested or audited again, and
+    unchanged ingests no longer fill the audit log.
+  - The stash input only deletes the value it read.
+- **Prediction errors:** a TLE that SGP4 can't propagate (decayed orbit, bad
+  elements) shows a prediction problem and raises an alert, instead of
+  silently showing no contacts.
+- **Re-timing:** activities are no longer re-timed against an empty
+  prediction while their satellite is being predicted after a restart.
+- **Missed-activity alerts:** after downtime, many missed activities give
+  one alert instead of one each.
+- **Webhooks:** a webhook that keeps failing is skipped for 5 minutes, so it
+  doesn't hold up the others, and pending deliveries are capped at 1,000.
+- **Demo:** the demo's stations are now *Demo Wallops* and *Demo Svalbard*.
+  Clearing the demo no longer deletes a station of yours with an old demo
+  name.
 - A scheduled activity now runs the sub-flows it was scheduled with. It keeps
   a copy of every sub-flow its template calls, directly or not, and its runs
   and rehearsals use those copies. Before, an edit to a sub-flow silently

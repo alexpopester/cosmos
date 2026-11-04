@@ -22,6 +22,7 @@ MAX_SUBFLOW_DEPTH = 10
 # Threads running Parallel branches across every run; with MAX_ACTIVE_RUNS (which counts sub-flow runs too)
 # this bounds what a flow can fan out to, e.g. a sub-flow that calls itself from a Parallel
 MAX_BRANCH_THREADS = 200
+SHUTDOWN_WAIT_SECONDS = 5.0  # all runs together, not each
 
 
 def less_safe_changes(old, new):
@@ -84,6 +85,7 @@ class FlowEngine:
             self.flows = self.store.all_flows()
             self._ensure_versions()
         self.alerts.load()
+        self._recover_interrupted_runs()
         armed = [flow["name"] for flow in self.flows.values() if flow.get("armed")]
         self.log("info", f"Flow engine loaded {len(self.flows)} flows ({len(armed)} armed)")
         try:
@@ -96,16 +98,106 @@ class FlowEngine:
             self.alerts.start()
 
     def shutdown(self):
+        # Nothing new starts, then runs stop (recording their history and alerts), then alerts stop
         self.triggers.stop()
         self.planner.stop()
-        self.alerts.stop()
         with self.lock:
             runs = list(self.runs.values())
         for run in runs:
             run.stop()
+        deadline = time.monotonic() + SHUTDOWN_WAIT_SECONDS
         for run in runs:
             if run.thread:
-                run.thread.join(timeout=2)
+                run.thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        self.alerts.stop()
+
+    # ---- runs interrupted by a crash ----------------------------------------
+
+    def _remember_run(self, run):
+        """Keep a small record of an active run, so a crash or restart can't make it vanish without trace."""
+        try:
+            self.store.save_record(
+                "active_runs",
+                run.id,
+                {
+                    "id": run.id,
+                    "flow_id": run.flow.get("id"),
+                    "flow_name": run.flow.get("name"),
+                    "parent_id": run.parent.id if run.parent else None,
+                    "started_at": run.started_at or time.time(),
+                    "mode": run.mode,
+                    "trigger": dict(run.trigger_info),
+                    "flow_version": run.flow_version,
+                    "dry_run": run.dry_run,
+                    "activity_id": run.activity_id,
+                    "scripts": list(run.scripts),
+                },
+            )
+        except Exception as error:  # noqa: BLE001 - best effort; the run itself goes on
+            self.log("warn", f"Could not record active run {run.id}: {error}")
+
+    def note_script(self, run, script_id):
+        """A run started a Script Runner script: remember it so it can be stopped if the engine dies."""
+        run.scripts.append(script_id)
+        self._remember_run(run)
+
+    def _recover_interrupted_runs(self):
+        """Runs that were active when the engine last stopped without finishing them: record them as failed,
+        stop the scripts they started, and alert about the unattended ones."""
+        try:
+            leftovers = self.store.records("active_runs")
+        except Exception as error:  # noqa: BLE001
+            self.log("error", f"Could not read interrupted runs: {error}")
+            return
+        now = time.time()
+        for record in leftovers.values():
+            message = "The flow engine stopped while this run was active (restart or crash); it did not finish"
+            for script_id in record.get("scripts") or []:
+                try:
+                    self.backend.script_stop(script_id)
+                    message += f"; stopped script {script_id} it had started"
+                except Exception:  # noqa: BLE001,S110 - it may have finished already
+                    pass
+            history = {
+                "id": record["id"],
+                "flow_id": record.get("flow_id"),
+                "flow_name": record.get("flow_name"),
+                "parent_id": record.get("parent_id"),
+                "status": "failed",
+                "message": message,
+                "started_at": record.get("started_at"),
+                "ended_at": now,
+                "mode": record.get("mode"),
+                "trigger": record.get("trigger") or {},
+                "flow_version": record.get("flow_version"),
+                "dry_run": bool(record.get("dry_run")),
+                "activity_id": record.get("activity_id"),
+                "interrupted": True,
+                "active_nodes": [],
+                "approvals": [],
+                "children": [],
+                "variables": {},
+                "steps": [],
+                "step_count": 0,
+                "steps_dropped": 0,
+            }
+            try:
+                self.store.add_run(record.get("flow_id"), history)
+                self.store.delete_record("active_runs", record["id"])
+            except Exception as error:  # noqa: BLE001
+                self.log("error", f"Could not record interrupted run {record['id']}: {error}")
+                continue
+            self.log("warn", f"Flow '{record.get('flow_name')}' run {record['id']}: {message}")
+            if record.get("parent_id") is None:
+                self.alerts.emit(
+                    "run_failed",
+                    f"'{record.get('flow_name')}' was interrupted",
+                    message,
+                    path=run_path(record.get("flow_id"), record["id"]),
+                    key=f"interrupted:{record['id']}",
+                    data={"run_id": record["id"], "flow_id": record.get("flow_id")},
+                    dry_run=bool(record.get("dry_run")),
+                )
 
     def log(self, level, message):
         if self.logger:
@@ -450,6 +542,7 @@ class FlowEngine:
             return {"result": "skipped", "run": None, "message": message}
         run = FlowRun(self, flow, node_id, reason, variables, **(options or {}))
         self.runs[run.id] = run
+        self._remember_run(run)
         self.log("info", f"Flow '{flow['name']}' run {run.id} started{' (dry run)' if run.dry_run else ''}: {reason}")
         run.start_thread()
         return {"result": "started", "run": run.as_json(include_steps=False), "message": ""}
@@ -497,6 +590,7 @@ class FlowEngine:
             run.approval_deadline = approval_deadline
             run.activity_id = activity_id
             self.runs[run.id] = run
+            self._remember_run(run)
         self.log(
             "info", f"Flow '{flow.get('name')}' run {run.id} started{' (dry run)' if run.dry_run else ''}: {reason}"
         )
@@ -546,10 +640,15 @@ class FlowEngine:
             )
             self.runs[child.id] = child
             parent.children.append(child.id)
+            self._remember_run(child)
         child.execute()  # synchronous: the parent's step waits for it
         return child
 
     def on_run_finished(self, run):
+        try:
+            self.store.delete_record("active_runs", run.id)
+        except Exception as error:  # noqa: BLE001
+            self.log("warn", f"Could not clear active run {run.id}: {error}")
         with self.lock:
             self.runs.pop(run.id, None)
             if run.parent is None:

@@ -33,6 +33,7 @@ import math
 from .orbit import OrbitError, Propagator, parse_tle
 
 
+STASH_PREFIX = "flow_automator_"
 DEFAULT_SETTINGS = {
     "stash_key": "flow_automator_tles",
     "files": [],  # target paths, e.g. "INST/tle/latest.tle"
@@ -96,6 +97,7 @@ class TleIntake:
         self.status = {"stash": None, "files": {}, "packets": {}}
         self.file_hashes = {}
         self.packet_counts = {}
+        self.packet_hashes = {}
         self.last_poll = 0.0
 
     # ---- settings ------------------------------------------------------------
@@ -113,7 +115,11 @@ class TleIntake:
             raise TleInputError("TLE input settings must be a JSON object")
         settings = copy.deepcopy(self.settings)
         if "stash_key" in payload:
-            settings["stash_key"] = str(payload["stash_key"] or "").strip()
+            key = str(payload["stash_key"] or "").strip()
+            # The poller deletes what it reads, so it must not be pointed at another application's key
+            if key and not key.startswith(STASH_PREFIX):
+                raise TleInputError(f"The stash key must start with '{STASH_PREFIX}' (it's read and then deleted)")
+            settings["stash_key"] = key
         if "files" in payload:
             files = payload["files"] or []
             if not isinstance(files, list) or any(".." in str(f) or not str(f).strip() for f in files):
@@ -222,7 +228,8 @@ class TleIntake:
                     key=f"tle_held:{result['satellite']}:{result['epoch']}",
                 )
         counts = {k: sum(1 for r in results if r["result"] == k) for k in RESULTS}
-        if entries:
+        if any(r["result"] != "unchanged" for r in results) or problems:
+            # Not for repeats of the TLE already in use: a packet resending it would flood the audit log
             planner.audit(
                 user or source,
                 "ingested TLEs",
@@ -363,4 +370,8 @@ class TleIntake:
             return
         if isinstance(text, (bytes, bytearray)):
             text = text.decode(errors="replace")
+        digest = hashlib.sha256(str(text).encode()).hexdigest()
+        if self.packet_hashes.get(name) == digest:
+            return  # the same TLE again
+        self.packet_hashes[name] = digest
         self._record("packets", name, now, self.ingest(str(text), f"tlm:{name}", user=f"tlm:{name}", now=now))

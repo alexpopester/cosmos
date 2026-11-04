@@ -46,7 +46,7 @@
         <div class="text-subtitle-2 mt-2">COSMOS stash</div>
         <v-text-field
           v-model="settings.stash_key"
-          label="Stash key (empty to turn off)"
+          label="Stash key (starts with flow_automator_; empty to turn off)"
           density="compact"
           variant="outlined"
           class="fa-mono"

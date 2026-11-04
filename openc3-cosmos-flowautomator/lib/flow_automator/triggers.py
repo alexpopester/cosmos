@@ -25,6 +25,9 @@ from .expressions import Evaluator, ExpressionError, normalize_item, telemetry_r
 DEFAULT_LIMITS_STATES = ["RED", "RED_LOW", "RED_HIGH"]
 
 
+BAD_REF_RETRY_SECONDS = 30.0
+
+
 class TriggerManager:
     def __init__(self, engine, period=0.25, clock=time.time):
         self.engine = engine
@@ -35,6 +38,9 @@ class TriggerManager:
         self._thread = None
         self.last_tick = None
         self.last_error = None
+        # Telemetry items / packets that failed on their own: (error, retry_at). They're left out of the
+        # batch until then, so one bad name doesn't cost a failed batch plus a read per item every tick
+        self.bad_refs = {}
 
     def start(self):
         self._stop.clear()
@@ -124,20 +130,7 @@ class TriggerManager:
                     refs.add((normalize_item(data.get("item")), "CONVERTED"))
             except ExpressionError:
                 pass  # reported per trigger in _check
-        refs = sorted(refs)
-        if not refs:
-            return {}
-        backend = self.engine.backend
-        try:
-            return dict(zip(refs, backend.tlm_values(refs), strict=True))
-        except Exception:  # noqa: BLE001 - one bad item fails the batch; read one by one to isolate it
-            values = {}
-            for ref in refs:
-                try:
-                    values[ref] = backend.tlm_values([ref])[0]
-                except Exception as error:  # noqa: BLE001
-                    values[ref] = error
-            return values
+        return self._batched(sorted(refs), self.engine.backend.tlm_values)
 
     def _read_counts(self, watched):
         packets = sorted(
@@ -147,12 +140,38 @@ class TriggerManager:
                 if n["type"] == "trigger_packet"
             }
         )
-        if not packets:
+        return self._batched(packets, self.engine.backend.tlm_counts)
+
+    def _batched(self, refs, read):
+        """Read refs in one call. If that fails, read them one by one so one bad ref doesn't fail the rest."""
+        if not refs:
             return {}
+        now = self.clock()
+        results = {}
+        good = []
+        for ref in refs:
+            bad = self.bad_refs.get(ref)
+            if bad and bad[1] > now:
+                results[ref] = bad[0]
+            else:
+                good.append(ref)
+        if not good:
+            return results
         try:
-            return dict(zip(packets, self.engine.backend.tlm_counts(packets), strict=True))
-        except Exception as error:  # noqa: BLE001
-            return dict.fromkeys(packets, error)
+            results.update(zip(good, read(good), strict=True))
+            for ref in good:
+                self.bad_refs.pop(ref, None)
+        except Exception:  # noqa: BLE001 - find which one is bad
+            for ref in good:
+                try:
+                    results[ref] = read([ref])[0]
+                    self.bad_refs.pop(ref, None)
+                except Exception as error:  # noqa: BLE001
+                    results[ref] = error
+                    self.bad_refs[ref] = (error, now + BAD_REF_RETRY_SECONDS)
+        if len(self.bad_refs) > 1000:
+            self.bad_refs.clear()
+        return results
 
     def _check(self, flow, node, state, now, values, counts):
         """Returns (fired, reason, variables)."""

@@ -137,6 +137,8 @@ class Propagator:
     def ecef(self, times):
         jd, fr = _julian(np.atleast_1d(times))
         errors, positions, _velocities = self.satrec.sgp4_array(jd, fr)
+        # Kept for the caller: SGP4 fails (non-zero codes) for decayed orbits or bad elements
+        self.last_times, self.last_errors = np.atleast_1d(times), errors
         theta = _gmst(jd, fr)
         cos_t, sin_t = np.cos(theta), np.sin(theta)
         x, y, z = positions[:, 0], positions[:, 1], positions[:, 2]
@@ -234,14 +236,7 @@ def find_passes(propagator, station, start, end, step=COARSE_STEP_S):
     "tca_azimuth", "duration", "partial"} sorted by AOS. A pass already in progress at
     ``start`` (or not over by ``end``) is clipped to the window and marked partial.
     """
-    # Sample on absolute multiples of the step, so the same TLE gives the same pass times (and contact ids)
-    # however the window slides
-    start = math.floor(start / step) * step
-    times = np.arange(start, end + step, step)
-    times[-1] = min(times[-1], end)
-    ecef, ok = propagator.ecef(times)
-    elevations = np.where(ok, station.look(ecef)[1], -90.0)
-    return passes_from_samples(propagator, station, times, elevations)
+    return find_passes_for_stations(propagator, [station], start, end, step)[0]
 
 
 def passes_from_samples(propagator, station, times, elevations):

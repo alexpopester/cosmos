@@ -64,7 +64,7 @@ What it sets up:
 | | |
 | --- | --- |
 | Satellites | DEMOSAT-1 (ISS-like) and DEMOSAT-2 (polar), TLEs with epoch now |
-| Stations | **Demo Pass Site**, under DEMOSAT-1's track so a pass starts ~5 minutes after loading; Wallops; Svalbard (capacity 2) |
+| Stations | **Demo Pass Site**, under DEMOSAT-1's track so a pass starts ~5 minutes after loading; Demo Wallops; Demo Svalbard (capacity 2) |
 | Template | **Demo: Pass downlink**: parameters (choice, number, telemetry item), wait for AOS, wait for the first packet, collect, check, report with Notify; alerts if telemetry doesn't arrive or the pass is short |
 | Rule | **Demo: DEMOSAT-1 downlinks**: Pass downlink at AOS − 60s in every DEMOSAT-1 pass above 20°, stop at LOS |
 | Activity | Health check over Svalbard on DEMOSAT-2's next pass |

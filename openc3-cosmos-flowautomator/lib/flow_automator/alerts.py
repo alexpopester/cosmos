@@ -18,6 +18,7 @@ background thread with retries, so a slow endpoint never holds up a run.
 Repeats of the same event (same key) within ``DEDUP_SECONDS`` are dropped.
 """
 
+import contextlib
 import copy
 import ipaddress
 import queue
@@ -33,6 +34,9 @@ import requests
 DEDUP_SECONDS = 60
 RETRIES = 3
 TIMEOUT_SECONDS = 5
+QUEUE_LIMIT = 1000  # pending deliveries; past this the oldest are dropped
+SUSPEND_AFTER_FAILURES = 3  # consecutive failed deliveries before a webhook is skipped for a while
+SUSPEND_SECONDS = 300
 
 # event -> (default level, description). Levels: "alert" (toast + bell), "notification" (bell)
 EVENTS = {
@@ -91,7 +95,7 @@ class Alerter:
         self.recent = {}  # dedup key -> time
         self.sent = []  # the last few events, for the settings dialog
         self.lock = threading.Lock()
-        self._queue = queue.Queue()
+        self._queue = queue.Queue(maxsize=QUEUE_LIMIT)
         self._thread = None
         self._stop = threading.Event()
 
@@ -243,7 +247,14 @@ class Alerter:
                 continue
             if dry_run and not hook.get("include_dry_runs"):
                 continue
-            self._queue.put((hook, body))
+            try:
+                self._queue.put_nowait((hook, body))
+            except queue.Full:
+                # A webhook that's down mustn't grow memory without limit: drop the oldest delivery
+                with contextlib.suppress(queue.Empty):
+                    self._queue.get_nowait()
+                with contextlib.suppress(queue.Full):
+                    self._queue.put_nowait((hook, body))
         if not (self._thread and self._thread.is_alive()):
             self._drain()  # no delivery thread (tests): deliver inline
         return True
@@ -269,7 +280,7 @@ class Alerter:
             hook = next((h for h in self.settings["webhooks"] if h["id"] == hook_id), None)
         if hook is None:
             raise AlertError(f"Webhook '{hook_id}' not found")
-        error = self._deliver(hook, body, retries=1)
+        error = self._deliver(hook, body, retries=1, force=True)
         return {"ok": error is None, "error": error}
 
     def _deliver_loop(self):
@@ -288,7 +299,14 @@ class Alerter:
             if item is not None:
                 self._deliver(*item, retries=1)
 
-    def _deliver(self, hook, body, retries=RETRIES):
+    def _deliver(self, hook, body, retries=RETRIES, force=False):
+        with self.lock:
+            status = self.status.setdefault(hook["id"], {"sent": 0, "failed": 0})
+            suspended = status.get("suspended_until", 0) > self.clock()
+            if suspended and not force:
+                # Failing again and again: skip it for a while so it doesn't hold up the other webhooks
+                status["skipped"] = status.get("skipped", 0) + 1
+                return status.get("last_error")
         payload = self._format(hook["format"], body)
         error = None
         for attempt in range(retries):
@@ -305,10 +323,15 @@ class Alerter:
             if error is None:
                 status["sent"] += 1
                 status["last_ok"] = self.clock()
+                status["consecutive_failures"] = 0
+                status.pop("suspended_until", None)
             else:
                 status["failed"] += 1
                 status["last_error"] = error
                 status["last_error_at"] = self.clock()
+                status["consecutive_failures"] = status.get("consecutive_failures", 0) + 1
+                if status["consecutive_failures"] >= SUSPEND_AFTER_FAILURES:
+                    status["suspended_until"] = self.clock() + SUSPEND_SECONDS
         if error and self.log:
             self.log("warn", f"Alert webhook '{hook['name']}' failed: {error}")
         return error

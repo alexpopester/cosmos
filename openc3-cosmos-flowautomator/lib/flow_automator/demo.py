@@ -17,7 +17,9 @@ from .orbit import SGP4_IMPORT_ERROR, Propagator, make_tle, parse_tle
 
 PREFIX = "Demo: "
 SATELLITES = ("DEMOSAT-1", "DEMOSAT-2")
-STATIONS = ("Demo Pass Site", "Wallops", "Svalbard")
+STATIONS = ("Demo Pass Site", "Demo Wallops", "Demo Svalbard")
+# Station names earlier demos used: removed only if the demo created them, never a user's own
+LEGACY_STATIONS = ("Wallops", "Svalbard")
 SCRIPT = "INST/procedures/flow_demo_measure.py"
 SCRIPT_TEXT = """# Flow Automator demo: measure something and hand the result back to the flow
 import os
@@ -397,7 +399,8 @@ def clear_demo(engine):
             planner.delete_satellite(sat["id"])
             removed["satellites"] += 1
     for station in list(planner.stations.values()):
-        if station["name"] in STATIONS:
+        legacy = station["name"] in LEGACY_STATIONS and station.get("created_by") == "demo"
+        if station["name"] in STATIONS or legacy:
             planner.delete_station(station["id"])
             removed["stations"] += 1
     return removed
@@ -440,7 +443,7 @@ def load_demo(engine, user="demo", now=None):
     )
     planner.save_station(
         {
-            "name": "Wallops",
+            "name": "Demo Wallops",
             "latitude": 37.9402,
             "longitude": -75.4664,
             "altitude": 10,
@@ -451,7 +454,7 @@ def load_demo(engine, user="demo", now=None):
     )
     svalbard = planner.save_station(
         {
-            "name": "Svalbard",
+            "name": "Demo Svalbard",
             "latitude": 78.2298,
             "longitude": 15.4078,
             "altitude": 500,

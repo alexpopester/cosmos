@@ -156,13 +156,16 @@ def test_telemetry_input(planner, sats, backend):
     )
     planner.intake.poll(planner.clock())
     assert planner.satellites[sats[0]["id"]]["tle"]["source"] == "tlm:GND ORBIT"
-    # Same count: not read again; a new packet with the same TLE is just unchanged
+    # Same count: not read again. A new packet with the same TLE isn't ingested again (or audited)
+    first = planner.intake.status["packets"]["GND ORBIT"]["time"]
+    audited = len(planner.engine.audit.entries())
     planner.clock.now += 60
     planner.intake.poll(planner.clock())
     backend.counts[("GND", "ORBIT")] = 5
     planner.clock.now += 60
     planner.intake.poll(planner.clock())
-    assert planner.intake.status["packets"]["GND ORBIT"]["counts"]["unchanged"] == 1
+    assert planner.intake.status["packets"]["GND ORBIT"]["time"] == first
+    assert len(planner.engine.audit.entries()) == audited
 
 
 def test_settings_are_checked(planner):
@@ -174,11 +177,13 @@ def test_settings_are_checked(planner):
         planner.intake.save_settings({"packets": [{"target": "GND"}]})
     with pytest.raises(TleInputError, match="max_jump_km"):
         planner.intake.save_settings({"max_jump_km": 0})
-    saved = planner.intake.save_settings({"max_jump_km": 250, "stash_key": "tles_in"})
-    assert saved["max_jump_km"] == 250 and saved["stash_key"] == "tles_in"
+    with pytest.raises(TleInputError, match="must start with"):
+        planner.intake.save_settings({"stash_key": "someone_elses_key"})
+    saved = planner.intake.save_settings({"max_jump_km": 250, "stash_key": "flow_automator_tles_in"})
+    assert saved["max_jump_km"] == 250 and saved["stash_key"] == "flow_automator_tles_in"
     planner.intake.settings = {}
     planner.intake.load()
-    assert planner.intake.settings["stash_key"] == "tles_in"
+    assert planner.intake.settings["stash_key"] == "flow_automator_tles_in"
 
 
 def test_http_hooks(engine, planner, sats):

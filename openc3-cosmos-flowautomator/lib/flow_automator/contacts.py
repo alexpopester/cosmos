@@ -31,6 +31,7 @@
 
 import contextlib
 import copy
+import datetime
 import threading
 import time
 import uuid
@@ -186,15 +187,35 @@ class ContactPlanner:
         self._worker = threading.Thread(target=self._predict_loop, name="flow-predict", daemon=True)
         self._worker.start()
         self._wake.set()
+        # TLE inputs and sources read the bucket, the stash and telemetry, which can be slow: on their own
+        # thread, so a slow read can't hold up starting activities on time
+        self.poll_in_thread = True
+        self._poller = threading.Thread(target=self._poll_loop, name="flow-tle-inputs", daemon=True)
+        self._poller.start()
         self._thread = threading.Thread(target=self._loop, name="flow-contacts", daemon=True)
         self._thread.start()
 
     def stop(self):
         self._stop.set()
         self._wake.set()
-        for thread in (self._thread, self._worker):
+        for thread in (self._thread, self._worker, getattr(self, "_poller", None)):
             if thread:
                 thread.join(timeout=5)
+
+    def _poll_inputs(self, now):
+        self._poll_sources(now)
+        try:
+            self.intake.poll(now)
+        except Exception as error:  # noqa: BLE001 - a bad input mustn't stop scheduling
+            self.engine.log("error", f"TLE inputs: {error}")
+
+    def _poll_loop(self):
+        while not self._stop.is_set():
+            try:
+                self._poll_inputs(self.clock())
+            except Exception as error:  # noqa: BLE001
+                self.engine.log("error", f"TLE input polling failed: {error}")
+            self._stop.wait(self.period)
 
     def _loop(self):
         while not self._stop.is_set():
@@ -323,10 +344,11 @@ class ContactPlanner:
             found = find_passes_for_stations(propagator, sites, start, end)
         except Exception as error:  # noqa: BLE001 - one bad orbit mustn't hide the rest
             return {}, f"Prediction failed: {error}"
+        problem = _sgp4_problem(propagator)
         return {
-            station["id"]: [self._contact(sat, station, p) for p in passes]
+            station["id"]: [self._contact(sat, station, p) for p in _split_continuous(passes, start, end)]
             for station, passes in zip(stations, found, strict=True)
-        }, None
+        }, problem
 
     def _drop_pairs(self, satellite_id=None, station_id=None):
         for key in list(self.pair_contacts):
@@ -552,9 +574,9 @@ class ContactPlanner:
             if old["los"] < now:
                 continue  # the scheduler marks it missed
             if (old["satellite_id"], old["station_id"]) not in self.pair_contacts and (
-                old["satellite_id"] in self.pending
+                old["satellite_id"] in self.pending or old["satellite_id"] == self.in_flight
             ):
-                continue  # not predicted yet
+                continue  # not predicted yet (or being predicted right now)
             nearest = self._nearest_contact(activity)
             shift = None if nearest is None else nearest["tca"] - old["tca"]
             if nearest is not None and abs(shift) <= self.retime_tolerance:
@@ -733,6 +755,13 @@ class ContactPlanner:
             raise PlannerError("The activity would start after LOS")
         if require_future and start <= now:
             raise PlannerError("That start time has already passed")
+        asks = activity["mode"] in ("crawl", "walk") or any(n.get("type") == "ask" for n in template.get("nodes") or [])
+        cutoff = activity["contact"]["los"] - activity["approval_margin"]
+        if asks and start >= cutoff:
+            raise PlannerError(
+                f"Approvals close {activity['approval_margin']:g}s before LOS, which is before this activity "
+                "starts: start earlier, lower the approval margin, or use run mode"
+            )
         self._check_template(template, activity["params"])
 
     def _new_activity(self, template, now, user):
@@ -760,6 +789,11 @@ class ContactPlanner:
             contact = self.contacts_by_id.get(payload.get("contact_id"))
             if contact is None:
                 raise PlannerNotFoundError(f"Contact '{payload.get('contact_id')}' is not predicted")
+            if contact["partial"]:
+                raise PlannerError(
+                    "That contact is only partly inside the prediction window (in progress or past the horizon), "
+                    "so its times aren't known yet: pick another, or wait for the next prediction"
+                )
             template = self._template(payload.get("template_id"))
             now = self.clock()
             activity = self._new_activity(template, now, user)
@@ -800,6 +834,9 @@ class ContactPlanner:
             updated["status"] = "scheduled"
             updated["suggested_contact_id"] = None
             updated["updated_by"] = user_name(user)
+            if updated.get("rule_id"):
+                # Edited by hand: saving the rule again won't replace it (it still blocks the rule's pass)
+                updated["detached"] = True
             if activity["status"] == "needs_review":
                 updated["message"] = "Moved by operator"
             self.activities[activity_id] = updated
@@ -955,11 +992,25 @@ class ContactPlanner:
             rule["updated_at"] = self.clock()
             rule["updated_by"] = user_name(user)
             rule["last_error"] = None
+            previous = self.rules.get(rule["id"])
             self.rules[rule["id"]] = rule
             self._save("rules", rule)
-            # Re-plan: the rule's future activities follow its new settings
-            removed = self._remove_rule_activities(rule["id"])
-            created = self._apply_rules(self.clock(), only=rule["id"])
+            if previous is not None and _plan_key(previous) == _plan_key(rule):
+                # Nothing that decides which passes it takes changed (a rename): keep its activities
+                for activity in self.activities.values():
+                    ours = activity.get("rule_id") == rule["id"] and activity["status"] in WAITING
+                    if ours and not activity.get("detached") and activity["label"] != rule["name"]:
+                        activity["label"] = rule["name"]
+                        self._save("activities", activity)
+                return {"rule": copy.deepcopy(rule), "removed": 0, "created": 0}
+            # Re-plan this rule and every lower-priority rule, highest priority first, so a higher-priority
+            # rule takes station capacity that lower ones had (their hand-edited activities stay)
+            priority = rule["priority"]
+            affected = [
+                r["id"] for r in self.rules.values() if r["id"] == rule["id"] or int(r.get("priority") or 0) < priority
+            ]
+            removed = sum(self._remove_rule_activities(rule_id) for rule_id in affected)
+            created = self._apply_rules(self.clock())
             return {"rule": copy.deepcopy(rule), "removed": removed, "created": created}
 
     def delete_rule(self, rule_id):
@@ -976,6 +1027,11 @@ class ContactPlanner:
         removed = 0
         for activity in list(self.activities.values()):
             if activity.get("rule_id") != rule_id:
+                continue
+            if activity.get("detached") and activity["status"] in WAITING:
+                if not keep_cancelled:  # the rule is being deleted: the edited activity stays, as a manual one
+                    activity["rule_id"] = None
+                    self._save("activities", activity)
                 continue
             if activity["status"] in WAITING or (not keep_cancelled and activity["status"] == "cancelled"):
                 del self.activities[activity["id"]]
@@ -1098,11 +1154,8 @@ class ContactPlanner:
             self.recompute()
         elif not self.background and self.pending:
             self.predict_pending()
-        self._poll_sources(now)
-        try:
-            self.intake.poll(now)
-        except Exception as error:  # noqa: BLE001 - a bad input mustn't stop scheduling
-            self.engine.log("error", f"TLE inputs: {error}")
+        if not getattr(self, "poll_in_thread", False):
+            self._poll_inputs(now)  # no threads (tests): poll inline
         if now - self.last_pruned >= 300:
             self.prune(now)
             self._check_stale_tles(now)
@@ -1112,35 +1165,39 @@ class ContactPlanner:
                 self._apply_rules(now)
         to_start = []
         to_stop = []
-        with self.lock:
-            for activity in self.activities.values():
-                status = activity["status"]
-                contact = activity["contact"]
-                if status in WAITING:
-                    start = activity_start(activity)
-                    if now < start:
-                        continue
-                    if status == "needs_review":
-                        self._finish(
-                            activity, "missed", f"Not run: still needed review at start. {activity['message']}", now
-                        )
-                        continue
-                    late = now - start
-                    if self.settings.get("paused"):
+        self._missed = []  # collected during this tick, alerted together below
+        try:
+            with self.lock:
+                for activity in self.activities.values():
+                    status = activity["status"]
+                    contact = activity["contact"]
+                    if status in WAITING:
+                        start = activity_start(activity)
+                        if now < start:
+                            continue
+                        if status == "needs_review":
+                            self._finish(
+                                activity, "missed", f"Not run: still needed review at start. {activity['message']}", now
+                            )
+                            continue
+                        late = now - start
+                        if self.settings.get("paused"):
+                            if late > activity["late_tolerance"] or now >= contact["los"]:
+                                self._finish(activity, "missed", "Scheduler was paused at the start time", now)
+                            continue
                         if late > activity["late_tolerance"] or now >= contact["los"]:
-                            self._finish(activity, "missed", "Scheduler was paused at the start time", now)
-                        continue
-                    if late > activity["late_tolerance"] or now >= contact["los"]:
-                        self._finish(
-                            activity,
-                            "missed",
-                            f"Start time passed {late:.0f}s ago (late tolerance {activity['late_tolerance']:g}s)",
-                            now,
-                        )
-                        continue
-                    to_start.append(activity)
-                elif status == "running" and activity.get("stop_at_los") and now >= contact["los"]:
-                    to_stop.append(activity)
+                            self._finish(
+                                activity,
+                                "missed",
+                                f"Start time passed {late:.0f}s ago (late tolerance {activity['late_tolerance']:g}s)",
+                                now,
+                            )
+                            continue
+                        to_start.append(activity)
+                    elif status == "running" and activity.get("stop_at_los") and now >= contact["los"]:
+                        to_stop.append(activity)
+        finally:
+            self._alert_missed()
         for activity in to_start:
             self._launch(activity, now)
         for activity in to_stop:
@@ -1353,6 +1410,9 @@ class ContactPlanner:
         if status in ("missed", "failed", "done", "stopped"):
             self.audit(SCHEDULER, status, "activity", activity.get("id"), activity.get("label"), activity["message"])
         event = {"missed": "activity_missed", "failed": "activity_failed", "done": "activity_done"}.get(status)
+        if event == "activity_missed" and getattr(self, "_missed", None) is not None:
+            self._missed.append(activity)  # a tick may miss many (after downtime): one alert for them all
+            return
         if event:
             path = "/tools/flowautomator?view=contacts"
             if activity.get("run_id") and status != "missed":
@@ -1364,6 +1424,27 @@ class ContactPlanner:
                 key=f"{event}:{activity.get('id')}",
                 path=path,
             )
+
+    def _alert_missed(self):
+        missed, self._missed = self._missed or [], None
+        if len(missed) <= MISSED_ALERT_LIMIT:
+            for activity in missed:
+                self.alert(
+                    "activity_missed",
+                    f"Activity '{activity.get('label')}' missed",
+                    f"{activity['message']} ({activity['contact']['satellite']} over {activity['contact']['station']})",
+                    key=f"activity_missed:{activity.get('id')}",
+                    path="/tools/flowautomator?view=contacts",
+                )
+            return
+        names = ", ".join(a.get("label") or a["id"] for a in missed[:5]) + (", ..." if len(missed) > 5 else "")
+        self.alert(
+            "activity_missed",
+            f"{len(missed)} activities missed",
+            f"{names}. {missed[0]['message']}",
+            key=f"activity_missed:batch:{missed[0].get('id')}:{len(missed)}",
+            path="/tools/flowautomator?view=contacts",
+        )
 
     # ---- overview ----------------------------------------------------------
 
@@ -1427,3 +1508,72 @@ def _keep_ids(contacts, previous):
         if abs(match["tca"] - contact["tca"]) <= SAME_CONTACT_SECONDS:
             contact["id"] = match["id"]
     return contacts
+
+
+SGP4_ERRORS = {
+    1: "mean eccentricity out of range",
+    2: "mean motion below zero",
+    3: "eccentricity out of range",
+    4: "semi-latus rectum below zero",
+    6: "the orbit has decayed",
+}
+
+
+def _sgp4_problem(propagator):
+    """A problem to show when SGP4 couldn't propagate the TLE over (part of) the window, else None.
+
+    Without this a decayed satellite or bad elements would just show no contacts.
+    """
+    errors = getattr(propagator, "last_errors", None)
+    if errors is None or not errors.any():
+        return None
+    index = int(errors.nonzero()[0][0])
+    code = int(errors[index])
+    when = datetime.datetime.fromtimestamp(float(propagator.last_times[index]), tz=datetime.timezone.utc)
+    reason = SGP4_ERRORS.get(code, f"error {code}")
+    return f"Prediction failed: SGP4 can't propagate this TLE from {when:%Y-%m-%d %H:%M} UTC ({reason})"
+
+
+MISSED_ALERT_LIMIT = 3  # more activities missed in one tick than this get a single alert
+
+_RULE_BOOKKEEPING = {"name", "updated_at", "updated_by", "last_error", "skipped_full", "created_at", "created_by", "id"}
+
+
+def _plan_key(rule):
+    """The rule's settings that decide which passes it schedules and how (everything but its name and bookkeeping)."""
+    return {k: v for k, v in rule.items() if k not in _RULE_BOOKKEEPING}
+
+
+CONTINUOUS_WINDOW = 86400.0  # a satellite that never sets (GEO) gets one contact per UTC day
+
+
+def _split_continuous(passes, start, end):
+    """Split a pass that covers the whole prediction window (the satellite never sets) into UTC days.
+
+    One window-long partial contact can't be scheduled (rules skip partial contacts), so a GEO satellite
+    gets a contact per day instead: AOS at 00:00 UTC, LOS at 24:00, so activities anchor to a time of day.
+    Days cut by the window's edges stay partial.
+    """
+    result = []
+    for found in passes:
+        covers_window = found["partial"] and found["aos"] <= start + 1 and found["los"] >= end - 1
+        if not covers_window:
+            result.append(found)
+            continue
+        day = (start // CONTINUOUS_WINDOW) * CONTINUOUS_WINDOW
+        while day < end:
+            aos, los = max(day, start), min(day + CONTINUOUS_WINDOW, end)
+            if los > aos:
+                result.append(
+                    {
+                        **found,
+                        "aos": aos,
+                        "los": los,
+                        "tca": (aos + los) / 2,
+                        "duration": los - aos,
+                        "partial": aos > day or los < day + CONTINUOUS_WINDOW,
+                        "continuous": True,
+                    }
+                )
+            day += CONTINUOUS_WINDOW
+    return result

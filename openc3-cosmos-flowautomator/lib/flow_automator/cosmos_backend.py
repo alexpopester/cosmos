@@ -107,8 +107,13 @@ class CosmosBackend:
         from openc3.api.stash_api import stash_delete, stash_get
 
         value = stash_get(key, scope=self.scope)
-        if value is not None:
-            stash_delete(key, scope=self.scope)
+        if value is None:
+            return None
+        # Only delete what was read: if a producer wrote a new value meanwhile, leave it for the next poll
+        # (the stash has no atomic take; this narrows the window to between these two calls)
+        if stash_get(key, scope=self.scope) != value:
+            return None
+        stash_delete(key, scope=self.scope)
         return value
 
     def check_cmd(self, command):

@@ -108,7 +108,12 @@ class FlowRun:
         self.max_steps = max(1, min(self.max_steps, HARD_MAX_STEPS))
         self.active = {}
         self.children = []
+        self.scripts = []  # Script Runner scripts this run started
         self.loop_counters = {}
+        # When each loop was entered and when it last started an iteration (step numbers): a loop entered
+        # during an outer loop's iteration starts again from 0 on the outer loop's next iteration
+        self.loop_entered = {}
+        self.loop_iterated = {}
         # Execution mode: an explicit override for this run, else the flow's own.
         # A sub-flow runs at least as cautiously as the run that called it.
         self.mode = mode if mode in MODES else self.flow.get("mode", "run")
@@ -387,19 +392,39 @@ class FlowRun:
         ask_deadline = time.monotonic() + timeout if ask is not None and timeout > 0 else None
         if self.approval_deadline is not None:
             approval["deadline"] = self.approval_deadline
+
+        def give_up(error):
+            # Under the lock approve() decides under: either the operator's answer landed first (use it),
+            # or this closes the approval so a late answer is refused instead of reported as accepted
+            with self._lock:
+                if approval["decision"] is None:
+                    approval["decision"] = "expired"
+                    raise error
+            return False
+
         try:
-            while not approval["event"].wait(0.1):
+            waiting = True
+            while waiting and not approval["event"].wait(0.1):
                 if self.cancelled():
-                    raise RunStoppedError()
-                if ask_deadline is not None and time.monotonic() > ask_deadline:
-                    raise InputTimeoutError()
-                if deadline is not None and time.monotonic() > deadline and ask is None:
-                    raise RunFailedError(
-                        f"No operator approval for '{approval['label']}' within {self.approval_timeout:g}s"
+                    waiting = give_up(RunStoppedError())
+                elif ask_deadline is not None and time.monotonic() > ask_deadline:
+                    waiting = give_up(InputTimeoutError())
+                elif deadline is not None and time.monotonic() > deadline and ask_deadline is None:
+                    # An Ask with no timeout of its own waits as long as approvals do, then follows 'timeout'
+                    waiting = give_up(
+                        InputTimeoutError()
+                        if ask is not None
+                        else RunFailedError(
+                            f"No operator approval for '{approval['label']}' within {self.approval_timeout:g}s"
+                        )
                     )
-                if self.approval_deadline is not None and time.time() > self.approval_deadline:
-                    raise RunFailedError(
-                        f"No operator approval for '{approval['label']}' before the contact's approval cut-off"
+                elif self.approval_deadline is not None and time.time() > self.approval_deadline:
+                    waiting = give_up(
+                        InputTimeoutError()
+                        if ask is not None
+                        else RunFailedError(
+                            f"No operator approval for '{approval['label']}' before the contact's approval cut-off"
+                        )
                     )
         finally:
             with self._lock:
@@ -419,13 +444,13 @@ class FlowRun:
             raise ValueError(f"Decision must be one of {', '.join(APPROVAL_DECISIONS)}")
         with self._lock:
             approval = self.approvals.get(approval_id)
-        if approval is None or approval["decision"] is not None:
-            return False
-        if approval.get("ask") and decision != "abort":
-            approval["value"] = _check_answer(approval["ask"], value)
-            decision = "go"
-        approval["decided_by"] = user or "anonymous"
-        approval["decision"] = decision
+            if approval is None or approval["decision"] is not None:
+                return False  # answered, timed out or closed already
+            if approval.get("ask") and decision != "abort":
+                approval["value"] = _check_answer(approval["ask"], value)
+                decision = "go"
+            approval["decided_by"] = user or "anonymous"
+            approval["decision"] = decision
         if decision == "run":
             # Release other branches waiting on routine steps right now too
             self.auto_approve = True
@@ -435,9 +460,10 @@ class FlowRun:
                     for a in self.approvals.values()
                     if a is not approval and a["decision"] is None and "HAZARDOUS" not in a["reason"] and not a["ask"]
                 ]
+                for other in others:
+                    other["decided_by"] = f"{user or 'anonymous'} (run the rest)"
+                    other["decision"] = "go"
             for other in others:
-                other["decided_by"] = f"{user or 'anonymous'} (run the rest)"
-                other["decision"] = "go"
                 other["event"].set()
         approval["event"].set()
         return True
@@ -488,11 +514,12 @@ class FlowRun:
         if match:
             return self.evaluator().evaluate(match.group(1))
         text = self.evaluator().render(template)
-        for convert in (int, float):
-            try:
-                return convert(text)
-            except ValueError:
-                pass
+        # Only plain numbers become numbers: not "nan", "inf", "1_000" or "007" (an id, not seven)
+        stripped = text.strip()
+        if _INT_RE.fullmatch(stripped):
+            return int(stripped)
+        if _FLOAT_RE.fullmatch(stripped):
+            return float(stripped)
         return text
 
     def log(self, level, message):
@@ -523,13 +550,20 @@ class FlowRun:
                 "auto_approve": self.auto_approve,
                 "approvals": self.pending_approvals(),
                 "children": list(self.children),
-                "variables": _json_safe(self.variables),
+                # dict() copies atomically; run threads may be adding variables while this serializes
+                "variables": _json_safe(dict(self.variables)),
                 "step_count": self.step_count,
                 "steps_dropped": self.steps_dropped,
             }
             if include_steps:
                 result["steps"] = [dict(step) for step in self.steps]
         return result
+
+
+_INT_RE = re.compile(r"[+-]?(0|[1-9][0-9]*)")
+_FLOAT_RE = re.compile(
+    r"[+-]?(0|[1-9][0-9]*)?\.[0-9]+([eE][+-]?[0-9]+)?|[+-]?(0|[1-9][0-9]*)(\.[0-9]*)?[eE][+-]?[0-9]+"
+)
 
 
 def _json_safe(value):
@@ -577,9 +611,23 @@ def exec_switch(run, node, data, step):
     return "default"
 
 
+def _reset_loops_since(run, step_number):
+    """Forget the counters of loops entered after a step (they belonged to an iteration that's over)."""
+    for loop_id, entered in list(run.loop_entered.items()):
+        if entered > step_number:
+            run.loop_counters.pop(loop_id, None)
+            run.loop_entered.pop(loop_id, None)
+            run.loop_iterated.pop(loop_id, None)
+
+
 def exec_loop(run, node, data, step):
     node_id = node["id"]
+    if node_id in run.loop_iterated:
+        # Another iteration: loops entered during the last one (and maybe left early) start fresh next time
+        _reset_loops_since(run, run.loop_iterated[node_id])
     iteration = run.loop_counters.get(node_id, 0)
+    if iteration == 0:
+        run.loop_entered[node_id] = run.step_count
     variable = data.get("variable") or "i"
     max_iterations = int(data.get("max_iterations") or 10_000)
     if data.get("mode", "count") == "while":
@@ -590,10 +638,14 @@ def exec_loop(run, node, data, step):
         keep_going = iteration < int(float(data.get("count") or 0))
     if keep_going:
         run.loop_counters[node_id] = iteration + 1
+        run.loop_iterated[node_id] = run.step_count
         run.variables[variable] = iteration
         step["message"] = f"{variable} = {iteration}"
         return "body"
+    _reset_loops_since(run, run.loop_entered.get(node_id, run.step_count))
     run.loop_counters.pop(node_id, None)
+    run.loop_entered.pop(node_id, None)
+    run.loop_iterated.pop(node_id, None)
     step["message"] = f"done after {iteration} iterations"
     return "done"
 
@@ -849,6 +901,7 @@ def exec_run_script(run, node, data, step):
     environment.setdefault("FLOW_RUN_ID", run.id)
     environment.setdefault("FLOW_NAME", str(run.flow.get("name") or ""))
     script_id = backend.script_start(filename, environment)
+    run.engine.note_script(run, script_id)
     run.variables["script_id"] = script_id
     step["message"] = f"Started {filename} as script {script_id}"
     if not data.get("wait", True):
@@ -995,6 +1048,10 @@ def exec_subflow(run, node, data, step):
     child = run.engine.run_subflow(run, data["flow_id"], dict(run.variables))
     step["message"] = f"Sub-flow '{child.flow.get('name')}' run {child.id} {child.status}"
     if child.status == "stopped":
+        if not run.cancelled():
+            # The sub-flow was aborted or stopped on its own: stop this run too, saying why
+            run.message = f"Sub-flow '{child.flow.get('name')}': {child.message or 'stopped'}"
+            run._cancel.set()
         raise RunStoppedError()
     if child.status != "success":
         raise RuntimeError(f"Sub-flow '{child.flow.get('name')}' failed: {child.message}")
