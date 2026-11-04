@@ -22,6 +22,8 @@ A standalone COSMOS plugin (gem) with two halves:
 | What it does, every node and feature (operator view) | `README.md` |
 | How it's built: threads, locks, data model, run lifecycle | `docs/ARCHITECTURE.md` |
 | Why it's built that way; things not to undo casually | `docs/DECISIONS.md` |
+| What changed in each version | `CHANGELOG.md` |
+| Known issues and the prioritised improvement backlog | `docs/EVALUATION-2026-11-04.md` |
 | Build, install, test, recipes for common changes | `docs/DEVELOPMENT.md` |
 | Every API endpoint | docstring at the top of `lib/flow_automator/http_api.py` |
 | Flow JSON shape | docstring of `lib/flow_automator/graph.py` |
@@ -77,7 +79,10 @@ COSMOS_PASSWORD=... test/ui/run.sh [one_test.mjs]
    version, checked in the browser (or the relevant `test/ui` script).
 4. README updated for anything an operator notices; `docs/` for anything a
    developer needs; a new DECISIONS entry for a new design choice.
-5. Conventional commit with scope `flow-automator`.
+5. `CHANGELOG.md` updated: add the change under `## [Unreleased]`, and when
+   you bump the version, rename that heading to `## [X.Y.Z] - YYYY-MM-DD` in
+   the same commit. `rake build` refuses a VERSION with no changelog entry.
+6. Conventional commit with scope `flow-automator`.
 
 ## Local environment notes
 

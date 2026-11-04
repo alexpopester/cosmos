@@ -187,3 +187,17 @@ New releases of the d3 packages Vue Flow depends on appeared on 2026-11-03,
 and pnpm 11's `minimumReleaseAge` refuses packages that new, which broke
 lockfile installs. The pins can be dropped once those releases are old
 enough (or kept; nothing needs the new versions).
+
+## D20. Every version has a CHANGELOG.md entry, enforced by the build
+
+`CHANGELOG.md` (Keep a Changelog format) records what changed in each gem
+version. Changes collect under `## [Unreleased]`, and that heading is renamed
+to the version when it is built. `rake build VERSION=X.Y.Z` stops if
+`CHANGELOG.md` has no `## [X.Y.Z]` heading.
+
+*Why:* the owner asked for a changelog updated with every version increment.
+Forty versions went out in two days with no record of what changed between
+them.
+*Consequences:* quick development builds need a one-line entry too; several
+of them can be folded into one entry before release. Versions 1.0.0–1.7.8
+are summarised by commit, because they predate the changelog.

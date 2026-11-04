@@ -15,6 +15,8 @@ The plugin has two parts:
   triggers armed, predicts contacts, starts scheduled activities and runs
   everything server side, so nothing depends on the tool being open.
 
+See [CHANGELOG.md](CHANGELOG.md) for what changed in each version.
+
 ## Install
 
 Upload the gem in Admin Console → Plugins, or:

@@ -21,7 +21,8 @@ Build, test, install and change the plugin. Read
 1. **Engine change** (`lib/`, `microservices/`): run the pytest suite (below).
 2. **Tool change** (`src/`): `pnpm lint --max-warnings 0`, then build.
 3. **Build the gem** with a new version every time (COSMOS caches gems by
-   version, so reusing one installs the old content):
+   version, so reusing one installs the old content), after adding that
+   version to `CHANGELOG.md` (the build refuses a version with no entry):
 
    ```bash
    ./build_tool.sh                                   # builds tools/flowautomator
@@ -207,6 +208,11 @@ and restores them, the scheduler and the armed temperature watch at the end.
   happened and what to do.
 - Update the README for anything an operator would notice, and these docs
   for anything a developer would.
+- Every version bump gets a `CHANGELOG.md` entry in the same commit: collect
+  changes under `## [Unreleased]` and rename it to `## [X.Y.Z] - YYYY-MM-DD`
+  when you build. Patch for fixes, minor for features or behaviour changes,
+  major for changes that break stored flows, the API or plugin variables.
+  `rake build` checks for the entry.
 
 ## Troubleshooting
 

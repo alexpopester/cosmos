@@ -43,6 +43,13 @@ task :require_version do
     puts "VERSION is required: rake build VERSION=X.Y.Z"
     exit 1
   end
+  # Every version gets a CHANGELOG.md entry (see CLAUDE.md)
+  changelog = File.exist?('CHANGELOG.md') ? File.read('CHANGELOG.md') : ''
+  unless changelog.match?(/^## \[#{Regexp.escape(ENV['VERSION'])}\]/)
+    puts "CHANGELOG.md has no entry for #{ENV['VERSION']}: rename '## [Unreleased]' to " \
+         "'## [#{ENV['VERSION']}] - #{Time.now.strftime('%Y-%m-%d')}' (or add one), then build again"
+    exit 1
+  end
 end
 
 # Note: The sh command is built into Rake:
