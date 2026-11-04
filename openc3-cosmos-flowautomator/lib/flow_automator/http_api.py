@@ -92,6 +92,13 @@ from .tle_inputs import TleInputError
 MAX_BODY_BYTES = 5 * 1024 * 1024
 
 
+def _unverified_user(token):
+    from .cosmos_backend import token_identity  # local: cosmos_backend imports this module
+
+    identity = token_identity(token)
+    return {**identity, "username": f"{identity['username']} (token not verified: COSMOS unreachable)"}
+
+
 class AuthError(Exception):
     def __init__(self, message, status=401):
         super().__init__(message)
@@ -179,7 +186,15 @@ class FlowApi:
             try:
                 user = None
                 if write is not None:
-                    user = self.authorize(headers.get("Authorization") or headers.get("authorization"), write)
+                    token = headers.get("Authorization") or headers.get("authorization")
+                    try:
+                        user = self.authorize(token, write)
+                    except AuthError as error:
+                        # STOP ALL only reduces activity: if COSMOS can't be reached to check the token,
+                        # still let someone holding a token stop everything (and say it was unverified)
+                        if handler != "stop_all" or error.status != 503 or not token:
+                            raise
+                        user = _unverified_user(token)
                 payload = json.loads(body) if body else {}
                 return 200, getattr(self, handler)(payload=payload, query=query, user=user, **match.groupdict())
             except AuthError as error:

@@ -195,12 +195,20 @@ class FlowRun:
                 join = self._run_parallel(node)
                 if join is None:
                     return None
+                if in_parallel and set(self._parallel_stack()) & self.graph.join_owners(join["id"]):
+                    # The nested Parallel's branches went straight to the enclosing Parallel's Join:
+                    # hand it back so only the enclosing Parallel runs past it (once)
+                    return join
                 self._record_instant(join, "out")
                 node = self._next(join, "out")
                 continue
             handle = self._execute_node(node)
             node = self._next(node, handle)
         return None
+
+    def _parallel_stack(self):
+        """Ids of the Parallel nodes whose branch this thread is running, outermost first."""
+        return getattr(self._local, "parallels", None) or []
 
     def _next(self, node, handle):
         targets = self.graph.next_nodes(node["id"], handle)
@@ -214,8 +222,11 @@ class FlowRun:
         isolate = bool((node.get("data") or {}).get("isolate"))
         branch_vars = [copy.copy(base) if isolate else base for _ in branches]
 
+        stack = [*self._parallel_stack(), node["id"]]
+
         def run_branch(index, start):
             self._local.variables = branch_vars[index]
+            self._local.parallels = stack
             try:
                 results[index] = self._walk(start, in_parallel=True)
             except BaseException as error:  # noqa: BLE001 - collected and re-raised below
@@ -320,8 +331,11 @@ class FlowRun:
         decision, _approval = self._wait_for_approval(
             node, step, "; ".join(reasons), preview or _preview(self, node, data)
         )
+        if preview:
+            # The operator approved this exact command; the executor refuses to send anything else
+            step["approved_command"] = preview
         if hazardous:
-            # The operator's approval is the hazardous acknowledgement
+            # The operator's approval is the hazardous acknowledgement (for the approved command only)
             step["approved_hazardous"] = True
         if decision == "run":
             self.auto_approve = True
@@ -731,9 +745,13 @@ def _preview(run, node, data):
     return node_label(node)
 
 
-# Outside quotes a value mustn't add parameters (comma), open a quote, or start the parameter list
-_UNQUOTED_UNSAFE = re.compile(r"[,'\"\x00-\x1f]|\bwith\b", re.IGNORECASE)
-_CONTROL = re.compile(r"[\x00-\x1f]")
+# Outside quotes a value mustn't add parameters (comma), open a quote or an array, escape, or start the
+# parameter list. After "with" it can't contain spaces either (COSMOS splits values on whitespace).
+_UNQUOTED_UNSAFE = re.compile(r"[,'\"\[\]\\\x00-\x1f]|\bwith\b", re.IGNORECASE)
+_PARAMS_UNSAFE = re.compile(r"\s")
+# Inside quotes COSMOS treats a backslash as an escape, which could end the quote early
+_QUOTED_UNSAFE = re.compile(r"[\\\x00-\x1f]")
+_WITH = re.compile(r"\swith\s", re.IGNORECASE)
 
 
 def _quote_state(text, quote):
@@ -764,7 +782,11 @@ def render_command(run, template, allow_raw=False):
         out.append(literal)
         value = evaluator.evaluate(match.group(1))
         text = "" if value is None else str(value)
-        bad = _UNQUOTED_UNSAFE.search(text) if quote is None else (quote in text or _CONTROL.search(text))
+        in_params = bool(_WITH.search("".join(out)))
+        if quote is None:
+            bad = _UNQUOTED_UNSAFE.search(text) or (in_params and _PARAMS_UNSAFE.search(text))
+        else:
+            bad = quote in text or _QUOTED_UNSAFE.search(text)
         if bad:
             where = "outside quotes" if quote is None else "inside quotes"
             raise RuntimeError(
@@ -780,6 +802,10 @@ def render_command(run, template, allow_raw=False):
 
 def exec_send_cmd(run, node, data, step):
     command = render_command(run, data.get("command"), bool(data.get("allow_raw_values")))
+    approved = step.get("approved_command")
+    if approved is not None and command != approved:
+        # A value changed while the operator was deciding: don't send something they didn't see
+        raise RuntimeError(f"Command changed after it was approved (approved {approved!r}, now {command!r}); not sent")
     step["message"] = command
     if run.dry_run:
         problems = run.engine.backend.check_cmd(command)
@@ -813,6 +839,7 @@ def exec_run_script(run, node, data, step):
     run.variables["script_id"] = script_id
     step["message"] = f"Started {filename} as script {script_id}"
     if not data.get("wait", True):
+        run.engine.track_detached_script(script_id)
         return "out"
     timeout = _float(data, "timeout", 0)
     deadline = time.monotonic() + timeout if timeout > 0 else None

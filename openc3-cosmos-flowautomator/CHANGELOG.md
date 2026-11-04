@@ -20,6 +20,31 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+- A command approved in crawl or walk mode is only sent if it is exactly what
+  the operator approved. Before, it was rendered again after approval, so a
+  telemetry or variable change could send a different command, with the
+  hazardous check skipped. Now the step fails and nothing is sent.
+- Template values can no longer inject command parameters through a
+  backslash inside quotes, through `[ ]` array brackets, or through spaces in
+  the parameter list.
+- STOP ALL:
+  - It pauses the contact scheduler *before* stopping runs, and an activity
+    can no longer launch after STOP ALL.
+  - It also stops scripts that flows started without waiting.
+  - It still works when COSMOS can't be reached to verify the token. The
+    audit then records the user as unverified.
+
+### Fixed
+- A Parallel inside another Parallel, whose branches go straight to the
+  outer Join, no longer runs the nodes after that Join twice.
+- A trigger arriving while a "queue" flow hands over to its next queued run
+  no longer starts a second run at the same time.
+- Queued triggers are dropped if the flow is disarmed before they start. A
+  queued run that can't start now raises an alert.
+- Load Demo no longer resumes a contact scheduler that STOP ALL paused. It
+  says the scheduler is paused instead.
+
 ### Docs
 - Added this changelog and the rule that every version bump updates it.
 - Added `docs/EVALUATION-2026-11-04.md`: a full review of the engine, UI,

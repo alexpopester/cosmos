@@ -1489,7 +1489,11 @@ export default {
             inSeconds
               ? `DEMOSAT-1 rises over the Demo Pass Site in ${Math.round(inSeconds / 60)} min; its downlink starts a minute before.`
               : ''
-          }${summary.script_problem ? ` ${summary.script_problem}` : ''}`,
+          }${summary.script_problem ? ` ${summary.script_problem}` : ''}${
+            summary.scheduler_paused
+              ? ' The contact scheduler is paused (STOP ALL?): resume it in Contacts to run the scheduled downlinks.'
+              : ''
+          }`,
         })
         this.view = 'contacts'
       } catch (error) {

@@ -91,6 +91,11 @@ def test_dry_run_still_asks_for_approvals(engine, backend):
         ("it's", "INST SETPARAMS with NOTE '{{ v }}'", False),
         ("it's", 'INST SETPARAMS with NOTE "{{ v }}"', True),
         ("line\nbreak", "INST SETPARAMS with NOTE '{{ v }}'", False),
+        # COSMOS treats a backslash in quotes as an escape and [ ] as one array token (ENG-6)
+        ("\\", 'INST SETPARAMS with NOTE "{{ v }}", B 2', False),
+        ("[1", "INST SETPARAMS with A {{ v }}, B 2, C 3]", False),
+        ("1 B 2", "INST SETPARAMS with A {{ v }}", False),
+        ("COLLECT", "INST {{ v }} with TYPE NORMAL", True),
     ],
 )
 def test_template_values_cannot_inject(engine, backend, value, template, ok):

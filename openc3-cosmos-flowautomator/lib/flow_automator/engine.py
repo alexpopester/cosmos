@@ -52,6 +52,7 @@ class FlowEngine:
         self.flows = {}
         self.runs = {}
         self.queues = collections.defaultdict(collections.deque)
+        self.detached_scripts = collections.deque(maxlen=200)  # scripts runs started without waiting
         self.lock = threading.RLock()
         self.triggers = TriggerManager(self, period=trigger_period)
         self.audit = AuditLog(store, self.log)
@@ -478,12 +479,10 @@ class FlowEngine:
     def on_run_finished(self, run):
         with self.lock:
             self.runs.pop(run.id, None)
-            next_start = None
             if run.parent is None:
-                queue = self.queues.get(run.flow.get("id"))
-                flow = self.flows.get(run.flow.get("id"))
-                if queue and flow:
-                    next_start = (flow, *queue.popleft())
+                # Start the next queued run while still holding the lock, so a trigger arriving now sees it
+                # running instead of starting a second run of a "queue" flow
+                self._start_next_queued(run.flow.get("id"))
         try:
             self.store.add_run(run.flow.get("id"), run.as_json())
         except Exception as error:  # noqa: BLE001 - history is best effort
@@ -510,9 +509,27 @@ class FlowEngine:
                 self.planner.on_run_finished(run)
             except Exception as error:  # noqa: BLE001
                 self.log("error", f"Could not record activity result for run {run.id}: {error}")
-        if next_start:
-            with self.lock:
-                self._start_run(*next_start)
+
+    def _start_next_queued(self, flow_id):
+        """Start the oldest queued trigger of a flow, skipping ones that no longer apply. Caller holds the lock."""
+        queue = self.queues.get(flow_id)
+        flow = self.flows.get(flow_id)
+        while queue and flow:
+            node_id, reason, variables, options = queue.popleft()
+            manual = (options.get("trigger_info") or {}).get("kind") == "manual"
+            if not manual and not flow.get("armed"):
+                self.log("info", f"Flow '{flow['name']}': dropped a queued trigger because the flow was disarmed")
+                continue
+            result = self._start_run(flow, node_id, reason, variables, options)
+            if result["result"] != "started":
+                self.alerts.emit(
+                    "run_failed",
+                    f"'{flow['name']}' queued run not started",
+                    result["message"],
+                    path=run_path(flow_id),
+                    key=f"queue_drop:{flow_id}:{time.time()}",
+                )
+            return
 
     def on_approval_requested(self, run, approval):
         """A run is waiting for an operator: if it's still waiting after a while, tell them wherever they are.
@@ -570,6 +587,9 @@ class FlowEngine:
 
     def stop_all(self, user=None):
         """Safety stop: disarm every flow, drop queued triggers, pause scheduled activities, stop every run."""
+        # Pause the scheduler first (planner lock before engine lock): an activity it is launching right now
+        # finishes starting before this returns, so the loop below stops it, and nothing launches after
+        self.planner.set_paused(True, "STOP ALL")
         with self.lock:
             disarmed = 0
             for flow in self.flows.values():
@@ -579,17 +599,39 @@ class FlowEngine:
                     disarmed += 1
             self.queues.clear()
             runs = list(self.runs.values())
+            scripts = list(self.detached_scripts)
+            self.detached_scripts.clear()
         for run in runs:
             run.stop()
-        self.planner.set_paused(True, "STOP ALL")
-        self.log("warn", f"STOP ALL: disarmed {disarmed} flows, paused the contact scheduler, stopped {len(runs)} runs")
+        # Scripts started without waiting belong to no run any more; STOP ALL stops them too
+        stopped_scripts = 0
+        for script_id in scripts:
+            try:
+                self.backend.script_stop(script_id)
+                stopped_scripts += 1
+            except Exception:  # noqa: BLE001,S110 - it may have finished already
+                pass
+        summary = f"Disarmed {disarmed} flows, stopped {len(runs)} runs"
+        if scripts:
+            summary += f" and {stopped_scripts} scripts started without waiting"
+        self.log("warn", f"STOP ALL: {summary}, paused the contact scheduler")
         self.alerts.emit(
             "stop_all",
             f"STOP ALL by {user_name(user)}",
-            f"Disarmed {disarmed} flows, stopped {len(runs)} runs, paused the contact scheduler",
+            f"{summary}, paused the contact scheduler",
             path="/tools/flowautomator",
         )
-        return {"disarmed": disarmed, "stopped": len(runs), "scheduler_paused": True}
+        return {
+            "disarmed": disarmed,
+            "stopped": len(runs),
+            "scripts_stopped": stopped_scripts,
+            "scheduler_paused": True,
+        }
+
+    def track_detached_script(self, script_id):
+        """Remember a script a run started without waiting for it, so STOP ALL can stop it."""
+        with self.lock:
+            self.detached_scripts.append(script_id)
 
     def _history_flow_ids(self):
         with self.lock:

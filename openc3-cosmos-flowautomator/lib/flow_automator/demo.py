@@ -416,7 +416,7 @@ def load_demo(engine, user="demo", now=None):
     now = time.time() if now is None else now
     planner = engine.planner
     cleared = clear_demo(engine)
-    planner.set_paused(False)
+    # Don't resume a scheduler someone paused (STOP ALL pauses it for every activity, not just the demo's)
 
     # Satellites with TLEs from now, so their orbits are current
     sat1_tle = make_tle(now, 51.64, 200.0, 10.0, 15.5, catalog=90001, name="DEMOSAT-1")
@@ -555,6 +555,7 @@ def load_demo(engine, user="demo", now=None):
         },
         "first_activity_start": min((a["contact"]["aos"] - 60 for a in activities), default=None),
         "script_problem": script_problem,
+        "scheduler_paused": bool(planner.settings.get("paused")),
     }
     engine.log("info", f"Flow Automator demo loaded: {summary}")
     return summary

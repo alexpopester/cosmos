@@ -274,5 +274,35 @@ class Graph:
     def has_output(self, node_id, handle):
         return bool(self._next.get((node_id, handle)))
 
+    def join_owners(self, join_id):
+        """Parallel nodes whose branches can reach this Join without passing another Parallel or Join.
+
+        A Join reached straight from the branches of a nested Parallel *and* from its enclosing Parallel
+        belongs to both: the nested one must hand it back to the enclosing branch, not run past it.
+        """
+        cache = self.__dict__.setdefault("_join_owners", {})
+        if not cache:
+            for node in self.nodes.values():
+                if node.get("type") != "parallel":
+                    continue
+                seen = set()
+                stack = [n["id"] for n in self.next_nodes(node["id"], "out")]
+                while stack:
+                    current = stack.pop()
+                    if current in seen or current not in self.nodes:
+                        continue
+                    seen.add(current)
+                    kind = self.nodes[current].get("type")
+                    if kind == "join":
+                        cache.setdefault(current, set()).add(node["id"])
+                        continue
+                    if kind == "parallel":
+                        continue
+                    for (source, _handle), targets in self._next.items():
+                        if source == current:
+                            stack.extend(targets)
+            cache.setdefault(None, set())  # mark as computed
+        return cache.get(join_id, set())
+
     def triggers(self):
         return [node for node in self.nodes.values() if is_trigger(node)]

@@ -1253,6 +1253,8 @@ class ContactPlanner:
         with self.lock:
             if activity["status"] != "scheduled" or self.activities.get(activity["id"]) is not activity:
                 return  # changed or deleted since this tick looked at it
+            if self.settings.get("paused"):
+                return  # paused (e.g. STOP ALL) since this tick looked; the next tick marks it missed if too late
             try:
                 run = self.engine.start_scheduled_run(
                     activity["flow"],

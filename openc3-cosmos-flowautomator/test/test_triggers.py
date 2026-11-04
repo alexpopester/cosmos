@@ -214,7 +214,12 @@ def test_http_api_round_trip(server, backend, engine):
     assert call(f"{server}/runs/{runs[0]['id']}")[1]["steps"][-1]["node"] == "c"
 
     assert call(f"{server}/flows")[1][0]["armed"] is True
-    assert call(f"{server}/stop_all", "POST", {})[1] == {"disarmed": 1, "stopped": 0, "scheduler_paused": True}
+    assert call(f"{server}/stop_all", "POST", {})[1] == {
+        "disarmed": 1,
+        "stopped": 0,
+        "scripts_stopped": 0,
+        "scheduler_paused": True,
+    }
     assert call(f"{server}/flows/{flow_id}", "DELETE")[0] == 200
     assert call(f"{server}/flows/{flow_id}")[0] == 404
     assert call(f"{server}/nothing")[0] == 404
