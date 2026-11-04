@@ -6,7 +6,7 @@ import { chromium } from 'playwright'
 const BASE = process.env.COSMOS_URL || 'http://localhost:2900'
 const SHOTS = process.env.SHOTS || 'shots'
 const SETUP = JSON.parse(process.env.CONTACT_JSON)
-const T0 = Date.now() / 1000 // when gen_tle ran (within a second or two)
+const T0 = SETUP.generated_at ?? Date.now() / 1000 // when gen_tle ran: its aos_in counts from then
 const results = []
 const check = (name, ok, detail = '') => {
   results.push([name, ok])
@@ -274,7 +274,11 @@ try {
   check('approval cut-off set from LOS', Math.abs(crawlRun.approval_deadline - (contactNow.los - 30)) < 1)
 
   await page.waitForTimeout(2500)
-  const doneChips = await page.locator('.fa-activities .fa-activity-status', { hasText: 'done' }).count()
+  // Only this test's two activities (others, like the demo's, may finish meanwhile)
+  let doneChips = 0
+  for (const id of [passAct.id, crawlAct.id]) {
+    doneChips += await page.locator(`.fa-activities tr[data-activity="${id}"] .fa-activity-status`, { hasText: 'done' }).count()
+  }
   check('activities show done', doneChips === 2, `${doneChips}`)
   await shot(page, '06_done')
 

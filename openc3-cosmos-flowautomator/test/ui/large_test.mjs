@@ -167,7 +167,8 @@ try {
     const span = ticks[ticks.length - 1] - ticks[0]
     check(
       '200 armed telemetry triggers keep polling',
-      status.triggers.watching === 200 && !status.triggers.error && span > 2 && unique >= 8,
+      // Flows armed before the test (e.g. the demo's) add their own triggers
+      status.triggers.watching >= 200 && !status.triggers.error && span > 2 && unique >= 8,
       `watching ${status.triggers.watching}, ${unique} distinct ticks over ${span.toFixed(2)} s, error ${status.triggers.error}`,
     )
     const [, , listMs] = await api('GET', '/flows')
@@ -176,7 +177,11 @@ try {
     const [, stop] = await api('POST', '/stop_all', {})
     await page.waitForTimeout(1500)
     await ackToasts(page)
-    check('STOP ALL with 200 armed', stop.disarmed === 200, `${(performance.now() - t0).toFixed(0)} ms`)
+    check(
+      'STOP ALL with 200 armed',
+      stop.disarmed === 200 + snapshot.armed.length,
+      `${stop.disarmed} disarmed in ${(performance.now() - t0).toFixed(0)} ms`,
+    )
   }
 
   // ---- UI: open the big flows ----

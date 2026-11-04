@@ -14,7 +14,7 @@ cd "$(dirname "$0")"
 : "${COSMOS_PASSWORD:?set COSMOS_PASSWORD}"
 IMAGE=mcr.microsoft.com/playwright:v1.63.0-noble
 TESTS=("$@")
-[ ${#TESTS[@]} -gt 0 ] || TESTS=(ui_test.mjs modes_test.mjs large_test.mjs history_test.mjs pickers_test.mjs rules_test.mjs contacts_test.mjs)
+[ ${#TESTS[@]} -gt 0 ] || TESTS=(ui_test.mjs modes_test.mjs large_test.mjs history_test.mjs pickers_test.mjs tle_inputs_test.mjs rules_test.mjs contacts_test.mjs)
 OPERATOR=${OPERATOR_CONTAINER:-cosmos-openc3-operator-1}
 
 # history_test.mjs sends alerts to a webhook: a tiny receiver inside the operator container (where the
@@ -41,6 +41,15 @@ docker_run() {
     -v "$PWD:/work" -w /work "$IMAGE" "$@"
 }
 [ -d node_modules/playwright ] || docker_run npm install --no-audit --no-fund
+# A TLE with epoch now for the contact tests (needs sgp4): with uv if it's here, otherwise in the
+# COSMOS operator container, which has sgp4 and the installed plugin's lib
+gen_tle() {
+  if command -v uv >/dev/null 2>&1; then
+    uv run --no-project --quiet --with sgp4 --with numpy python gen_tle.py ../../lib
+  else
+    docker exec -i "$OPERATOR" sh -c 'cd /tmp && /openc3/python/.venv/bin/python - "$(ls -d /gems/gems/openc3-cosmos-flowautomator-*/lib | tail -1)"' < gen_tle.py
+  fi
+}
 mkdir -p shots
 failed=0
 for test in "${TESTS[@]}"; do
@@ -48,7 +57,7 @@ for test in "${TESTS[@]}"; do
   CONTACT_JSON=""
   case "$test" in
     contacts_test.mjs | rules_test.mjs)
-      CONTACT_JSON=$(uv run --no-project --quiet --with sgp4 --with numpy python gen_tle.py ../../lib)
+      CONTACT_JSON=$(gen_tle) || { echo "FAIL  couldn't generate a TLE for $test"; failed=1; continue; }
       ;;
   esac
   export CONTACT_JSON

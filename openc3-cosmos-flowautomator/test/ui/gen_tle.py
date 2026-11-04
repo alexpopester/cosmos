@@ -36,6 +36,7 @@ nudged = "\n".join(tle(10.05))
 print(
     json.dumps(
         {
+            "generated_at": now,
             "tle": f"FA-TEST\n{l1}\n{l2}",
             "nudged": nudged,
             "lat": round(lat, 4),

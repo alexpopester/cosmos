@@ -41,12 +41,14 @@ const api = async (method, path, body) => {
 const created = []
 
 // Leave the COSMOS as we found it: which flows were armed, and whether the contact scheduler ran
-const snapshot = await (async () => {
+let snapshot = null // taken right after login, below
+const takeSnapshot = async () => {
   const [, list] = await api('GET', '/flows')
   const [, status] = await api('GET', '/status')
   return { armed: list.filter((f) => f.armed).map((f) => f.id), paused: !!status.contacts?.paused }
-})()
+}
 const restore = async () => {
+  if (!snapshot) return
   for (const id of snapshot.armed) await api('POST', `/flows/${id}/arm`, {}).catch(() => {})
   await api('POST', snapshot.paused ? '/scheduler/pause' : '/scheduler/resume', { reason: 'Restored after a test' }).catch(() => {})
 }
@@ -58,6 +60,7 @@ try {
   await page.locator('button:has-text("Login")').click()
   await page.waitForURL((u) => !u.pathname.startsWith('/login'), { timeout: 30000 })
   token = await page.evaluate(() => localStorage.openc3Token)
+  snapshot = await takeSnapshot()
   check('login', !!token)
 
   // ---- tool loads ----
