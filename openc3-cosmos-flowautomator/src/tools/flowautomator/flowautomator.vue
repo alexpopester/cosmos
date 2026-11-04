@@ -244,9 +244,9 @@
           </v-tooltip>
           <v-btn
             size="small"
-            color="error"
             variant="flat"
             prepend-icon="mdi-octagon"
+            class="fa-btn-danger"
             title="Disarm every flow, stop every run and pause the contact scheduler"
             @click="confirmStopAll = true"
           >
@@ -347,10 +347,9 @@
         </v-btn>
         <v-btn
           size="small"
-          variant="tonal"
-          color="warning"
+          variant="flat"
           prepend-icon="mdi-stop"
-          class="mr-2"
+          class="mr-2 fa-btn-caution"
           title="Stop this flow's runs"
           :disabled="!activeRunIds.length"
           @click="stopFlowRuns"
@@ -654,7 +653,47 @@
         <v-card-actions>
           <v-spacer />
           <v-btn variant="text" @click="confirmStopAll = false">Cancel</v-btn>
-          <v-btn color="error" variant="flat" @click="stopAll">Stop all</v-btn>
+          <v-btn
+            variant="flat"
+            class="fa-btn-danger"
+            :loading="stoppingAll"
+            @click="stopAll"
+          >
+            Stop all
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <!-- STOP ALL failing is not something a toast should hide: it stays until retried or dismissed -->
+    <v-dialog v-model="stopAllFailed.show" max-width="480" persistent>
+      <v-card>
+        <v-card-title class="text-error">
+          <v-icon class="mr-2">mdi-alert-octagon</v-icon>STOP ALL failed
+        </v-card-title>
+        <v-card-text>
+          <p class="mb-2">
+            <b>Flows may still be armed and running.</b>
+            {{ stopAllFailed.message }}
+          </p>
+          <p class="text-caption">
+            Retry, or stop runs another way (Admin → Microservices can stop the
+            FLOW_ENGINE microservice).
+          </p>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" @click="stopAllFailed.show = false">
+            Dismiss
+          </v-btn>
+          <v-btn
+            variant="flat"
+            class="fa-btn-danger"
+            :loading="stoppingAll"
+            @click="stopAll"
+          >
+            Retry STOP ALL
+          </v-btn>
         </v-card-actions>
       </v-card>
     </v-dialog>
@@ -670,7 +709,11 @@
           <v-btn variant="text" @click="confirmDiscard.show = false">
             Keep editing
           </v-btn>
-          <v-btn color="warning" variant="flat" @click="discardAndContinue">
+          <v-btn
+            variant="flat"
+            class="fa-btn-caution"
+            @click="discardAndContinue"
+          >
             Discard
           </v-btn>
         </v-card-actions>
@@ -743,10 +786,19 @@
                 :value="m.value"
                 size="small"
                 :prepend-icon="m.icon"
+                :disabled="!runDialog.dry_run && lessCautious(m.value)"
               >
                 {{ m.title }}
               </v-btn>
             </v-btn-toggle>
+          </div>
+          <div
+            v-if="!runDialog.dry_run && flowSettings.mode !== 'run'"
+            class="text-caption text-medium-emphasis mt-n2 mb-3"
+          >
+            A real run can't be less cautious than the flow's mode ({{
+              flowSettings.mode
+            }}). Change the flow's mode to run with fewer approvals.
           </div>
           <template v-if="(flowSettings.parameters || []).length">
             <div class="text-caption mb-1">Parameters</div>
@@ -838,9 +890,8 @@
           <v-btn variant="text" @click="conflict.show = false">Cancel</v-btn>
           <v-btn variant="tonal" @click="reloadTheirs">Reload theirs</v-btn>
           <v-btn
-            color="warning"
             variant="flat"
-            class="fa-overwrite"
+            class="fa-overwrite fa-btn-caution"
             @click="overwrite"
           >
             Save mine
@@ -1032,6 +1083,8 @@ export default {
       engineError: '',
       scripts: [],
       confirmStopAll: false,
+      stoppingAll: false,
+      stopAllFailed: { show: false, message: '' },
       confirmDiscard: { show: false, action: null },
       defaultEdgeOptions: {
         type: 'smoothstep',
@@ -1274,6 +1327,12 @@ export default {
     },
   },
   watch: {
+    'runDialog.dry_run'(dry) {
+      // Back to a real run: it can't be less cautious than the flow's own mode
+      if (!dry && this.lessCautious(this.runDialog.mode)) {
+        this.runDialog.mode = this.flowSettings.mode || 'run'
+      }
+    },
     selectedRun(run) {
       this.flowContext.nodeStatus = this.statusFromRun(run)
     },
@@ -1437,7 +1496,9 @@ export default {
         if (wasArmed && !this.armed) {
           this.$notify.caution({
             title: 'Flow disarmed',
-            body: 'The saved flow has problems, so it was disarmed.',
+            body: result.flow.disarmed_reason
+              ? `${result.flow.disarmed_reason}, so it was disarmed. Arm it again to accept the change.`
+              : 'The saved flow has problems, so it was disarmed.',
           })
         }
         await this.refreshFlows()
@@ -1732,18 +1793,50 @@ export default {
         })
       }
     },
+    lessCautious(mode) {
+      const order = this.modes.map((m) => m.value)
+      return (
+        order.indexOf(mode) > order.indexOf(this.flowSettings.mode || 'run')
+      )
+    },
     stopFlowRuns() {
       this.activeRunIds.forEach(this.stopRun)
     },
     async stopAll() {
-      this.confirmStopAll = false
-      const result = await flowApi.stopAll()
-      this.armed = false
-      this.$notify.caution({
-        title: 'All flows stopped',
-        body: `Disarmed ${result.disarmed} flows, stopped ${result.stopped} runs and paused the contact scheduler.`,
-      })
-      this.refreshFlows()
+      this.stoppingAll = true
+      try {
+        const result = await flowApi.stopAll()
+        this.confirmStopAll = false
+        this.stopAllFailed = { show: false, message: '' }
+        this.armed = false
+        // Check it took: nothing armed, and every run gone within a few seconds
+        let status = null
+        for (let i = 0; i < 10; i++) {
+          status = await flowApi.status().catch(() => null)
+          if (status && !status.armed && !status.active_runs.length) break
+          await new Promise((resolve) => setTimeout(resolve, 500))
+        }
+        const scripts = result.scripts_stopped
+          ? `, stopped ${result.scripts_stopped} scripts started without waiting`
+          : ''
+        const body = `Disarmed ${result.disarmed} flows, stopped ${result.stopped} runs${scripts} and paused the contact scheduler.`
+        if (status && !status.armed && !status.active_runs.length) {
+          this.$notify.caution({ title: 'All flows stopped', body })
+        } else {
+          this.$notify.serious({
+            title: 'STOP ALL sent, but not everything has stopped yet',
+            body: status
+              ? `${body} Still ${status.armed} armed and ${status.active_runs.length} running: check the All running tab.`
+              : `${body} The engine stopped answering, so this couldn't be confirmed.`,
+          })
+        }
+      } catch (error) {
+        this.confirmStopAll = false
+        this.stopAllFailed = { show: true, message: errorInfo(error).message }
+      } finally {
+        this.stoppingAll = false
+        this.refreshFlows().catch(() => {})
+      }
     },
 
     // ---- live status ----------------------------------------------------

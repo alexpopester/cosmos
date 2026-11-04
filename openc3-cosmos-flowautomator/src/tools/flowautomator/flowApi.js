@@ -89,7 +89,8 @@ export default {
       data: { approval_id: approvalId, decision, value },
       headers: handled,
     }).then(unwrap),
-  stopAll: () => Api.post(`${BASE}/stop_all`, { data: {} }).then(unwrap),
+  // The tool reports a failed STOP ALL itself, in a dialog that stays until retried
+  stopAll: () => post('/stop_all'),
   whoami: () => get('/whoami'),
   loadDemo: () => post('/demo'),
   clearDemo: () => del('/demo'),

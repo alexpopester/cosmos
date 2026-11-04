@@ -20,7 +20,48 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-11-04
+
+Safety hardening from the evaluation (`docs/EVALUATION-2026-11-04.md`,
+section 2.1).
+
+### Changed
+- **A flow's mode is now a floor for real runs.** **Run…** and the API can
+  pick the flow's mode or a more cautious one. A dry run can use any mode.
+  To run with fewer approvals, change the flow's mode (DECISIONS D6,
+  amended).
+- **Saving an armed flow that relaxes safety disarms it.** That means a less
+  cautious mode, or *Allow hazardous* or *Allow raw values* turned on. The
+  notice says why; arm it again to accept the change.
+- **Hazardous approvals show a red *Send hazardous…* button.** It asks once
+  more, showing the exact command. New approval cards ignore clicks for
+  0.75 s, so a fast double-click can't approve the next step.
+- **Buttons whose colour matters now show it.** COSMOS's global button style
+  had turned Stop all, Abort, Stop, Discard and Save mine the same blue as
+  Go; they are now red or amber.
+- **A failed STOP ALL stays on screen.** A dialog stays open with Retry.
+  After a successful one, the tool checks that nothing is still armed or
+  running.
+- **Validating a flow (`/api/validate`) needs write permission**, as saving
+  does.
+
 ### Security
+- Expressions are bounded so one can't stall or exhaust the engine:
+  - limits on length, syntax tree size, result size and integer size;
+  - limits on `format` widths and `round` digits;
+  - sizes are checked before the result is built;
+  - `sum` adds numbers only, and `%` formatting of text is refused.
+
+  Before, one 2 MB expression sent to `/api/validate` held the engine for
+  16 s and kept 400 MB in memory (DECISIONS D22).
+- Runs can no longer fan out without limit:
+  - sub-flow runs count against the 50 active runs;
+  - Parallel branch threads share an engine-wide budget of 200;
+  - a Parallel can have at most 16 branches;
+  - a flow's `max_steps` is capped at 1,000,000.
+- Webhooks can't target link-local addresses (cloud metadata services).
+  They don't follow redirects, and a failed delivery reports only the HTTP
+  status, never the response body (DECISIONS D21).
 - A command approved in crawl or walk mode is only sent if it is exactly what
   the operator approved. Before, it was rendered again after approval, so a
   telemetry or variable change could send a different command, with the
@@ -44,8 +85,15 @@ versions follow [Semantic Versioning](https://semver.org/).
   queued run that can't start now raises an alert.
 - Load Demo no longer resumes a contact scheduler that STOP ALL paused. It
   says the scheduler is paused instead.
+- A rule activity an operator cancelled no longer comes back after a routine
+  TLE update. Cancelled passes are matched by satellite, station and time,
+  and they follow their pass like scheduled ones do.
+- Contact ids stay the same when passes are predicted again. A pass no
+  longer changes id because its TCA moved by a few milliseconds.
 
 ### Docs
+- README: Stop all, approvals, the mode floor, expression limits and
+  webhook rules. DECISIONS: D6 amended; D21 and D22 added.
 - Added this changelog and the rule that every version bump updates it.
 - Added `docs/EVALUATION-2026-11-04.md`: a full review of the engine, UI,
   scheduling, security and tooling, with a prioritised backlog.

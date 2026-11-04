@@ -19,6 +19,24 @@ from .versions import FlowVersions, content, diff_flows
 MAX_ACTIVE_RUNS = 50
 MAX_QUEUED_PER_FLOW = 10
 MAX_SUBFLOW_DEPTH = 10
+# Threads running Parallel branches across every run; with MAX_ACTIVE_RUNS (which counts sub-flow runs too)
+# this bounds what a flow can fan out to, e.g. a sub-flow that calls itself from a Parallel
+MAX_BRANCH_THREADS = 200
+
+
+def less_safe_changes(old, new):
+    """What a save makes less safe, for an armed flow: a less cautious mode, or a send_cmd that now allows more."""
+    changes = []
+    if MODES.index(new.get("mode", "run")) > MODES.index(old.get("mode", "run") if old.get("mode") in MODES else "run"):
+        changes.append(f"mode {old.get('mode', 'run')} -> {new.get('mode')}")
+    old_nodes = {n.get("id"): n for n in old.get("nodes") or []}
+    for node in new.get("nodes") or []:
+        data = node.get("data") or {}
+        before = (old_nodes.get(node.get("id")) or {}).get("data") or {}
+        for key, label in (("allow_hazardous", "Allow hazardous"), ("allow_raw_values", "Allow raw values")):
+            if data.get(key) and not before.get(key):
+                changes.append(f"{label} on '{data.get('label') or node.get('id')}'")
+    return changes
 
 
 class EngineError(Exception):
@@ -53,6 +71,7 @@ class FlowEngine:
         self.runs = {}
         self.queues = collections.defaultdict(collections.deque)
         self.detached_scripts = collections.deque(maxlen=200)  # scripts runs started without waiting
+        self.branch_threads = 0  # Parallel branch threads running now, across every run
         self.lock = threading.RLock()
         self.triggers = TriggerManager(self, period=trigger_period)
         self.audit = AuditLog(store, self.log)
@@ -179,11 +198,21 @@ class FlowEngine:
             flow["nodes"] = list(flow.get("nodes") or [])
             flow["edges"] = list(flow.get("edges") or [])
             problems = validate_flow(flow)
+            flow.pop("disarmed_reason", None)
             if flow["armed"] and problems:
                 flow["armed"] = False
+                flow["disarmed_reason"] = "The saved flow has problems"
                 self.log("warn", f"Flow '{flow['name']}' was disarmed because it no longer validates")
+            elif flow["armed"] and existing is not None and less_safe_changes(existing, flow):
+                # An armed flow's triggers would pick up the less safe settings on their next fire unreviewed:
+                # disarm so someone re-arms it knowingly (and the re-arm is in the audit log)
+                changes = "; ".join(less_safe_changes(existing, flow))
+                flow["armed"] = False
+                flow["disarmed_reason"] = f"Safety settings were relaxed ({changes})"
+                self.log("warn", f"Flow '{flow['name']}' was disarmed: {flow['disarmed_reason']}")
             if existing is not None and content(existing) == content(flow):
                 existing["armed"] = flow["armed"]
+                existing.pop("disarmed_reason", None)
                 return copy.deepcopy(existing), problems  # nothing changed: no new version
             latest = self.versions.latest(flow["id"]) if existing is not None or restored_from else None
             flow["version"] = (
@@ -298,6 +327,7 @@ class FlowEngine:
                 if problems:
                     raise EngineError("Fix the flow's problems before arming it", problems)
             flow["armed"] = bool(armed)
+            flow.pop("disarmed_reason", None)
             self.store.save_flow(flow)
         self.log("info", f"Flow '{flow['name']}' {'armed' if armed else 'disarmed'}")
         return copy.deepcopy(flow)
@@ -347,6 +377,15 @@ class FlowEngine:
                     raise EngineError("Fix the flow's problems before running it", problems)
             if mode is not None and mode not in MODES:
                 raise EngineError(f"Mode must be one of {', '.join(MODES)}")
+            flow_mode = flow.get("mode") if flow.get("mode") in MODES else "run"
+            if mode is not None and not dry_run and MODES.index(mode) > MODES.index(flow_mode):
+                # The flow's mode is a floor: a real run can be more cautious, never less (a dry run sends
+                # nothing, so it may skip approvals). Change the flow's mode
+                # (a saved, versioned, audited change) to run it with fewer approvals.
+                raise EngineError(
+                    f"This flow's mode is {flow_mode}: a run can use {flow_mode} or a more cautious mode, "
+                    f"not {mode}. Change the flow's mode to run it with fewer approvals."
+                )
             variables, param_problems = fill_parameters(flow.get("parameters"), variables)
             if param_problems:
                 raise EngineError("Parameters: " + "; ".join(param_problems))
@@ -444,6 +483,8 @@ class FlowEngine:
         if parent.depth + 1 > MAX_SUBFLOW_DEPTH:
             raise RuntimeError(f"Sub-flows nested more than {MAX_SUBFLOW_DEPTH} deep")
         with self.lock:
+            if len(self.runs) >= MAX_ACTIVE_RUNS:
+                raise RuntimeError(f"Too many active runs ({MAX_ACTIVE_RUNS}), sub-flow not started")
             flow = self.flows.get(flow_id)
             if flow is None:
                 raise RuntimeError(f"Sub-flow '{flow_id}' not found")
@@ -627,6 +668,18 @@ class FlowEngine:
             "scripts_stopped": stopped_scripts,
             "scheduler_paused": True,
         }
+
+    def reserve_branch_threads(self, count):
+        """Take threads for a Parallel's branches from the engine-wide budget. False if there aren't enough."""
+        with self.lock:
+            if self.branch_threads + count > MAX_BRANCH_THREADS:
+                return False
+            self.branch_threads += count
+            return True
+
+    def release_branch_threads(self, count):
+        with self.lock:
+            self.branch_threads = max(0, self.branch_threads - count)
 
     def track_detached_script(self, script_id):
         """Remember a script a run started without waiting for it, so STOP ALL can stop it."""

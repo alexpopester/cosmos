@@ -247,6 +247,19 @@ const openFlow = async (name) => {
 const node = (id) => page.locator(`.vue-flow__node[data-id="${id}"] .fa-header`)
 const show = (which) => page.locator('.fa-layout-toggle button', { hasText: which })
 const runStatus = () => page.locator('.fa-run-head .v-chip').first().innerText().catch(() => '')
+// Press a card's Go. A hazardous one asks once more in a dialog, showing the exact command
+const approveCard = async (card, explain = false) => {
+  await point(card.locator('.fa-approval-go'))
+  const confirm = page.locator('.fa-confirm-hazardous')
+  const shown = await confirm.waitFor({ state: 'visible', timeout: 1500 }).then(() => true, () => false)
+  if (shown) {
+    if (explain) {
+      await say('Send hazardous', 'Approving a hazardous command asks once more, showing exactly what goes out. If a value changes before it is sent, the step fails instead.')
+    }
+    await point(confirm)
+  }
+}
+
 // Wait for the run being viewed to end. With approve, answers its approval cards with Go (the
 // approvals section answers its own, with captions)
 let explainedDryApproval = false
@@ -262,7 +275,7 @@ const waitRunEnd = async (timeoutMs = 120000, { approve = false } = {}) => {
         await say('Approvals still ask', 'In a dry run approvals still ask, so the operator can rehearse them too. This step is marked "ask first".')
         explainedDryApproval = true
       }
-      await point(card.getByRole('button', { name: 'Go', exact: true }))
+      await approveCard(card)
       await wait(800)
       continue
     }
@@ -517,7 +530,7 @@ try {
         await say('Ask operator', 'Ask operator puts a question to the operator; the answer becomes a variable the flow branches on.')
         await point(card.getByRole('button', { name: 'Yes', exact: true }))
       } else {
-        await point(card.getByRole('button', { name: 'Go', exact: true }))
+        await approveCard(card, /HAZARDOUS/.test(text))
       }
       await wait(1200)
     }

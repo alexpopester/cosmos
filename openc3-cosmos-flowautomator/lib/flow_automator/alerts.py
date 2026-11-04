@@ -19,7 +19,9 @@ Repeats of the same event (same key) within ``DEDUP_SECONDS`` are dropped.
 """
 
 import copy
+import ipaddress
 import queue
+import socket
 import threading
 import time
 import uuid
@@ -153,6 +155,9 @@ class Alerter:
             url = str(hook.get("url") or "").strip() or current.get(hook_id, {}).get("url", "")
             if urlparse(url).scheme not in ("http", "https") or not urlparse(url).netloc:
                 raise AlertError(f"Webhook '{hook.get('name') or hook_id}' needs an http(s) URL")
+            blocked = blocked_address(urlparse(url).hostname)
+            if blocked:
+                raise AlertError(f"Webhook '{hook.get('name') or hook_id}': {blocked}")
             fmt = hook.get("format", "generic")
             if fmt not in FORMATS:
                 raise AlertError(f"Webhook format must be one of {', '.join(FORMATS)}")
@@ -323,6 +328,36 @@ class Alerter:
 
     @staticmethod
     def _post(url, payload):
-        response = requests.post(url, json=payload, timeout=TIMEOUT_SECONDS)
-        if response.status_code >= 300:
-            raise RuntimeError(f"HTTP {response.status_code}: {response.text[:200]}")
+        # Checked again at send time (DNS can change), redirects aren't followed (they could lead anywhere),
+        # and the response body isn't reported back (it could be from a service nobody should read this way)
+        blocked = blocked_address(urlparse(url).hostname)
+        if blocked:
+            raise RuntimeError(blocked)
+        response = requests.post(url, json=payload, timeout=TIMEOUT_SECONDS, allow_redirects=False)
+        if 300 <= response.status_code < 400:
+            raise RuntimeError(f"HTTP {response.status_code}: the webhook redirected, which isn't followed")
+        if response.status_code >= 400:
+            raise RuntimeError(f"HTTP {response.status_code} {response.reason or ''}".strip())
+
+
+def blocked_address(host):
+    """Why a webhook host is refused, or None.
+
+    Link-local addresses (169.254.0.0/16 and fe80::/10, where cloud metadata services live), multicast and
+    unspecified addresses are refused. Private networks and localhost are allowed: on-premises ops networks
+    run their chat and paging services there (DECISIONS D21).
+    """
+    if not host:
+        return "no host in the URL"
+    try:
+        addresses = {info[4][0] for info in socket.getaddrinfo(host, None)}
+    except (socket.gaierror, UnicodeError):
+        return None  # can't resolve now: delivery reports it; nothing reachable to protect
+    for address in addresses:
+        try:
+            ip = ipaddress.ip_address(address.split("%")[0])
+        except ValueError:
+            continue
+        if ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+            return f"{host} resolves to {ip}, a link-local, multicast or unspecified address, which webhooks can't use"
+    return None

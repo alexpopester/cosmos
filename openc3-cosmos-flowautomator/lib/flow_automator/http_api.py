@@ -116,7 +116,7 @@ def _routes():
         ("GET", r"/api/audit", "audit_log", False),
         ("GET", r"/api/flows", "list_flows", False),
         ("POST", r"/api/flows", "create_flow", True),
-        ("POST", r"/api/validate", "validate", False),
+        ("POST", r"/api/validate", "validate", True),  # write: validation is costly, and only editors need it
         ("GET", r"/api/flows/deleted", "list_deleted", False),
         ("POST", r"/api/flows/(?P<flow_id>[\w-]+)/undelete", "undelete_flow", True),
         ("GET", r"/api/flows/(?P<flow_id>[\w-]+)/versions", "list_versions", False),

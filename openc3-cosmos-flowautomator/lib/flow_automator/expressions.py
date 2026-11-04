@@ -22,6 +22,11 @@ so ``INST HEALTH_STATUS TEMP1 > 50 and INST HEALTH_STATUS TEMP2 < 10`` works.
 
 Nothing else is allowed: no attribute access, imports, lambdas or
 comprehensions, so a condition can never run arbitrary code in the engine.
+
+Expressions are also bounded so one can't stall or exhaust the engine: the
+source length and syntax tree size are capped, and every operation that could
+build a huge value (``*``, ``+``, ``**``, ``<<``, ``%`` on text, ``sum``,
+``replace``, ``join``, ``format``, ``round``, ``str``) checks the size first.
 """
 
 import ast
@@ -32,8 +37,15 @@ import re
 import time
 
 
-MAX_RESULT_LENGTH = 100_000
+MAX_RESULT_LENGTH = 100_000  # characters of text, or elements (counting nested ones) of a list
 MAX_POWER_EXPONENT = 1000
+MAX_INT_BITS = 64_000  # integers bigger than this (about 19,000 digits) are refused
+MAX_SOURCE_LENGTH = 10_000  # characters in one expression
+MAX_AST_NODES = 2_000  # syntax tree nodes in one expression
+MAX_FORMAT_WIDTH = 200  # widths and precisions in format() specs
+MAX_ROUND_DIGITS = 100
+_CACHE_SOURCE_LENGTH = 1_000  # only short expressions are cached
+_CACHE_ENTRIES = 5_000
 
 TLM_FUNCTIONS = {"tlm": "CONVERTED", "tlm_raw": "RAW", "tlm_formatted": "FORMATTED", "tlm_with_units": "WITH_UNITS"}
 
@@ -88,12 +100,70 @@ def _text(value):
     return value
 
 
+def size_of(value, budget=MAX_RESULT_LENGTH):
+    """Rough size of a value: characters of text, plus elements of (nested) containers. Stops past budget."""
+    stack = [value]
+    total = 0
+    while stack:
+        item = stack.pop()
+        if isinstance(item, (str, bytes)):
+            total += len(item)
+        elif isinstance(item, dict):
+            total += len(item)
+            stack.extend(item.keys())
+            stack.extend(item.values())
+        elif isinstance(item, (list, tuple)):
+            total += len(item)
+            stack.extend(item)
+        elif isinstance(item, int) and not isinstance(item, bool) and item.bit_length() > 64:
+            total += item.bit_length() // 3  # about as many characters as it has digits
+        else:
+            total += 1
+        if total > budget:
+            return total
+    return total
+
+
+def _too_big(value):
+    if size_of(value) > MAX_RESULT_LENGTH:
+        raise ExpressionError("Result too large")
+    return value
+
+
 def _format(value, spec=""):
     # Only format specs, never format strings with fields: '.2f', '>8', '04d', ',', 'x'
     spec = str(spec)
     if len(spec) > 20 or "{" in spec or "}" in spec:
         raise ExpressionError("format() takes a short format spec like '.2f' or '04d'")
+    if any(int(number) > MAX_FORMAT_WIDTH for number in re.findall(r"\d+", spec)):
+        raise ExpressionError(f"format() widths and precisions are limited to {MAX_FORMAT_WIDTH}")
     return format(value, spec)
+
+
+def _round(value, digits=None):
+    if digits is not None and abs(int(digits)) > MAX_ROUND_DIGITS:
+        raise ExpressionError(f"round() takes at most {MAX_ROUND_DIGITS} digits")
+    return round(value) if digits is None else round(value, int(digits))
+
+
+def _sum(values, start=0):
+    # Numbers only: summing lists or text grows the result on every step (and quadratically)
+    if not isinstance(start, (int, float)) or isinstance(start, bool):
+        raise ExpressionError("sum() adds numbers; use join() for text")
+    total = start
+    for value in values:
+        if not isinstance(value, (int, float)):
+            raise ExpressionError("sum() adds numbers; use join() for text")
+        total = total + value
+    return total
+
+
+def _replace(text, old, new):
+    text, old, new = _text(text), str(old), str(new)
+    count = len(text) + 1 if old == "" else text.count(old)
+    if len(text) + count * (len(new) - len(old)) > MAX_RESULT_LENGTH:
+        raise ExpressionError("Result too large")
+    return text.replace(old, new)
 
 
 def _range(*args):
@@ -104,7 +174,21 @@ def _range(*args):
 
 
 def _join(separator, values):
-    return _text(separator).join(str(v) for v in values)
+    separator = _text(separator)
+    parts = []
+    length = 0
+    for value in values:
+        part = _str(value)
+        length += len(part) + len(separator)
+        if length > MAX_RESULT_LENGTH:
+            raise ExpressionError("Result too large")
+        parts.append(part)
+    return separator.join(parts)
+
+
+def _str(value):
+    _too_big(value)  # str() of a container can be several times its size; refuse the big ones first
+    return str(value)
 
 
 def _get(container, key, default=None):
@@ -124,10 +208,10 @@ _SAFE_FUNCTIONS = {
     "abs": abs,
     "min": min,
     "max": max,
-    "round": round,
+    "round": _round,
     "int": int,
     "float": float,
-    "str": str,
+    "str": _str,
     "bool": bool,
     "len": len,
     "now": time.time,
@@ -135,7 +219,7 @@ _SAFE_FUNCTIONS = {
     "upper": lambda s: _text(s).upper(),
     "lower": lambda s: _text(s).lower(),
     "strip": lambda s, chars=None: _text(s).strip(chars),
-    "replace": lambda s, old, new: _text(s).replace(str(old), str(new)),
+    "replace": _replace,
     "split": lambda s, sep=None, limit=-1: _text(s).split(sep, int(limit)),
     "join": _join,
     "startswith": lambda s, prefix: _text(s).startswith(prefix),
@@ -145,7 +229,7 @@ _SAFE_FUNCTIONS = {
     "hex": hex,
     "utc": _utc,
     # collections
-    "sum": sum,
+    "sum": _sum,
     "any": any,
     "all": all,
     "sorted": sorted,
@@ -181,16 +265,25 @@ def parse(source):
     cached = _PARSE_CACHE.get(source)
     if cached is not None:
         return cached
+    if len(source) > MAX_SOURCE_LENGTH:
+        raise ExpressionError(f"Expression is longer than {MAX_SOURCE_LENGTH} characters")
     rewritten = rewrite_triplets(source.strip())
     try:
         tree = ast.parse(rewritten, mode="eval")
     except SyntaxError as error:
-        raise ExpressionError(f"Invalid expression '{source}': {error.msg}") from None
+        raise ExpressionError(f"Invalid expression '{_short(source)}': {error.msg}") from None
+    except (RecursionError, MemoryError):
+        raise ExpressionError(f"Expression is nested too deeply: '{_short(source)}'") from None
     _check_nodes(tree, source)
-    if len(_PARSE_CACHE) > 5000:
-        _PARSE_CACHE.clear()
-    _PARSE_CACHE[source] = tree
+    if len(source) <= _CACHE_SOURCE_LENGTH:
+        if len(_PARSE_CACHE) >= _CACHE_ENTRIES:
+            _PARSE_CACHE.clear()
+        _PARSE_CACHE[source] = tree
     return tree
+
+
+def _short(source, length=80):
+    return source if len(source) <= length else source[:length] + "…"
 
 
 _ALLOWED_NODES = (
@@ -218,7 +311,11 @@ _ALLOWED_NODES = (
 
 
 def _check_nodes(tree, source):
-    for node in ast.walk(tree):
+    for count, node in enumerate(ast.walk(tree)):
+        if count >= MAX_AST_NODES:
+            raise ExpressionError(f"Expression is too complex (more than {MAX_AST_NODES} parts): '{_short(source)}'")
+        if isinstance(node, ast.Constant) and isinstance(node.value, (bytes, complex)):
+            raise ExpressionError(f"Byte strings and complex numbers are not supported in '{_short(source)}'")
         if not isinstance(node, _ALLOWED_NODES):
             raise ExpressionError(f"'{type(node).__name__}' is not allowed in expression '{source}'")
         if isinstance(node, ast.Call):
@@ -272,7 +369,10 @@ class Evaluator:
         self.tlm_lookup = tlm_lookup
 
     def evaluate(self, source):
-        return self._eval(parse(source).body)
+        try:
+            return self._eval(parse(source).body)
+        except (RecursionError, MemoryError):
+            raise ExpressionError(f"Expression too large to evaluate: '{_short(source)}'") from None
 
     def truthy(self, source):
         return bool(self.evaluate(source))
@@ -312,13 +412,7 @@ class Evaluator:
         if isinstance(node, ast.BinOp):
             left = self._eval(node.left)
             right = self._eval(node.right)
-            if isinstance(node.op, ast.Pow) and isinstance(right, (int, float)) and abs(right) > MAX_POWER_EXPONENT:
-                raise ExpressionError("Exponent too large")
-            if isinstance(node.op, ast.Mult):
-                for seq, count in ((left, right), (right, left)):
-                    sized = isinstance(seq, (str, list, tuple)) and isinstance(count, int)
-                    if sized and len(seq) * count > MAX_RESULT_LENGTH:
-                        raise ExpressionError("Result too large")
+            _check_binop(node.op, left, right)
             try:
                 return _BIN_OPS[type(node.op)](left, right)
             except Exception as error:
@@ -384,11 +478,40 @@ class Evaluator:
             return self.variables.get(args[0], args[1] if len(args) == 2 else None)
         try:
             result = _SAFE_FUNCTIONS[name](*args)
+        except ExpressionError as error:
+            raise ExpressionError(f"{name}(): {error}") from None
         except Exception as error:
             raise ExpressionError(f"{name}(): {error}") from None
-        if isinstance(result, (str, list)) and len(result) > MAX_RESULT_LENGTH:
+        return _too_big(result) if isinstance(result, (str, list, tuple, dict)) else result
+
+
+def _int_bits(value):
+    return value.bit_length() if isinstance(value, int) else 0
+
+
+def _check_binop(op, left, right):
+    """Refuse an operation whose result would be huge, before computing it."""
+    if isinstance(op, ast.Pow) and isinstance(right, (int, float)):
+        if abs(right) > MAX_POWER_EXPONENT:
+            raise ExpressionError("Exponent too large")
+        if isinstance(left, int) and isinstance(right, int) and right > 0 and _int_bits(left) * right > MAX_INT_BITS:
             raise ExpressionError("Result too large")
-        return result
+    elif isinstance(op, ast.LShift) and isinstance(right, int):
+        if right > MAX_INT_BITS or _int_bits(left) + right > MAX_INT_BITS:
+            raise ExpressionError("Result too large")
+    elif isinstance(op, ast.Mult):
+        if isinstance(left, int) and isinstance(right, int) and _int_bits(left) + _int_bits(right) > MAX_INT_BITS:
+            raise ExpressionError("Result too large")
+        for seq, count in ((left, right), (right, left)):
+            repeats = isinstance(seq, (str, bytes, list, tuple)) and isinstance(count, int) and count > 0
+            if repeats and size_of(seq) * count > MAX_RESULT_LENGTH:
+                raise ExpressionError("Result too large")
+    elif isinstance(op, ast.Add):
+        sequences = isinstance(left, (str, bytes, list, tuple)) and isinstance(right, (str, bytes, list, tuple))
+        if sequences and size_of(left) + size_of(right) > MAX_RESULT_LENGTH:
+            raise ExpressionError("Result too large")
+    elif isinstance(op, ast.Mod) and isinstance(left, (str, bytes)):
+        raise ExpressionError("'%' formatting of text is not supported; use format() or a template")
 
 
 def check_syntax(source):

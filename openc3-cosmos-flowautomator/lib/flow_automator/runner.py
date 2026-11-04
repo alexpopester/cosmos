@@ -20,6 +20,7 @@ from .graph import ERROR_HANDLE, MODES, NODE_TYPES, Graph, is_trigger
 
 MAX_STEPS_RECORDED = 1000
 DEFAULT_MAX_STEPS = 100_000
+HARD_MAX_STEPS = 1_000_000  # a flow's own max_steps can't go above this
 SCRIPT_DONE_STATES = ("completed", "completed_errors", "stopped", "crashed", "killed")
 SCRIPT_POLL_SECONDS = 1.0
 APPROVAL_DECISIONS = ("go", "run", "abort")
@@ -97,7 +98,11 @@ class FlowRun:
         self.steps = []
         self.steps_dropped = 0
         self.step_count = 0
-        self.max_steps = int(self.flow.get("max_steps") or DEFAULT_MAX_STEPS)
+        try:
+            self.max_steps = int(self.flow.get("max_steps") or DEFAULT_MAX_STEPS)
+        except (TypeError, ValueError):
+            self.max_steps = DEFAULT_MAX_STEPS
+        self.max_steps = max(1, min(self.max_steps, HARD_MAX_STEPS))
         self.active = {}
         self.children = []
         self.loop_counters = {}
@@ -235,14 +240,19 @@ class FlowRun:
                     # One branch failing or ending finishes the whole run
                     self._cancel.set()
 
-        threads = [
-            threading.Thread(target=run_branch, args=(i, start), name=f"flow-run-{self.id}-b{i}", daemon=True)
-            for i, start in enumerate(branches)
-        ]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
+        if not self.engine.reserve_branch_threads(len(branches)):
+            raise RunFailedError(f"'{node_label(node)}': too many parallel branches running in the engine; not started")
+        try:
+            threads = [
+                threading.Thread(target=run_branch, args=(i, start), name=f"flow-run-{self.id}-b{i}", daemon=True)
+                for i, start in enumerate(branches)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        finally:
+            self.engine.release_branch_threads(len(branches))
 
         if isolate:
             # Merge each branch's changes back in wire order (later branches win) and keep them per branch

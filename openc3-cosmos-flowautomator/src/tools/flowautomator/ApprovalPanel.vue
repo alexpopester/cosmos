@@ -134,9 +134,9 @@
           <v-spacer />
           <v-btn
             size="small"
-            color="warning"
-            variant="tonal"
+            variant="flat"
             prepend-icon="mdi-stop"
+            class="fa-btn-caution"
             :disabled="busy === a.id"
             @click="decide(a, 'abort')"
           >
@@ -147,14 +147,15 @@
       <div v-if="!a.ask" class="d-flex px-3 pb-2">
         <v-btn
           size="small"
-          :color="a.reason.includes('HAZARDOUS') ? 'error' : 'success'"
           variant="flat"
-          prepend-icon="mdi-play"
-          class="mr-2"
+          :prepend-icon="hazardous(a) ? 'mdi-alert' : 'mdi-play'"
+          class="mr-2 fa-approval-go"
+          :class="hazardous(a) ? 'fa-btn-danger' : 'fa-btn-go'"
           :loading="busy === a.id"
-          @click="decide(a, 'go')"
+          :disabled="fresh.includes(a.id)"
+          @click="go(a, 'go')"
         >
-          Go
+          {{ hazardous(a) ? 'Send hazardous…' : 'Go' }}
         </v-btn>
         <v-btn
           size="small"
@@ -162,17 +163,17 @@
           prepend-icon="mdi-run-fast"
           class="mr-2"
           title="Approve this step and stop asking for routine steps in this run. Hazardous commands still ask."
-          :disabled="busy === a.id"
-          @click="decide(a, 'run')"
+          :disabled="busy === a.id || fresh.includes(a.id)"
+          @click="go(a, 'run')"
         >
           Go &amp; run rest
         </v-btn>
         <v-spacer />
         <v-btn
           size="small"
-          color="warning"
-          variant="tonal"
+          variant="flat"
           prepend-icon="mdi-stop"
+          class="fa-btn-caution"
           :disabled="busy === a.id"
           @click="decide(a, 'abort')"
         >
@@ -180,11 +181,51 @@
         </v-btn>
       </div>
     </v-card>
+
+    <!-- Approving a hazardous command sends it: ask once more, showing exactly what goes out -->
+    <v-dialog v-model="confirm.show" max-width="520">
+      <v-card v-if="confirm.approval">
+        <v-card-title class="text-error d-flex align-center">
+          <v-icon class="mr-2">mdi-alert</v-icon>Send a hazardous command?
+        </v-card-title>
+        <v-card-text>
+          <div class="mb-2">
+            <b>{{ confirm.approval.flow_name }}</b> ·
+            {{ confirm.approval.label }} · run {{ confirm.approval.run_id }}
+          </div>
+          <pre class="fa-approval-preview">{{ confirm.approval.preview }}</pre>
+          <div class="text-caption mt-2">
+            This is exactly what will be sent. If a value changes before it goes
+            out, the step fails instead of sending something else.
+            <template v-if="confirm.decision === 'run'">
+              Routine steps after it stop asking; later hazardous commands still
+              ask.
+            </template>
+          </div>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" autofocus @click="confirm.show = false">
+            Cancel
+          </v-btn>
+          <v-btn
+            variant="flat"
+            prepend-icon="mdi-alert"
+            class="fa-btn-danger fa-confirm-hazardous"
+            @click="confirmHazardous"
+          >
+            Send hazardous command
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
   </div>
 </template>
 
 <script>
 import flowApi, { errorInfo } from './flowApi'
+
+const FRESH_MS = 750
 
 export default {
   props: {
@@ -194,19 +235,58 @@ export default {
   },
   emits: ['decided'],
   data() {
-    return { busy: null, answers: {}, minimized: false, minimizedIds: [] }
+    return {
+      busy: null,
+      answers: {},
+      minimized: false,
+      minimizedIds: [],
+      // Cards that just appeared ignore clicks for a moment, so a fast second click meant for the
+      // previous card can't approve the next step that took its place
+      fresh: [],
+      seen: [],
+      confirm: { show: false, approval: null, decision: null },
+    }
   },
   watch: {
-    approvals(list) {
-      if (
-        this.minimized &&
-        list.some((a) => !this.minimizedIds.includes(a.id))
-      ) {
-        this.minimized = false
-      }
+    approvals: {
+      immediate: true,
+      handler(list) {
+        if (
+          this.minimized &&
+          list.some((a) => !this.minimizedIds.includes(a.id))
+        ) {
+          this.minimized = false
+        }
+        const added = list.filter((a) => !this.seen.includes(a.id))
+        if (!added.length) return
+        this.seen = [...this.seen, ...added.map((a) => a.id)].slice(-200)
+        const ids = added.map((a) => a.id)
+        this.fresh = [...this.fresh, ...ids]
+        setTimeout(() => {
+          this.fresh = this.fresh.filter((id) => !ids.includes(id))
+        }, FRESH_MS)
+      },
     },
   },
   methods: {
+    hazardous(approval) {
+      return approval.reason.includes('HAZARDOUS')
+    },
+    go(approval, decision) {
+      if (this.fresh.includes(approval.id)) return
+      if (this.hazardous(approval)) {
+        this.confirm = { show: true, approval, decision }
+        return
+      }
+      this.decide(approval, decision)
+    },
+    confirmHazardous() {
+      const { approval, decision } = this.confirm
+      this.confirm = { show: false, approval: null, decision: null }
+      if (approval && this.approvals.some((a) => a.id === approval.id)) {
+        this.decide(approval, decision)
+      }
+    },
     minimize() {
       this.minimizedIds = this.approvals.map((a) => a.id)
       this.minimized = true
@@ -276,6 +356,27 @@ export default {
 }
 .fa-approval-hazardous {
   border-left-color: rgb(var(--v-theme-error));
+}
+/* COSMOS's global CSS paints every filled button the primary blue (!important), which erased the
+   meaning of Go / Abort / Stop all. These win on specificity: use them for buttons whose colour matters. */
+.v-application .v-btn.fa-btn-danger.fa-btn-danger,
+.v-application .v-btn.fa-btn-danger.fa-btn-danger:hover {
+  background-color: rgb(var(--v-theme-error)) !important;
+  color: #fff !important;
+}
+.v-application .v-btn.fa-btn-caution.fa-btn-caution,
+.v-application .v-btn.fa-btn-caution.fa-btn-caution:hover {
+  background-color: rgb(var(--v-theme-warning)) !important;
+  color: #000 !important;
+}
+.v-application .v-btn.fa-btn-go.fa-btn-go,
+.v-application .v-btn.fa-btn-go.fa-btn-go:hover {
+  background-color: rgb(var(--v-theme-success)) !important;
+  color: #000 !important;
+}
+.v-application .v-btn.fa-btn-danger.v-btn--disabled,
+.v-application .v-btn.fa-btn-go.v-btn--disabled {
+  opacity: 0.5;
 }
 .fa-approval-preview {
   font-family: monospace;

@@ -200,3 +200,185 @@ def test_queued_trigger_dropped_when_flow_disarmed(engine, backend):
     engine.set_armed(saved["id"], False)
     assert wait_until(lambda: not engine.runs)
     assert backend.commands == ["INST X"]
+
+
+# SEC-1 / SEC-4 / ENG-5: expressions can't stall or exhaust the engine
+import time  # noqa: E402
+
+import pytest  # noqa: E402
+from flow_automator.expressions import Evaluator, ExpressionError, parse  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "((9**1000)**1000)**1000",
+        "1 << 100000000",
+        "str([[0] * 99999] * 99999)",
+        "[[0] * 99999] * 99999",
+        "sum([[0] * 3000] * 3000, [])",
+        "format(1, '>999999999')",
+        "round(1, -3000000)",
+        "replace(s, '', s)",
+        "s + s",
+        "join(',', [s, s])",
+        "'%999999999d' % 1",
+        "b'a' * 50000000",
+        "1j",
+    ],
+)
+def test_expression_bombs_are_refused_quickly(source):
+    evaluator = Evaluator({"s": "a" * 60_000})
+    started = time.monotonic()
+    with pytest.raises(ExpressionError):
+        evaluator.evaluate(source)
+    assert time.monotonic() - started < 1.0
+
+
+def test_huge_or_deep_sources_are_refused():
+    with pytest.raises(ExpressionError, match="longer than"):
+        parse("[" + "1," * 1_000_000 + "]")
+    with pytest.raises(ExpressionError):
+        parse("+".join(["1"] * 4000))  # within the length limit, too many parts
+    with pytest.raises(ExpressionError):
+        parse("(" * 3000 + "1" + ")" * 3000)
+
+
+def test_ordinary_expressions_still_work():
+    evaluator = Evaluator({"s": "abc", "values": [1, 2, 3]})
+    assert evaluator.evaluate("sum(values)") == 6
+    assert evaluator.evaluate("round(3.14159, 2)") == 3.14
+    assert evaluator.evaluate("format(3.14159, '8.3f')") == "   3.142"
+    assert evaluator.evaluate("replace(s, 'b', 'xx')") == "axxc"
+    assert evaluator.evaluate("join('-', values)") == "1-2-3"
+    assert evaluator.evaluate("2 ** 100") == 2**100
+    assert evaluator.evaluate("s * 3 + 'd'") == "abcabcabcd"
+    assert evaluator.evaluate("10 % 3") == 1
+
+
+def test_validate_needs_write_permission(engine):
+    from flow_automator.http_api import AuthError, FlowApi
+
+    def readonly(token, write):
+        if write:
+            raise AuthError("Changing flows needs the script_run permission", 403)
+        return {"username": "viewer"}
+
+    api = FlowApi(engine, readonly)
+    status, _ = api.handle("POST", "/flow-automator/api/validate", {}, {"Authorization": "t"}, b"{}")
+    assert status == 403
+
+
+# SEC-5 / ENG-16: fan-out is bounded
+def test_parallel_branch_limit_in_validation():
+    from flow_automator.graph import MAX_PARALLEL_BRANCHES, validate_flow
+
+    count = MAX_PARALLEL_BRANCHES + 1
+    nodes = [node("t", "trigger_manual"), node("p", "parallel")] + [
+        node(f"l{i}", "log", message="x") for i in range(count)
+    ]
+    edges = [edge("t", "p")] + [edge("p", f"l{i}") for i in range(count)]
+    problems = validate_flow(make_flow(nodes, edges))
+    assert any("at most" in p["message"] for p in problems)
+
+
+def test_branch_thread_budget_fails_the_run(engine, backend, monkeypatch):
+    import flow_automator.engine as engine_module
+
+    monkeypatch.setattr(engine_module, "MAX_BRANCH_THREADS", 1)
+    flow = make_flow(
+        [
+            node("t", "trigger_manual"),
+            node("p", "parallel"),
+            node("a", "log", message="a"),
+            node("b", "log", message="b"),
+        ],
+        [edge("t", "p"), edge("p", "a"), edge("p", "b")],
+    )
+    record = run_to_end(engine, flow)
+    assert record["status"] == "failed" and "too many parallel branches" in record["message"]
+    assert engine.branch_threads == 0
+
+
+def test_subflows_count_against_active_runs(engine, monkeypatch):
+    import flow_automator.engine as engine_module
+
+    child, _ = engine.save_flow(
+        make_flow([node("t", "trigger_manual"), node("l", "log", message="c")], [edge("t", "l")])
+    )
+    monkeypatch.setattr(engine_module, "MAX_ACTIVE_RUNS", 1)
+    flow = make_flow(
+        [node("t", "trigger_manual"), node("s", "subflow", flow_id=child["id"])],
+        [edge("t", "s")],
+    )
+    record = run_to_end(engine, flow)
+    assert record["status"] == "failed" and "Too many active runs" in record["message"]
+
+
+def test_max_steps_is_clamped(engine):
+    from flow_automator.runner import HARD_MAX_STEPS, FlowRun
+
+    flow = make_flow([node("t", "trigger_manual")], [], max_steps=10**12)
+    run = FlowRun(engine, flow, "t", "test", {})
+    assert run.max_steps == HARD_MAX_STEPS
+
+
+# SEC-8 / ENG-18: the flow's mode is a floor, and relaxing an armed flow disarms it
+def test_run_cannot_use_a_less_cautious_mode(engine, backend):
+    saved, _ = engine.save_flow(_walk_flow("INST X"))
+    from flow_automator.engine import EngineError
+
+    with pytest.raises(EngineError, match="mode is walk"):
+        engine.trigger(saved["id"], manual=True, mode="run")
+    # More cautious is fine, and so is a dry run (it sends nothing)
+    assert engine.trigger(saved["id"], manual=True, mode="crawl")["result"] == "started"
+    engine.stop_all()
+    assert wait_until(lambda: not engine.runs)
+    assert engine.trigger(saved["id"], manual=True, mode="run", dry_run=True)["result"] == "started"
+
+
+def test_relaxing_an_armed_flow_disarms_it(engine):
+    saved, _ = engine.save_flow(_walk_flow("INST X"))
+    engine.set_armed(saved["id"], True)
+    renamed, _ = engine.save_flow({**saved, "name": "Renamed"}, saved["id"])
+    assert renamed["armed"] is True  # harmless edits keep it armed
+    relaxed = {**renamed, "nodes": [dict(n) for n in renamed["nodes"]]}
+    relaxed["nodes"][1] = {**relaxed["nodes"][1], "data": {**relaxed["nodes"][1]["data"], "allow_hazardous": True}}
+    flow, _ = engine.save_flow(relaxed, saved["id"])
+    assert flow["armed"] is False and "Allow hazardous" in flow["disarmed_reason"]
+    engine.set_armed(saved["id"], True)
+    flow, _ = engine.save_flow({**engine.get_flow(saved["id"]), "mode": "run"}, saved["id"])
+    assert flow["armed"] is False and "mode walk -> run" in flow["disarmed_reason"]
+    assert "disarmed_reason" not in engine.set_armed(saved["id"], True)
+
+
+# SEC-7 / CON-16: webhooks can't reach metadata services, follow redirects or read responses back
+def test_webhook_to_link_local_is_refused(engine):
+    from flow_automator.alerts import AlertError, blocked_address
+
+    assert blocked_address("169.254.169.254")
+    assert blocked_address("fe80::1")
+    assert blocked_address("localhost") is None  # on-prem receivers are allowed
+    assert blocked_address("10.1.2.3") is None
+    with pytest.raises(AlertError, match="link-local"):
+        engine.alerts.save_settings({"webhooks": [{"name": "meta", "url": "http://169.254.169.254/latest"}]})
+
+
+def test_webhook_errors_do_not_echo_the_response(monkeypatch):
+    import flow_automator.alerts as alerts
+
+    class Response:
+        status_code = 500
+        reason = "Internal Server Error"
+        text = "SECRET internal page"
+
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append(kwargs)
+        return Response()
+
+    monkeypatch.setattr(alerts.requests, "post", fake_post)
+    with pytest.raises(RuntimeError) as error:
+        alerts.Alerter._post("http://10.0.0.5/hook", {})
+    assert "SECRET" not in str(error.value) and calls[0]["allow_redirects"] is False

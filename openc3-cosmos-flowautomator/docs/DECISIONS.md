@@ -71,8 +71,16 @@ in a server-side, always-on engine that sends commands is unacceptable.
   works disarmed.
 - Stop all disarms everything, drops queues, stops runs and pauses the
   contact scheduler.
-- Execution modes crawl/walk/run per flow, overridable per run; sub-flows
-  run at the stricter of theirs and the caller's.
+- Execution modes crawl/walk/run per flow. A real run can override the
+  mode only towards *more* caution; a dry run can use any mode. Sub-flows run
+  at the stricter of theirs and the caller's. (Amended 2026-11-04: it used to
+  be overridable either way, which let any `script_run` user run a crawl
+  flow with no approvals; see the evaluation, SEC-8.)
+- An armed flow whose save relaxes its safety settings is disarmed: a less
+  cautious mode, or *Allow hazardous* / *Allow raw values* turned on (added
+  2026-11-04).
+- Approval covers the exact command shown: the executor refuses to send a
+  re-rendered command that differs (added 2026-11-04, ENG-1).
 - Hazardous commands: in run mode they fail unless the node has *Allow
   hazardous*; in crawl/walk the operator's approval is the acknowledgement.
 - Re-trigger policy defaults to *skip*.
@@ -201,3 +209,41 @@ them.
 *Consequences:* quick development builds need a one-line entry too; several
 of them can be folded into one entry before release. Versions 1.0.0–1.7.8
 are summarised by commit, because they predate the changelog.
+
+## D21. Webhooks may reach private networks, but not link-local addresses
+
+Webhook URLs may point at private-network and localhost receivers. Link-local
+addresses (169.254.0.0/16, fe80::/10, where cloud metadata services live),
+multicast and unspecified addresses are refused, both when saving and at
+send time (after DNS resolution). Redirects aren't followed, and a failed
+delivery reports only the HTTP status, never the response body.
+
+*Why:* on-premises and air-gapped ops networks run their chat and paging
+services on private addresses, so blocking private ranges would break the
+main use. What made webhooks a server-side request forgery risk (reading a
+response back, metadata services, redirects) is closed. Writes already need
+`script_run`, which can run any script anyway.
+*Consequences:* an admin-set allow-list of domains would be the next step if
+a deployment needs it.
+
+## D22. Expressions have resource limits
+
+`expressions.py` caps:
+
+- source length (10,000 characters) and syntax tree size (2,000 nodes);
+- result size: 100,000 characters or elements, counting nested ones;
+- integer size: 64,000 bits;
+- `format` widths (200) and `round` digits (100).
+
+Operations that could build a huge value check sizes *before* computing.
+`sum` takes numbers only, and `%` on text is refused. Only short
+expressions are kept in the parse cache. `/api/validate` needs write
+permission.
+
+*Why:* evaluation runs on engine threads, and one big expression held the
+GIL for tens of seconds and could run the operator container out of memory.
+That froze every trigger and STOP ALL with it, and took down every
+interface (SEC-1, SEC-4, ENG-5).
+*Consequences:* new safe functions must be bounded in the same way. Check
+the size before building the result, not after.
+

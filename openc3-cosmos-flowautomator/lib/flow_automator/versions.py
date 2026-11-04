@@ -25,7 +25,7 @@ SETTINGS = (
     "dry_run",
     "max_steps",
 )
-VOLATILE = ("armed", "updated_at", "created_at", "version", "saved_by", "saved_note")
+VOLATILE = ("armed", "updated_at", "created_at", "version", "saved_by", "saved_note", "disarmed_reason")
 
 
 def content(flow):

@@ -278,14 +278,16 @@ class ContactPlanner:
                 ):
                     continue  # changed while predicting; it's queued again
                 station_set = {s["id"] for s in stations} if station_ids is not None else None
+                previous = {}
                 for key in list(self.pair_contacts):
                     if key[0] == sat_id and (station_set is None or key[1] in station_set):
-                        del self.pair_contacts[key]
+                        previous[key] = self.pair_contacts.pop(key)
                 for station in stations:
                     live = self.stations.get(station["id"])
                     if live is None or not live.get("enabled", True):
                         continue
-                    self.pair_contacts[(sat_id, station["id"])] = contacts.get(station["id"], [])
+                    key = (sat_id, station["id"])
+                    self.pair_contacts[key] = _keep_ids(contacts.get(station["id"], []), previous.get(key, []))
                 if problem:
                     if problem.startswith("Prediction failed") and self.problems.get(sat_id) != problem:
                         self.alert(
@@ -533,6 +535,17 @@ class ContactPlanner:
 
     def _retime(self, now):
         for activity in self.activities.values():
+            if self._is_tombstone(activity) and activity["contact"]["los"] >= now:
+                # A rule activity an operator cancelled follows its pass too, so it keeps blocking that pass
+                # however far TLE updates move it over the days
+                nearest = self._nearest_contact(activity)
+                close = (
+                    nearest is not None and abs(nearest["tca"] - activity["contact"]["tca"]) <= self.retime_tolerance
+                )
+                if close and nearest["id"] != activity["contact"]["id"]:
+                    activity["contact"] = self._contact_ref(nearest)
+                    self._save("activities", activity)
+                continue
             if activity["status"] not in WAITING:
                 continue
             old = activity["contact"]
@@ -587,6 +600,10 @@ class ContactPlanner:
                 activity["message"],
                 key=f"review:{activity['id']}:{activity.get('suggested_contact_id')}",
             )
+
+    @staticmethod
+    def _is_tombstone(activity):
+        return activity["status"] == "cancelled" and activity.get("rule_id") and not activity.get("superseded")
 
     @staticmethod
     def _contact_ref(contact):
@@ -976,10 +993,23 @@ class ContactPlanner:
         )
         if not rules:
             return 0
+        # Passes each rule already has an activity for, including ones an operator cancelled. Matched by
+        # satellite, station and TCA within the re-time tolerance, not by contact id: a routine TLE update
+        # moves TCA a little, which changes the id, and a cancelled pass must not come back because of it.
         taken = {}
         for activity in self.activities.values():
-            if activity.get("rule_id"):
-                taken.setdefault(activity["rule_id"], set()).add(activity["contact"]["id"])
+            if activity.get("rule_id") and not activity.get("superseded"):
+                ref = activity["contact"]
+                taken.setdefault(activity["rule_id"], []).append((ref["satellite_id"], ref["station_id"], ref["tca"]))
+
+        def already_taken(rule_id, contact):
+            return any(
+                sat == contact["satellite_id"]
+                and station == contact["station_id"]
+                and abs(tca - contact["tca"]) <= self.retime_tolerance
+                for sat, station, tca in taken.get(rule_id, ())
+            )
+
         used = self._used_contacts()
         for rule in rules:
             template = self.engine.flows.get(rule["template_id"])
@@ -994,7 +1024,7 @@ class ContactPlanner:
             rule["last_error"] = None
             skipped_full = 0
             for contact in self.contacts:
-                if contact["id"] in taken.get(rule["id"], ()) or not self._rule_matches(rule, contact, now):
+                if already_taken(rule["id"], contact) or not self._rule_matches(rule, contact, now):
                     continue
                 if rule.get("skip_full_stations", True) and self._station_full(contact, used):
                     skipped_full += 1
@@ -1006,7 +1036,9 @@ class ContactPlanner:
                 activity["message"] = f"Scheduled by rule '{rule['name']}'"
                 self.activities[activity["id"]] = activity
                 self._save("activities", activity)
-                taken.setdefault(rule["id"], set()).add(contact["id"])
+                taken.setdefault(rule["id"], []).append(
+                    (contact["satellite_id"], contact["station_id"], contact["tca"])
+                )
                 used[contact["id"]] = activity["contact"]
                 created += 1
             rule["skipped_full"] = skipped_full
@@ -1362,3 +1394,21 @@ class ContactPlanner:
                 "rules": self.list_rules(),
                 "status": self.status(),
             }
+
+
+SAME_CONTACT_SECONDS = 5.0
+
+
+def _keep_ids(contacts, previous):
+    """Give each newly predicted contact the id of the previous prediction of the same pass.
+
+    Ids end in the rounded TCA, and TCA moves by milliseconds between predictions (and by more after a
+    TLE update), so without this a pass could change id while activities, alerts and links refer to it.
+    """
+    if not previous:
+        return contacts
+    for contact in contacts:
+        match = min(previous, key=lambda old: abs(old["tca"] - contact["tca"]))
+        if abs(match["tca"] - contact["tca"]) <= SAME_CONTACT_SECONDS:
+            contact["id"] = match["id"]
+    return contacts

@@ -234,6 +234,9 @@ def find_passes(propagator, station, start, end, step=COARSE_STEP_S):
     "tca_azimuth", "duration", "partial"} sorted by AOS. A pass already in progress at
     ``start`` (or not over by ``end``) is clipped to the window and marked partial.
     """
+    # Sample on absolute multiples of the step, so the same TLE gives the same pass times (and contact ids)
+    # however the window slides
+    start = math.floor(start / step) * step
     times = np.arange(start, end + step, step)
     times[-1] = min(times[-1], end)
     ecef, ok = propagator.ecef(times)

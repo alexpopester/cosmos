@@ -103,10 +103,26 @@ Parallel, whose wires all run at once until they meet at a Join. Nodes that
 can fail have an **error** output; if it's wired the run continues there
 (with the message in the `error` variable), otherwise the run fails.
 
-New and imported flows start **disarmed**; saving keeps a flow armed unless
-the saved version has problems, which disarms it. Arm a flow to let its
-triggers fire; **Run now** works either way. **Stop all** disarms every flow, stops every run and
-pauses the contact scheduler.
+New and imported flows start **disarmed**. Saving keeps a flow armed,
+except in two cases, which disarm it:
+
+- the saved version has problems;
+- the save relaxes its safety settings: a less cautious mode, or *Allow
+  hazardous* or *Allow raw values* turned on. Arm it again to accept the
+  change, so a relaxed flow never fires unreviewed.
+
+Arm a flow to let its triggers fire; **Run now** works either way.
+
+**Stop all** does four things:
+
+- pauses the contact scheduler first, so nothing starts after it;
+- disarms every flow;
+- stops every run;
+- stops scripts that runs started without waiting.
+
+If COSMOS can't be reached to check your login, Stop all still works, and
+the audit log notes that the token wasn't verified. If Stop all fails, a
+dialog stays open with **Retry**.
 
 ### Finding your way around the Flows view
 
@@ -142,10 +158,28 @@ pauses the contact scheduler.
 | Walk | Before hazardous commands and steps marked *Ask operator first* |
 | Run | Never. A hazardous command fails unless its node has *Allow hazardous* |
 
-Approvals show on the canvas and in the toolbar: **Go**, **Go & run rest**
-(stop asking for routine steps in this run; hazardous commands still ask) or
-**Abort run**. A flow's *Approval timeout* fails the step if nobody answers.
-A sub-flow runs at least as cautiously as the run that called it.
+Approvals show on the canvas and in the toolbar. The choices are:
+
+- **Go**;
+- **Go & run rest**: stop asking for routine steps in this run (hazardous
+  commands still ask);
+- **Abort run**.
+
+A hazardous command's button is red, **Send hazardous…**. It asks once more,
+showing exactly the command that goes out.
+
+What you approve is what is sent. If a value in the command changes while
+the approval waits, the step fails instead of sending something else.
+
+A card that has just appeared ignores clicks for a moment. That way a quick
+second click meant for the previous card can't approve the next step.
+
+A flow's *Approval timeout* fails the step if nobody answers.
+
+A flow's mode is the least cautious a real run can use. **Run…** can pick a
+more cautious mode, or any mode for a dry run, which sends nothing. To run
+with fewer approvals, change the flow's mode: that is a saved, versioned
+change. A sub-flow runs at least as cautiously as the run that called it.
 
 ### If triggered while running
 
@@ -170,11 +204,23 @@ Conditions are a safe subset of Python: arithmetic, comparisons, `and`/`or`,
 There's no attribute access (`x.upper()`), import or lambda, so a condition
 can't run arbitrary code; the functions above cover what methods would.
 
+Expressions are also bounded, so one can't stall the engine:
+
+- up to 10,000 characters and 2,000 parts;
+- text and lists up to 100,000 characters or elements;
+- integers up to about 19,000 digits;
+- `format` widths and `round` digits up to a few hundred.
+
+`sum` adds numbers only; use `join` for text. `%` formatting of text isn't
+supported; use `format()` or a template.
+
 Text fields (commands, script names, log messages) take `{{ expression }}`:
 `INST COLLECT with TYPE {{ collect_type }}, DURATION {{ round(tlm('INST HEALTH_STATUS TEMP1') / 10, 1) }}`.
-A value inserted into a command can't change it: outside quotes it can't
-contain commas, quotes or `with`, inside quotes it can't contain that quote,
-or the step fails. Quote string values in the command (`NOTE '{{ note }}'`),
+A value inserted into a command can't change it, or the step fails:
+
+- outside quotes it can't contain commas, quotes, `with`, backslashes or
+  `[ ]`, and after `with` it can't contain spaces;
+- inside quotes it can't contain that quote or a backslash. Quote string values in the command (`NOTE '{{ note }}'`),
 or turn on the node's *Allow raw values* when the value is meant to be command
 text (a command parameter).
 
@@ -291,8 +337,13 @@ since they were scheduled (*template v3 → v5*).
   prediction, and Notify nodes set to alert. Runs you start yourself, Stop all
   and routine events only go to the bell. Dry runs never ring it.
 - **Webhooks**: Slack or Teams incoming webhooks, or generic JSON for
-  anything else. URLs are shown masked once saved. Set the COSMOS address so
-  links in messages open the tool.
+  anything else.
+  - URLs are shown masked once saved.
+  - Set the COSMOS address so links in messages open the tool.
+  - Private-network and localhost receivers work.
+  - Link-local addresses (cloud metadata services) are refused.
+  - Redirects aren't followed.
+  - A failed delivery reports only the HTTP status, not the response body.
 
 Events: approval waiting, run failed or stopped, activity missed, failed,
 needing review, started or done, Stop all, scheduler paused, TLE stale,

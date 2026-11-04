@@ -23,6 +23,7 @@ from .templates import check_parameters
 
 
 POLICIES = ("skip", "queue", "parallel")
+MAX_PARALLEL_BRANCHES = 16
 # Execution modes, most cautious first: crawl asks the operator before every
 # step, walk only before steps marked require_approval and hazardous commands,
 # run never asks
@@ -156,6 +157,8 @@ def validate_flow(flow):
     for node in nodes:
         if node.get("type") == "parallel" and used_handles.get((node["id"], "out"), 0) < 2:
             problem("Parallel needs at least two outgoing wires", node["id"])
+        if node.get("type") == "parallel" and used_handles.get((node["id"], "out"), 0) > MAX_PARALLEL_BRANCHES:
+            problem(f"Parallel can start at most {MAX_PARALLEL_BRANCHES} branches", node["id"])
     return problems
 
 
