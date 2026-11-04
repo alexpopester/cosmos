@@ -153,6 +153,30 @@ class FlowEngine:
                 raise NotFoundError(f"Flow '{flow_id}' not found")
             return copy.deepcopy(flow)
 
+    def snapshot_flow(self, flow_id):
+        """A copy of a flow plus copies of every sub-flow it calls, directly or not (``subflow_snapshots``).
+
+        A scheduled activity keeps this, so what was reviewed is what runs: its sub-flows run as they were
+        when it was scheduled (or refreshed), not as they are when it starts (DECISIONS D11).
+        """
+        with self.lock:
+            flow = self.flows.get(flow_id)
+            if flow is None:
+                raise NotFoundError(f"Flow '{flow_id}' not found")
+            snapshot = copy.deepcopy(flow)
+            snapshots = {}
+            pending = subflow_ids(snapshot)
+            while pending:
+                child_id = pending.pop()
+                child = self.flows.get(child_id)
+                if child_id in snapshots or child is None:
+                    continue  # a missing sub-flow fails the run when it's called, as it would unpinned
+                snapshots[child_id] = copy.deepcopy(child)
+                pending.extend(subflow_ids(child))
+            if snapshots:
+                snapshot["subflow_snapshots"] = snapshots
+            return snapshot
+
     def save_flow(self, flow, flow_id=None, user=None, note="", base_version=None, force=False, restored_from=None):
         """Create (flow_id None) or replace a flow, recording a new version. Returns (flow, problems).
 
@@ -485,7 +509,15 @@ class FlowEngine:
         with self.lock:
             if len(self.runs) >= MAX_ACTIVE_RUNS:
                 raise RuntimeError(f"Too many active runs ({MAX_ACTIVE_RUNS}), sub-flow not started")
-            flow = self.flows.get(flow_id)
+            if parent.pinned_subflows is not None:
+                # A scheduled activity's run: the sub-flow as it was when the activity was scheduled
+                flow = parent.pinned_subflows.get(flow_id)
+                if flow is None:
+                    raise RuntimeError(
+                        f"Sub-flow '{flow_id}' isn't in this activity's snapshot: refresh the activity's template"
+                    )
+            else:
+                flow = self.flows.get(flow_id)
             if flow is None:
                 raise RuntimeError(f"Sub-flow '{flow_id}' not found")
             entry = next((n for n in flow.get("nodes") or [] if n["type"] == "trigger_manual"), None)
@@ -736,6 +768,15 @@ class FlowEngine:
                 "contacts": contacts,
                 "time": time.time(),
             }
+
+
+def subflow_ids(flow):
+    """Ids of the flows a flow's Sub-flow nodes call."""
+    return [
+        (node.get("data") or {}).get("flow_id")
+        for node in flow.get("nodes") or []
+        if node.get("type") == "subflow" and (node.get("data") or {}).get("flow_id")
+    ]
 
 
 def run_path(flow_id, run_id=None):

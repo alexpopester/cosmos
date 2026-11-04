@@ -427,9 +427,10 @@ the satellite rises). Options:
   scheduler paused) it starts late within this, else it's marked missed.
 - **Stop the run at LOS**, and an **expected duration** for overlap warnings.
 
-The activity keeps a copy of the template from when it was scheduled. If the
-template is edited later the activity says *template changed*; **Update**
-copies the new version.
+The activity keeps a copy of the template, and of every sub-flow it calls,
+from when it was scheduled, so what was reviewed is what runs. If the template
+or one of those sub-flows is edited later, the activity says *template
+changed* or *sub-flow changed*. **Update** copies the current versions.
 
 When a new TLE moves a pass, its activities move with it (up to
 `retime_tolerance`). A pass that moves further, or disappears, leaves its

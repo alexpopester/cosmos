@@ -381,11 +381,20 @@
                     color="info"
                     label
                     class="ml-1"
-                    title="The template was edited after this was scheduled. Update copies the current version."
+                    :title="
+                      (a.subflows_changed || []).length
+                        ? `Sub-flows edited after this was scheduled: ${a.subflows_changed.join(', ')}. It runs them as they were; Update copies the current versions.`
+                        : 'The template was edited after this was scheduled. Update copies the current version.'
+                    "
                   >
-                    template v{{ a.template_version }} → v{{
-                      a.template_current_version
-                    }}
+                    <template
+                      v-if="a.template_version !== a.template_current_version"
+                    >
+                      template v{{ a.template_version }} → v{{
+                        a.template_current_version
+                      }}
+                    </template>
+                    <template v-else>sub-flow changed</template>
                   </v-chip>
                   <v-chip
                     v-if="a.template_missing"

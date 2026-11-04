@@ -700,7 +700,8 @@ class ContactPlanner:
 
     def _template(self, template_id):
         try:
-            return self.engine.get_flow(template_id)
+            # With its sub-flows, so the activity runs them as they are now (D11)
+            return self.engine.snapshot_flow(template_id)
         except Exception as error:  # noqa: BLE001 - NotFoundError from the engine
             raise PlannerNotFoundError(str(error)) from None
 
@@ -850,6 +851,15 @@ class ContactPlanner:
                 self.engine.stop_run(run_id)
         return activity
 
+    def _subflows_changed(self, activity):
+        """Names of the sub-flows that changed (or were deleted) since the activity took its snapshot."""
+        changed = []
+        for flow_id, snapshot in (activity["flow"].get("subflow_snapshots") or {}).items():
+            current = self.engine.flows.get(flow_id)
+            if current is None or current.get("updated_at") != snapshot.get("updated_at"):
+                changed.append(snapshot.get("name") or flow_id)
+        return changed
+
     def _activity(self, activity_id):
         activity = self.activities.get(activity_id)
         if activity is None:
@@ -870,8 +880,9 @@ class ContactPlanner:
         result["template_missing"] = current is None
         result["template_version"] = activity["flow"].get("version")
         result["template_current_version"] = current.get("version") if current else None
-        result["template_changed"] = current is not None and current.get("updated_at") != activity.get(
-            "template_updated_at"
+        result["subflows_changed"] = self._subflows_changed(activity)
+        result["template_changed"] = current is not None and (
+            current.get("updated_at") != activity.get("template_updated_at") or bool(result["subflows_changed"])
         )
         rule = self.rules.get(activity.get("rule_id")) if activity.get("rule_id") else None
         result["rule_name"] = rule["name"] if rule else None
@@ -1029,7 +1040,7 @@ class ContactPlanner:
                 if rule.get("skip_full_stations", True) and self._station_full(contact, used):
                     skipped_full += 1
                     continue
-                activity = self._new_activity(copy.deepcopy(template), now, f"rule:{rule['name']}")
+                activity = self._new_activity(self.engine.snapshot_flow(template["id"]), now, f"rule:{rule['name']}")
                 self._apply_fields(activity, rule, contact, template)
                 activity["label"] = rule.get("label") or rule["name"]
                 activity["rule_id"] = rule["id"]
@@ -1275,6 +1286,10 @@ class ContactPlanner:
             "los": contact["los"],
             "scheduled_start": activity_start(activity),
             "template_version": activity["flow"].get("version"),
+            "subflow_versions": {
+                snapshot.get("name") or flow_id: snapshot.get("version")
+                for flow_id, snapshot in (activity["flow"].get("subflow_snapshots") or {}).items()
+            },
             "detail": f"Scheduled: {self._when(activity)}",
         }
 

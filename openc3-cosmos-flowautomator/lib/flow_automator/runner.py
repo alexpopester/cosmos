@@ -72,6 +72,9 @@ class FlowRun:
     ):
         self.engine = engine
         self.flow = copy.deepcopy(flow)
+        # Sub-flows pinned by a scheduled activity's snapshot (None: sub-flows run their current version)
+        snapshots = self.flow.pop("subflow_snapshots", None)
+        self.pinned_subflows = snapshots if snapshots is not None else (parent.pinned_subflows if parent else None)
         self.graph = Graph(self.flow)
         self.id = uuid.uuid4().hex[:12]
         self.trigger_node_id = trigger_node_id

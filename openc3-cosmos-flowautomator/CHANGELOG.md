@@ -20,6 +20,14 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- A scheduled activity now runs the sub-flows it was scheduled with. It keeps
+  a copy of every sub-flow its template calls, directly or not, and its runs
+  and rehearsals use those copies. Before, an edit to a sub-flow silently
+  changed tonight's passes. A changed sub-flow shows as *sub-flow changed*;
+  **Update** copies the current versions. Activity runs record the sub-flow
+  versions they used (D11).
+
 ## [1.8.0] - 2026-11-04
 
 Safety hardening from the evaluation (`docs/EVALUATION-2026-11-04.md`,

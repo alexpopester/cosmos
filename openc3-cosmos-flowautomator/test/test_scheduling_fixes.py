@@ -68,3 +68,57 @@ def test_load_demo_keeps_a_paused_scheduler_paused(engine, backend):
     engine.stop_all()
     summary = load_demo(engine)
     assert engine.planner.settings["paused"] is True and summary["scheduler_paused"] is True
+
+
+# CON-4 / GAP-14: a scheduled activity runs the sub-flows it was scheduled with (D11)
+def test_activity_runs_pinned_subflows(engine, planner, clock, backend):
+    from conftest import edge, make_flow, node, wait_until
+
+    _sat_station(planner)
+    leaf, _ = engine.save_flow(
+        make_flow([node("t", "trigger_manual"), node("c", "send_cmd", command="INST LEAF_V1")], [edge("t", "c")])
+    )
+    middle, _ = engine.save_flow(
+        make_flow([node("t", "trigger_manual"), node("s", "subflow", flow_id=leaf["id"])], [edge("t", "s")])
+    )
+    flow = template(
+        engine,
+        nodes=[node("t", "trigger_manual"), node("s", "subflow", flow_id=middle["id"])],
+        edges=[edge("t", "s")],
+        parameters=[],
+    )
+    contact = next(c for c in planner.contacts if not c["partial"] and c["aos"] > clock() + 300)
+    activity = planner.create_activity(
+        {"template_id": flow["id"], "contact_id": contact["id"], "anchor": "aos", "offset": 0, "mode": "run"}
+    )
+    assert activity["template_changed"] is False
+    # Someone edits the nested sub-flow after the activity was reviewed and scheduled
+    engine.save_flow({**leaf, "nodes": [leaf["nodes"][0], node("c", "send_cmd", command="INST LEAF_V2")]}, leaf["id"])
+    listed = planner.activity_json(planner.activities[activity["id"]])
+    assert listed["template_changed"] is True and listed["subflows_changed"] == [leaf["name"]]
+
+    clock.now = contact["aos"] + 1
+    planner.tick()
+    assert wait_until(lambda: planner.activities[activity["id"]]["status"] == "done"), planner.activities
+    assert backend.commands == ["INST LEAF_V1"]  # the reviewed version, not the edit
+    run = engine.get_run(planner.activities[activity["id"]]["run_id"])
+    assert run["trigger"]["subflow_versions"] == {leaf["name"]: 1, middle["name"]: 1}
+
+    # A new (or refreshed) activity snapshots the current versions
+    clock.now = EPOCH
+    second = planner.create_activity(
+        {"template_id": flow["id"], "contact_id": contact["id"], "anchor": "aos", "offset": 0, "mode": "run"}
+    )
+    assert planner.activities[second["id"]]["flow"]["subflow_snapshots"][leaf["id"]]["version"] == 2
+
+
+def test_manual_runs_use_current_subflows(engine, backend):
+    from conftest import edge, make_flow, node, run_to_end
+
+    leaf, _ = engine.save_flow(
+        make_flow([node("t", "trigger_manual"), node("c", "send_cmd", command="INST V1")], [edge("t", "c")])
+    )
+    parent = make_flow([node("t", "trigger_manual"), node("s", "subflow", flow_id=leaf["id"])], [edge("t", "s")])
+    engine.save_flow({**leaf, "nodes": [leaf["nodes"][0], node("c", "send_cmd", command="INST V2")]}, leaf["id"])
+    assert run_to_end(engine, parent)["status"] == "success"
+    assert backend.commands == ["INST V2"]

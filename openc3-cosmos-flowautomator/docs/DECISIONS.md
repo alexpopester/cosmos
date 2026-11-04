@@ -129,8 +129,11 @@ gapped; agrees with skyfield to < 0.2 s on pass times.
 ## D11. An activity is a snapshot of a template + parameters + contact + anchor
 
 Templates are ordinary flows with `template: true` and declared parameters.
-Scheduling copies the flow; the activity says *template changed* and offers
-**Update** if the template is edited later.
+Scheduling copies the flow *and every sub-flow it calls* (directly or not,
+`subflow_snapshots`, added 2026-11-04); runs of the activity, rehearsals
+included, use those copies. The activity says *template changed* (or *sub-flow
+changed*) and offers **Update** if any of them is edited later. Manual and
+triggered runs still call the current sub-flows.
 
 *Why:* what was reviewed and approved is what runs; edits to a template
 can't silently change tonight's passes.
