@@ -35,7 +35,7 @@ sgp4 flows still work and the Contacts view says why passes are missing.
 | `flow_engine_port` | 7790 | Port of the engine's HTTP API inside the operator |
 | `flow_route_prefix` | `/flow-automator` | Traefik route to the engine. The tool expects `/flow-automator` |
 | `trigger_period` | 0.25 | Seconds between trigger polls |
-| `run_history` | 50 | Runs kept per flow |
+| `run_history` | 200 | Runs kept per flow |
 | `contact_horizon_days` | 7 | How far ahead passes are predicted |
 | `retime_tolerance` | 120 | Seconds a pass may move after a TLE update and still carry its activities |
 | `stale_tle_days` | 3 | TLEs older than this are flagged |
@@ -101,8 +101,9 @@ Parallel, whose wires all run at once until they meet at a Join. Nodes that
 can fail have an **error** output; if it's wired the run continues there
 (with the message in the `error` variable), otherwise the run fails.
 
-Flows are **disarmed** when saved. Arm a flow to let its triggers fire; **Run
-now** works either way. **Stop all** disarms every flow, stops every run and
+New and imported flows start **disarmed**; saving keeps a flow armed unless
+the saved version has problems, which disarms it. Arm a flow to let its
+triggers fire; **Run now** works either way. **Stop all** disarms every flow, stops every run and
 pauses the contact scheduler.
 
 ### Execution modes
@@ -405,6 +406,12 @@ The engine serves `/flow-automator/api/*` (needs an `Authorization` token and
 `lib/flow_automator/http_api.py`.
 
 ## Development
+
+Developer documentation lives in [`docs/`](docs/):
+[ARCHITECTURE.md](docs/ARCHITECTURE.md) (how it works inside),
+[DECISIONS.md](docs/DECISIONS.md) (why it's built this way) and
+[DEVELOPMENT.md](docs/DEVELOPMENT.md) (build, install, test, recipes).
+Agents start at [CLAUDE.md](CLAUDE.md).
 
 Layout:
 
