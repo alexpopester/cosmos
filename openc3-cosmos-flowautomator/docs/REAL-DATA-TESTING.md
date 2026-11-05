@@ -52,7 +52,7 @@ and don't book observations on other people's stations at scale.
 | # | Step | What it proves | Status |
 |---|---|---|---|
 | 1 | Predictions vs SatNOGS observations | `orbit.py` pass geometry against real passes and real frame times | Done 2026-11-05 (see Results) |
-| 2 | Real-pass scheduling soak | Planner, rules, retiming and capacity on live passes over real stations | Tooling built 2026-11-05; waiting to start |
+| 2 | Real-pass scheduling soak | Planner, rules, retiming and capacity on live passes over real stations | Recording since 2026-11-05 (final report after ≥ 1 week) |
 | 3 | Real telemetry into COSMOS + replay | Flows acting on real values; recorded passes as a regression set | Not started |
 | 4 | NOS3 command loop | Contact flows commanding real cFS on a real orbit | Not started |
 
@@ -255,3 +255,23 @@ activities on TLE updates (D12). Step 2 should measure this drift directly.
 - The planner gives a pass a new contact id when a re-prediction moves its
   TCA more than 5 s (activities still follow it, by `retime_tolerance`).
   Anything tracking passes by id must pair them up again; the recorder does.
+
+**Found after the fix (open):**
+
+- **A re-added satellite can wait hours for its first TLE, with no reason
+  shown.** The fetcher remembers when each catalog number was last fetched,
+  even after its satellite is deleted (that's what keeps us within
+  CelesTrak's rate rules). Deleting and re-adding FRONTIERSAT and ERNST left
+  them with no TLE until their catalog's next normal fetch (up to 4 h), and
+  their fetch status was empty. A satellite with no TLE should at least say
+  when it will be fetched, and could use the 2-hour minimum rather than the
+  normal interval.
+- **Load at realistic scale.** 18 satellites × 13 stations over the 7-day
+  horizon is 10,325 contacts and 4,571 scheduled activities. `/schedule` is
+  10.8 MB and takes 3 s, and the idle engine uses a steady ~20% of a CPU.
+  These are backlog items B43 and B45 (EVALUATION-2026-11-05 section 2.3),
+  now reproduced on real data; the soak's start-lateness numbers will show
+  whether the load delays runs.
+
+**Recording since 2026-11-05 20:19 UTC.** First read: 16 TLEs, 7,063
+predicted passes at the soak stations, 4,571 activities.
