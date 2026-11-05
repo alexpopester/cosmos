@@ -1,0 +1,32 @@
+# SatNOGS telemetry: real satellite downlink, received by the SatNOGS network of
+# volunteer ground stations, decoded and delivered as COSMOS telemetry.
+#
+# Frames arrive minutes to hours after each pass (stations upload them after the
+# observation). PACKET_TIME is when the station received the frame.
+#
+# Variables:
+#   satnogs_poll_seconds    how often to ask SatNOGS for new observations (min 60).
+#                           Anonymous use allows ~60 API requests an hour: each
+#                           poll makes 1-4 per satellite.
+#   satnogs_lookback_hours  how far back to look for frames on each poll
+#
+# Optional: a SatNOGS API token raises the rate limit. Create the COSMOS secret
+# SATNOGS_TOKEN (Admin Console -> Secrets), then add this line to the interface:
+#   SECRET ENV SATNOGS_TOKEN SATNOGS_TOKEN
+# (COSMOS logs an error at startup if the line names a secret that doesn't exist.)
+
+VARIABLE satnogs_poll_seconds 900
+VARIABLE satnogs_lookback_hours 12
+
+TARGET CANVAS CANVAS
+TARGET AEPEX AEPEX
+TARGET CATSAT CATSAT
+
+INTERFACE SATNOGS_INT satnogs_interface.py <%= satnogs_poll_seconds %> <%= satnogs_lookback_hours %>
+  MAP_TARGET CANVAS
+  MAP_TARGET AEPEX
+  MAP_TARGET CATSAT
+  # OPTION SATELLITE <target> <NORAD> <satnogs-decoders decoder> <packet field> <packet prefix>
+  OPTION SATELLITE CANVAS 68635 canvas application_process_id APID
+  OPTION SATELLITE AEPEX 68506 aepex application_process_id APID
+  OPTION SATELLITE CATSAT 60246 catsat type TYPE

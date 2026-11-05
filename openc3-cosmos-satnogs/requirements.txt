@@ -1,0 +1,3 @@
+# Frame decoders kept by the SatNOGS community (Kaitai Struct). AGPL-3.0: loaded at run time,
+# not bundled. Pinned to a minor so a new release is a deliberate upgrade.
+satnogs-decoders>=1.132,<2

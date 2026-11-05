@@ -1,0 +1,3 @@
+# AEPEX: real telemetry from SatNOGS (see plugin.txt). Telemetry only: no commands.
+LANGUAGE python
+TELEMETRY tlm.txt

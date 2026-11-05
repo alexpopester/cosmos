@@ -53,7 +53,7 @@ and don't book observations on other people's stations at scale.
 |---|---|---|---|
 | 1 | Predictions vs SatNOGS observations | `orbit.py` pass geometry against real passes and real frame times | Done 2026-11-05 (see Results) |
 | 2 | Real-pass scheduling soak | Planner, rules, retiming and capacity on live passes over real stations | Recording since 2026-11-05 (final report after ≥ 1 week) |
-| 3 | Real telemetry into COSMOS + replay | Flows acting on real values; recorded passes as a regression set | Not started |
+| 3 | Real telemetry into COSMOS + replay | Flows acting on real values; recorded passes as a regression set | 3a (live telemetry) built 2026-11-05; 3b (flows) and 3c (replay) next |
 | 4 | NOS3 command loop | Contact flows commanding real cFS on a real orbit | Not started |
 
 ### Step 1: predictions vs SatNOGS observations
@@ -144,13 +144,36 @@ noise.
 
 ### Step 3: real telemetry and replay
 
-- A COSMOS interface that polls the SatNOGS DB API for 2–3 well-documented
-  satellites, decodes frames with `satnogs-decoders`, and publishes them as
-  COSMOS packets (with matching packet definitions). Flows anchor at LOS
-  plus a delay because of the upload lag.
-- A replay target that plays a recorded pass (observation timing plus its
-  frames) at real time against a crafted TLE that puts the pass "now", for
-  repeatable regression runs on real data.
+**3a. Real telemetry in COSMOS (built 2026-11-05):** the standalone plugin
+`openc3-cosmos-satnogs` (repo root; see its README).
+
+- Source: the public SatNOGS Network API, plus the frame files on each
+  observation. The DB telemetry API needs a token, and these don't.
+- Satellites: CANVAS and AEPEX (CU Boulder / LASP; CCSDS beacons with command
+  counters, mode, power switches, battery, temperatures) and CatSat (GomSpace
+  power, radio and ADCS beacons, 14 types). All three are in the soak, so
+  their passes are also scheduled. A survey of 10 soak satellites with
+  decoders picked them: 97–100% of their frames decode, against 1% for
+  FRONTIERSAT and 42% for REAL.
+- Packet definitions are generated from 1,600 real frames
+  (`tools/generate_definitions.py`). There's one packet per APID or beacon
+  type with real content, plus OTHER (header only) and UNDECODED (raw bytes
+  kept). Values are raw: the decoders have no units.
+- `PACKET_TIME` is when the station received the frame, so a pass's data
+  lands where it happened even though it arrives up to hours later.
+- Found on the first live run (fixed in 0.1.1): SatNOGS lists observations
+  booked days ahead first, which used up the page budget for CANVAS and
+  AEPEX. Only finished observations are asked for now.
+
+**3b. Flows on real values (next):** contact templates that run after LOS
+plus a delay (the upload lag), wait for the pass's packets, and check real
+values. Examples: command counters didn't jump, battery above a floor, mode
+nominal, a beacon heard from at least one station. Plus a "no beacon heard"
+alert after N passes.
+
+**3c. Replay (next):** play a recorded pass (its frames at their original
+spacing) through a COSMOS target at real time, for repeatable regression
+runs on real data.
 
 ### Step 4: NOS3 command loop
 
