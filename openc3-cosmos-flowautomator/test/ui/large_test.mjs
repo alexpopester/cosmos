@@ -101,22 +101,22 @@ try {
     )
   }
 
-  // ---- engine: 100-branch parallel ----
+  // ---- engine: the widest Parallel allowed (16 branches, since 1.8.0) ----
   {
     const nodes = [n('t', 'trigger_manual', 0, 0), n('p', 'parallel', 300, 0), n('j', 'join', 900, 0)]
     const edges = [e('t', 'p')]
-    for (let i = 0; i < 100; i++) {
+    for (let i = 0; i < 16; i++) {
       nodes.push(n(`w${i}`, 'wait_time', 600, i * 120, { seconds: 0.5 }))
       edges.push(e('p', `w${i}`), e(`w${i}`, 'j'))
     }
     nodes.push(n('done', 'set_var', 1200, 0, { name: 'joined', expression: 'True' }))
     edges.push(e('j', 'done'))
-    const [, body] = await api('POST', '/flows', { name: 'Parallel 100', nodes, edges })
+    const [, body] = await api('POST', '/flows', { name: 'Parallel 16', nodes, edges })
     created.push(body.flow.id)
     const [, started] = await api('POST', `/flows/${body.flow.id}/run`, {})
     const run = await waitRun(started.run.id)
     const runMs = (run.ended_at - run.started_at) * 1000
-    check('100 parallel branches of 0.5 s wait', run.status === 'success' && runMs < 3000, `${runMs.toFixed(0)} ms`)
+    check('16 parallel branches of 0.5 s wait', run.status === 'success' && runMs < 3000, `${runMs.toFixed(0)} ms`)
   }
 
   // ---- engine: long loop (step cap) ----

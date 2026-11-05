@@ -20,6 +20,8 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-11-05
+
 Fixes from the second evaluation (`docs/EVALUATION-2026-11-05.md`, backlog
 B1–B19; owner's answers to Q1–Q4; D6, D22, D23, D24, D28 and D29 amended).
 
@@ -138,6 +140,9 @@ B1–B19; owner's answers to Q1–Q4; D6, D22, D23, D24, D28 and D29 amended).
   text in the reason (U-20).
 
 ### Docs
+- Browser tests: new `editor_fixes_test.mjs` (Switch cases, typed variables, Armed switch); fixed
+  `modes_test` (a duplicate declaration), `large_test` (the 16-branch cap) and `rules_test` (other rules
+  holding the test station). All 10 pass against 1.12.0.
 - README: Parallel/Join rule, Stop all during outages, modes and approvals, what
   disarms a flow; D6 and D28 amended; *Allow hazardous* hint corrected (DOC-6).
 

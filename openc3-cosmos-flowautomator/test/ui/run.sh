@@ -14,7 +14,7 @@ cd "$(dirname "$0")"
 : "${COSMOS_PASSWORD:?set COSMOS_PASSWORD}"
 IMAGE=mcr.microsoft.com/playwright:v1.63.0-noble
 TESTS=("$@")
-[ ${#TESTS[@]} -gt 0 ] || TESTS=(ui_test.mjs layout_test.mjs modes_test.mjs large_test.mjs history_test.mjs pickers_test.mjs tle_inputs_test.mjs rules_test.mjs contacts_test.mjs)
+[ ${#TESTS[@]} -gt 0 ] || TESTS=(ui_test.mjs layout_test.mjs modes_test.mjs editor_fixes_test.mjs large_test.mjs history_test.mjs pickers_test.mjs tle_inputs_test.mjs rules_test.mjs contacts_test.mjs)
 OPERATOR=${OPERATOR_CONTAINER:-cosmos-openc3-operator-1}
 
 # history_test.mjs sends alerts to a webhook: a tiny receiver inside the operator container (where the

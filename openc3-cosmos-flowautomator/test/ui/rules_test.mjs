@@ -110,7 +110,18 @@ try {
   const ruleText = await page.locator('.fa-rule', { hasText: 'A passes' }).innerText()
   let activities = (await api('GET', '/activities'))[1]
   const aActs = activities.filter((a) => a.rule_name === 'A passes')
-  const aPasses = contacts.filter((c) => c.satellite === 'RULE-A' && !c.partial && c.aos - 30 > Date.now() / 1000 + 10)
+  // Other rules may take this station too (the demo's rule covers every station, at a higher priority):
+  // passes they already hold are busy for this capacity-1 station, so don't count those
+  const othersHere = activities.filter(
+    (a) => a.rule_name !== 'A passes' && a.contact.station === 'Rule Site' && ['scheduled', 'running'].includes(a.status),
+  )
+  const aPasses = contacts.filter(
+    (c) =>
+      c.satellite === 'RULE-A' &&
+      !c.partial &&
+      c.aos - 30 > Date.now() / 1000 + 10 &&
+      !othersHere.some((o) => o.contact.aos < c.los && c.aos < o.contact.los),
+  )
   check('rule scheduled every RULE-A pass', aActs.length === aPasses.length && aActs.length > 0, `${aActs.length} activities · ${ruleText.replace(/\n/g, ' ')}`)
   check('rule activities carry its parameters', aActs.every((a) => String(a.params.rate) === '8' && a.offset === -30))
   check('rule chip shown on activities', (await page.locator('.fa-activities .fa-rule-chip', { hasText: 'A passes' }).count()) === aActs.length)

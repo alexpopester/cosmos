@@ -216,8 +216,8 @@ try {
   const offersSaved = await page.locator('.fa-use-saved').isVisible()
   check('Run now with unsaved edits asks to save first', asked && offersSaved)
   await page.locator('.v-dialog button', { hasText: 'Cancel' }).click()
-  const [, after] = await api('GET', `/flows/${uiId}`)
-  check('cancelling saves nothing', after.flow.version === saved.flow.version, `v${after.flow.version}`)
+  const [, afterCancel] = await api('GET', `/flows/${uiId}`)
+  check('cancelling saves nothing', afterCancel.flow.version === saved.flow.version, `v${afterCancel.flow.version}`)
 } catch (error) {
   check('unexpected error', false, error.message.split('\n')[0])
   await page.screenshot({ path: `${SHOTS}/modes_error.png` }).catch(() => {})
