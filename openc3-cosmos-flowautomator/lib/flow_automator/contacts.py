@@ -29,6 +29,7 @@
 * Finished activities are deleted ``retention_days`` after they end.
 """
 
+import bisect
 import contextlib
 import copy
 import datetime
@@ -327,7 +328,7 @@ class ContactPlanner:
                     self.problems[sat_id] = problem
                 else:
                     self.problems.pop(sat_id, None)
-                self._merge(now)
+                self._merge(now, satellite_id=sat_id)
 
     _batch_started = None
     in_flight = None  # satellite being predicted right now (no longer in pending)
@@ -362,12 +363,14 @@ class ContactPlanner:
             if (satellite_id and key[0] == satellite_id) or (station_id and key[1] == station_id):
                 del self.pair_contacts[key]
 
-    def _merge(self, now):
+    def _merge(self, now, satellite_id=None):
+        """Rebuild the contact list; re-time activities (only that satellite's, after predicting one) and
+        apply rules."""
         contacts = [c for pair in self.pair_contacts.values() for c in pair]
         contacts.sort(key=lambda c: c["aos"])
         self.contacts = contacts
         self.contacts_by_id = {c["id"]: c for c in contacts}
-        self._retime(now)
+        self._retime(now, satellite_id)
         self._apply_rules(now)
 
     def _contact(self, sat, station, found):
@@ -575,8 +578,10 @@ class ContactPlanner:
         candidates = [c for c in pair if not c["partial"]]
         return min(candidates, key=lambda c: abs(c["tca"] - old["tca"]), default=None)
 
-    def _retime(self, now):
+    def _retime(self, now, satellite_id=None):
         for activity in self.activities.values():
+            if satellite_id is not None and activity["contact"]["satellite_id"] != satellite_id:
+                continue  # only this satellite's passes changed
             if self._is_tombstone(activity) and activity["contact"]["los"] >= now:
                 # A rule activity an operator cancelled follows its pass too, so it keeps blocking that pass
                 # however far TLE updates move it over the days
@@ -1160,18 +1165,26 @@ class ContactPlanner:
         # Passes each rule already has an activity for, including ones an operator cancelled. Matched by
         # satellite, station and TCA within the re-time tolerance, not by contact id: a routine TLE update
         # moves TCA a little, which changes the id, and a cancelled pass must not come back because of it.
+        # Indexed by (rule, satellite, station) with sorted TCAs: checking a contact is a binary search, not a
+        # scan of every activity (which made this take minutes with thousands of activities)
         taken = {}
         for activity in self.activities.values():
             if activity.get("rule_id") and not activity.get("superseded"):
                 ref = activity["contact"]
-                taken.setdefault(activity["rule_id"], []).append((ref["satellite_id"], ref["station_id"], ref["tca"]))
+                taken.setdefault((activity["rule_id"], ref["satellite_id"], ref["station_id"]), []).append(ref["tca"])
+        for tcas in taken.values():
+            tcas.sort()
 
         def already_taken(rule_id, contact):
-            return any(
-                sat == contact["satellite_id"]
-                and station == contact["station_id"]
-                and abs(tca - contact["tca"]) <= self.retime_tolerance
-                for sat, station, tca in taken.get(rule_id, ())
+            tcas = taken.get((rule_id, contact["satellite_id"], contact["station_id"]))
+            if not tcas:
+                return False
+            i = bisect.bisect_left(tcas, contact["tca"] - self.retime_tolerance)
+            return i < len(tcas) and tcas[i] <= contact["tca"] + self.retime_tolerance
+
+        def take(rule_id, contact):
+            bisect.insort(
+                taken.setdefault((rule_id, contact["satellite_id"], contact["station_id"]), []), contact["tca"]
             )
 
         used = self._used_contacts()
@@ -1207,9 +1220,7 @@ class ContactPlanner:
                 activity["message"] = f"Scheduled by rule '{rule['name']}'"
                 self.activities[activity["id"]] = activity
                 self._save("activities", activity)
-                taken.setdefault(rule["id"], []).append(
-                    (contact["satellite_id"], contact["station_id"], contact["tca"])
-                )
+                take(rule["id"], contact)
                 used[contact["id"]] = activity["contact"]
                 created += 1
             rule["skipped_full"] = skipped_full

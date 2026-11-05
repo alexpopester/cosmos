@@ -21,7 +21,7 @@ versions follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 Fixes from the second evaluation (`docs/EVALUATION-2026-11-05.md`, backlog
-B1–B17 and B19; owner's answers to Q1–Q4; D6, D22, D23, D24, D28 and D29 amended).
+B1–B19; owner's answers to Q1–Q4; D6, D22, D23, D24, D28 and D29 amended).
 
 ### Changed
 - **The approved command is sent exactly as approved.** It used to be
@@ -34,6 +34,12 @@ B1–B17 and B19; owner's answers to Q1–Q4; D6, D22, D23, D24, D28 and D29 ame
   now also sees parameter defaults and state names in any case.
 
 ### Fixed
+- **The scheduler no longer stalls on large plans.** Applying rules scanned
+  every taken pass for every contact under the planner lock: at 20 satellites
+  × 10 stations it took 2 s with nothing to do (64 s at 50 × 20), and a full
+  recompute 175 s, delaying activity starts. Taken passes are indexed now, and
+  re-timing after predicting one satellite only looks at that satellite's
+  activities: 21 ms idle, and about 70 ms under the lock per satellite (B18).
 - **Saving a rule no longer deletes other rules' activities.** It used to
   remove every lower-priority rule activity (even one due in seconds) and
   re-create them with new ids and fresh snapshots. Now only that rule's own

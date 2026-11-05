@@ -160,3 +160,27 @@ def test_geo_activity_survives_a_recompute_later_the_same_day(engine, planner, c
     clock.now = first["contact"]["aos"] + 12 * HOUR
     planner.recompute()
     assert first["status"] == "scheduled", first.get("message")
+
+
+# B18 (C-11, P-1): applying rules scanned every taken pass for every contact, holding the planner lock for
+# seconds to minutes at realistic sizes. Indexed now; this guards against a return of the quadratic scan.
+def test_applying_rules_with_nothing_new_is_fast(engine, planner):
+    import time
+
+    planner.horizon = 3 * 86400
+    t = tmpl(engine)
+    for i in range(4):
+        planner.save_station(
+            {**DC, "name": f"GS{i}", "latitude": -40 + 25 * i, "longitude": -150 + 80 * i, "capacity": 4}
+        )
+    for i in range(6):
+        planner.save_satellite(
+            {"name": f"SAT{i}", "tle": make_tle(EPOCH, 97.5, 30 * i, 40 * i, mean_motion=15.2, catalog=91000 + i)}
+        )
+    for k in range(3):
+        planner.save_rule({"name": f"r{k}", "template_id": t["id"], "priority": k, "skip_full_stations": False})
+    assert len(planner.activities) > 300
+    started = time.perf_counter()
+    with planner.lock:
+        assert planner._apply_rules(planner.clock()) == 0
+    assert time.perf_counter() - started < 0.1
