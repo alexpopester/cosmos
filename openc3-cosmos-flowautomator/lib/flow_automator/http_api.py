@@ -62,6 +62,10 @@ which every write records in the audit log.
                                                  catalog number then name; returns what happened to each
     GET    <prefix>/api/tle_inputs               stash key, watched files and packets, safeguards, status
     PUT    <prefix>/api/tle_inputs
+    GET    <prefix>/api/tle_sources              CelesTrak / Space-Track settings and status (never the credentials)
+    PUT    <prefix>/api/tle_sources              {"celestrak": {"url", "hours"}, "spacetrack": {..., "username_secret",
+                                                 "password_secret"}}
+    POST   <prefix>/api/tle_sources/fetch        {"kind"?}: fetch what's allowed now (tle_sources.py rate limits)
     POST   <prefix>/api/stations                 {"name", "latitude", "longitude", "altitude", "min_elevation"}
     PUT    <prefix>/api/stations/<id>
     DELETE <prefix>/api/stations/<id>
@@ -93,6 +97,7 @@ from .contacts import PlannerError
 from .engine import EngineError
 from .graph import validate_flow
 from .tle_inputs import TleInputError
+from .tle_sources import TleSourceError
 
 
 MAX_BODY_BYTES = 5 * 1024 * 1024
@@ -158,6 +163,9 @@ def _routes():
         ("POST", r"/api/tles", "ingest_tles", True),
         ("GET", r"/api/tle_inputs", "get_tle_inputs", False),
         ("PUT", r"/api/tle_inputs", "save_tle_inputs", True),
+        ("GET", r"/api/tle_sources", "get_tle_sources", False),
+        ("PUT", r"/api/tle_sources", "save_tle_sources", True),
+        ("POST", r"/api/tle_sources/fetch", "fetch_tles", True),
         ("POST", r"/api/stations", "create_station", True),
         ("PUT", r"/api/stations/(?P<item_id>[\w-]+)", "update_station", True),
         ("DELETE", r"/api/stations/(?P<item_id>[\w-]+)", "delete_station", True),
@@ -222,6 +230,8 @@ class FlowApi:
             except AlertError as error:
                 return error.status, {"error": str(error), "problems": []}
             except TleInputError as error:
+                return error.status, {"error": str(error), "problems": []}
+            except TleSourceError as error:
                 return error.status, {"error": str(error), "problems": []}
             except BackupError as error:
                 return error.status, {"error": str(error), "problems": []}
@@ -555,6 +565,22 @@ class FlowApi:
             detail=f"stash {result['stash_key'] or 'off'}, {len(result['files'])} files, "
             f"{len(result['packets'])} packets, max jump {result['max_jump_km']:g} km",
         )
+        return result
+
+    def get_tle_sources(self, **_):
+        return self.planner.fetcher.settings_json()
+
+    def save_tle_sources(self, payload, user, **_):
+        result = self.planner.fetcher.save_settings(payload)
+        detail = "; ".join(
+            f"{k} every {result[k]['hours']:g} h from {result[k]['url']}" for k in ("celestrak", "spacetrack")
+        )
+        self._audit(user, "changed", "tle sources", detail=detail)
+        return result
+
+    def fetch_tles(self, payload, user, **_):
+        result = self.planner.fetcher.fetch_now(payload.get("kind"))
+        self._audit(user, "fetched TLEs", "tle sources", detail=", ".join(result))
         return result
 
     @staticmethod

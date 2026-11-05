@@ -116,6 +116,9 @@ export default {
   ingestTles: (text, source) => post('/tles', { tle: text, source }),
   tleInputs: () => get('/tle_inputs'),
   saveTleInputs: (settings) => put('/tle_inputs', settings),
+  tleSources: () => get('/tle_sources'),
+  saveTleSources: (settings) => put('/tle_sources', settings),
+  fetchTles: (kind) => post('/tle_sources/fetch', kind ? { kind } : {}),
   acceptHeldTle: (id) => post(`/satellites/${id}/tle/accept`),
   rejectHeldTle: (id) => post(`/satellites/${id}/tle/reject`),
   rehearseActivity: (id, skipWaits = true) =>

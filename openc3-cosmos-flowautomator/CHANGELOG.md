@@ -20,6 +20,43 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-11-04
+
+CelesTrak and Space-Track TLE sources.
+
+### Added
+- **Keep the TLE current from CelesTrak or Space-Track.** Choose it in the
+  satellite's dialog. Satellites are looked up by catalog number and fetched
+  every 4 hours by default. A fetched TLE goes through the same safeguards as
+  every automated TLE: newer epoch, preferred source, and big jumps held for
+  review.
+- **TLE sources and inputs** (formerly TLE inputs) has a new section for the
+  internet sources:
+  - addresses (for a local mirror) and how often to fetch;
+  - for Space-Track, the names of the COSMOS secrets holding the login;
+  - each source's last result, and a **Fetch now** button.
+- **API:** `GET` and `PUT /api/tle_sources`, and `POST /api/tle_sources/fetch`.
+- Backups include the TLE source settings, which hold the secret names but
+  never the credentials.
+
+### Changed
+- **The services' rate limits are respected.**
+  - Each satellite is fetched at most every 2 hours from CelesTrak and every
+    hour from Space-Track, even with Fetch now.
+  - A failing source retries after 10 minutes, doubling each time.
+  - Space-Track gets one query for every satellite, not one per satellite.
+- Satellites using an internet source must have a catalog number. Pasting a
+  TLE sets it.
+- A satellite whose last fetch found nothing, or whose fetched TLE was
+  rejected, shows why in the satellite list.
+
+### Security
+- The Space-Track login is read from COSMOS secrets (Admin Console →
+  Secrets) when needed. It's never stored by the plugin, returned by its API
+  or written to backups (D29).
+- The fetcher doesn't follow redirects. A source address can't point at a
+  link-local address, which covers cloud metadata endpoints.
+
 ## [1.10.0] - 2026-11-04
 
 Upgrades, backups and Valkey outages: the gaps the evaluation didn't cover

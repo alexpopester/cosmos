@@ -69,6 +69,12 @@
             <div v-if="sat.held_tle" class="text-warning fa-held-tle">
               New TLE held for review
             </div>
+            <div
+              v-else-if="fetchProblem(sat)"
+              class="text-warning fa-fetch-problem"
+            >
+              {{ fetchProblem(sat) }}
+            </div>
           </v-list-item-subtitle>
           <template #append>
             <v-icon v-if="sat.held_tle" color="warning" size="16">
@@ -640,11 +646,22 @@
               data-field="sat-target"
             />
           </div>
+          <v-select
+            v-model="satDialog.tle_source"
+            :items="tleSourceItems"
+            label="Keep the TLE current from"
+            density="compact"
+            variant="outlined"
+            data-field="sat-tle-source"
+            :hint="tleSourceHint"
+            persistent-hint
+            class="mb-2"
+          />
           <div class="d-flex">
             <v-text-field
               v-model="satDialog.catalog"
               label="Catalog number"
-              hint="Matches TLEs sent by other apps; set from the first TLE"
+              hint="Looks the satellite up on CelesTrak / Space-Track, and matches TLEs from other apps"
               persistent-hint
               density="compact"
               variant="outlined"
@@ -1427,6 +1444,31 @@ export default {
       if (this.startPreview <= this.now) return 'already passed'
       return ''
     },
+    tleSourceItems() {
+      return [
+        { title: 'Pasting here, or other apps (TLE inputs)', value: 'manual' },
+        { title: 'CelesTrak (public, no login)', value: 'celestrak' },
+        {
+          title: 'Space-Track (login from COSMOS secrets)',
+          value: 'spacetrack',
+        },
+      ]
+    },
+    tleSourceHint() {
+      const d = this.satDialog
+      const fetch = d.fetch
+      if (d.tle_source === 'manual') {
+        return 'Pasting below applies it as is'
+      }
+      const label = d.tle_source === 'celestrak' ? 'CelesTrak' : 'Space-Track'
+      let hint = `Fetched by catalog number every few hours (TLE inputs sets how often); a new TLE still passes the safeguards.`
+      if (fetch?.source === d.tle_source && fetch.time) {
+        hint += ` Last fetch ${this.fmtTime(fetch.time)} UTC: ${fetch.result}${fetch.reason ? ` (${fetch.reason})` : ''}.`
+      } else if (d.tle_source === 'spacetrack') {
+        hint += ` Needs COSMOS secrets with your ${label} login (see TLE inputs).`
+      }
+      return hint
+    },
     tleHint() {
       const sat = this.satellites.find((s) => s.id === this.satDialog.id)
       if (!sat?.tle) return 'Two-line elements from your orbit provider'
@@ -1548,6 +1590,14 @@ export default {
         opacity: c.los < this.now ? 0.45 : 0.9,
       }
     },
+    fetchProblem(sat) {
+      const fetch = sat.tle_fetch
+      if (!fetch || fetch.source !== sat.tle_source?.kind) return ''
+      if (['missing', 'rejected', 'held'].includes(fetch.result)) {
+        return `${fetch.source}: ${fetch.reason || fetch.result}`
+      }
+      return ''
+    },
     passTitle(c) {
       return `${c.satellite} over ${c.station}\nAOS ${this.fmtTime(c.aos)}  LOS ${this.fmtTime(c.los)}\n${this.duration(c.duration)}, max elevation ${c.max_elevation.toFixed(1)}°`
     },
@@ -1564,6 +1614,8 @@ export default {
         original: sat?.tle ? `${sat.tle.line1}\n${sat.tle.line2}` : '',
         catalog: sat?.catalog ?? '',
         preferred_source: sat?.preferred_source || '',
+        tle_source: sat?.tle_source?.kind || 'manual',
+        fetch: sat?.tle_fetch || null,
         held: sat?.held_tle || null,
         source: sat?.tle?.source || '',
         error: '',
@@ -1581,6 +1633,7 @@ export default {
           enabled: d.enabled,
           catalog: String(d.catalog ?? '').trim(),
           preferred_source: d.preferred_source,
+          tle_source: { kind: d.tle_source },
         }
         if (d.tle.trim() && d.tle.trim() !== d.original) body.tle = d.tle
         await flowApi.saveSatellite(d.id, body)

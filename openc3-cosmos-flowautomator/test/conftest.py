@@ -29,7 +29,11 @@ class FakeBackend:
         self.bad_commands = {}  # command name -> problems check_cmd reports
         self.stash = {}  # what scripts stash_set
         self.files = {}  # target files in the bucket: path -> text
+        self.secrets = {}  # COSMOS secrets: name -> value
         self.lock = threading.Lock()
+
+    def get_secret(self, name):
+        return self.secrets.get(name)
 
     def tlm(self, item, value_type="CONVERTED"):
         if item not in self.values:

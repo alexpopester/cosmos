@@ -1,5 +1,6 @@
 <!--
-# Where other apps can send TLEs (tle_inputs.py): a COSMOS stash key, files
+# CelesTrak and Space-Track (tle_sources.py), and
+# where other apps can send TLEs (tle_inputs.py): a COSMOS stash key, files
 # in the COSMOS bucket, telemetry packets, and the HTTP API. Plus the jump
 # limit that holds suspicious TLEs for review, and each input's last result.
 -->
@@ -13,7 +14,7 @@
   >
     <v-card class="fa-tle-inputs">
       <v-card-title class="d-flex align-center">
-        <v-icon class="mr-2">mdi-import</v-icon>TLE inputs
+        <v-icon class="mr-2">mdi-import</v-icon>TLE sources and inputs
       </v-card-title>
       <v-card-text v-if="settings">
         <div class="text-caption text-medium-emphasis mb-3">
@@ -24,6 +25,75 @@
           jump limit. The engine checks the stash, files and packets every
           {{ settings.poll_seconds }}s.
         </div>
+        <div class="text-subtitle-2">Internet sources</div>
+        <div class="text-caption text-medium-emphasis mb-2">
+          Satellites set to CelesTrak or Space-Track (in the satellite's dialog)
+          are fetched by catalog number. Both services block clients that ask
+          too often, so each satellite is fetched at most every
+          <i>hours</i>, and Fetch now never goes below the service's minimum.
+          The engine needs to reach the address: an air-gapped COSMOS can point
+          at a local mirror.
+        </div>
+        <div
+          v-for="src in internetSources"
+          :key="src.kind"
+          class="fa-tle-source mb-3"
+          :data-source="src.kind"
+        >
+          <div class="d-flex align-center">
+            <v-text-field
+              v-model="sources[src.kind].url"
+              :label="`${src.label} address`"
+              density="compact"
+              variant="outlined"
+              hide-details
+              class="mr-2 fa-mono"
+            />
+            <v-text-field
+              v-model.number="sources[src.kind].hours"
+              type="number"
+              :min="sources[src.kind].min_hours"
+              :label="`Every (hours, min ${sources[src.kind].min_hours})`"
+              density="compact"
+              variant="outlined"
+              hide-details
+              style="max-width: 190px"
+              class="mr-2"
+            />
+            <v-btn
+              size="small"
+              variant="tonal"
+              :loading="fetching === src.kind"
+              :disabled="!sources[src.kind].satellites"
+              class="fa-fetch-now"
+              @click="fetchNow(src.kind)"
+            >
+              Fetch now
+            </v-btn>
+          </div>
+          <div v-if="src.kind === 'spacetrack'" class="d-flex mt-2">
+            <v-text-field
+              v-model="sources.spacetrack.username_secret"
+              label="COSMOS secret with the username"
+              density="compact"
+              variant="outlined"
+              hide-details
+              class="mr-2 fa-mono"
+            />
+            <v-text-field
+              v-model="sources.spacetrack.password_secret"
+              label="COSMOS secret with the password"
+              density="compact"
+              variant="outlined"
+              hide-details
+              class="fa-mono"
+            />
+          </div>
+          <div class="text-caption mt-1" :class="sourceClass(src.kind)">
+            {{ sourceText(src.kind) }}
+          </div>
+        </div>
+
         <div class="d-flex">
           <v-text-field
             v-model.number="settings.max_jump_km"
@@ -198,9 +268,24 @@ export default {
   },
   emits: ['update:modelValue'],
   data() {
-    return { settings: null, filesText: '', saving: false, error: '' }
+    return {
+      settings: null,
+      sources: null,
+      filesText: '',
+      saving: false,
+      fetching: '',
+      error: '',
+      fetchNote: {},
+    }
   },
   computed: {
+    internetSources() {
+      if (!this.sources) return []
+      return [
+        { kind: 'celestrak', label: 'CelesTrak' },
+        { kind: 'spacetrack', label: 'Space-Track' },
+      ]
+    },
     scope() {
       return window.openc3Scope || 'DEFAULT'
     },
@@ -226,7 +311,13 @@ print(stash_get("${key}_result"))`
     async load() {
       this.error = ''
       try {
-        this.settings = await flowApi.tleInputs()
+        const [settings, sources] = await Promise.all([
+          flowApi.tleInputs(),
+          flowApi.tleSources(),
+        ])
+        this.settings = settings
+        this.sources = sources
+        this.fetchNote = {}
         this.filesText = this.settings.files.join('\n')
       } catch (error) {
         this.error = errorInfo(error).message
@@ -255,12 +346,99 @@ print(stash_get("${key}_result"))`
           max_jump_km: Number(this.settings.max_jump_km),
           poll_seconds: Number(this.settings.poll_seconds),
         })
+        await flowApi.saveTleSources(this.sourcePayload())
         this.$emit('update:modelValue', false)
       } catch (error) {
         this.error = errorInfo(error).message
       } finally {
         this.saving = false
       }
+    },
+    sourcePayload() {
+      const s = this.sources
+      return {
+        celestrak: { url: s.celestrak.url, hours: Number(s.celestrak.hours) },
+        spacetrack: {
+          url: s.spacetrack.url,
+          hours: Number(s.spacetrack.hours),
+          username_secret: s.spacetrack.username_secret,
+          password_secret: s.spacetrack.password_secret,
+        },
+      }
+    },
+    async fetchNow(kind) {
+      this.fetching = kind
+      this.error = ''
+      try {
+        // Save first, so a fixed address or new secret names are what's used
+        this.sources = await flowApi.saveTleSources(this.sourcePayload())
+        const result = (await flowApi.fetchTles(kind))[kind]
+        const waiting = Object.values(result.waiting_until)
+        let note = `Fetching ${result.now} of ${result.catalogs} satellites now.`
+        if (waiting.length) {
+          const until = new Date(Math.min(...waiting) * 1000)
+            .toISOString()
+            .slice(11, 16)
+          note += ` ${waiting.length} were fetched recently; the next is allowed at ${until} UTC.`
+        }
+        this.fetchNote = { ...this.fetchNote, [kind]: note }
+        setTimeout(() => this.refreshSources(), 4000)
+      } catch (error) {
+        this.error = errorInfo(error).message
+      } finally {
+        this.fetching = ''
+      }
+    },
+    async refreshSources() {
+      if (!this.modelValue) return
+      try {
+        const fresh = await flowApi.tleSources()
+        for (const kind of ['celestrak', 'spacetrack']) {
+          this.sources[kind].status = fresh[kind].status
+          this.sources[kind].credentials_set = fresh[kind].credentials_set
+        }
+      } catch {
+        // the next open shows it
+      }
+    },
+    sourceText(kind) {
+      const src = this.sources[kind]
+      const parts = []
+      if (this.fetchNote[kind]) parts.push(this.fetchNote[kind])
+      parts.push(
+        src.satellites
+          ? `${src.satellites} satellites use it.`
+          : "No satellite uses it yet (choose it in a satellite's dialog).",
+      )
+      if (kind === 'spacetrack' && src.credentials_set === false) {
+        parts.push(
+          `Add the secrets ${src.username_secret} and ${src.password_secret} in Admin Console → Secrets.`,
+        )
+      }
+      const status = src.status || {}
+      const time = (t) => new Date(t * 1000).toISOString().slice(11, 16)
+      if (status.error) {
+        parts.push(
+          `Last try ${time(status.last_attempt)} UTC failed: ${status.error}${status.retry_at ? ` Retrying at ${time(status.retry_at)} UTC.` : ''}`,
+        )
+      } else if (status.last_fetch) {
+        const counts = Object.entries(status.counts || {})
+          .map(([k, n]) => `${n} ${k}`)
+          .join(', ')
+        parts.push(`Last fetch ${time(status.last_fetch)} UTC: ${counts}.`)
+      }
+      return parts.join(' ')
+    },
+    sourceClass(kind) {
+      const src = this.sources[kind]
+      if (src.status?.error) return 'text-error'
+      if (
+        kind === 'spacetrack' &&
+        src.credentials_set === false &&
+        src.satellites
+      )
+        return 'text-warning'
+      return 'text-medium-emphasis'
     },
     statusText(status) {
       if (!status) return 'nothing received yet'

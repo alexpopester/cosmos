@@ -47,7 +47,7 @@ from .orbit import (
 )
 from .templates import fill_parameters
 from .tle_inputs import TleIntake
-from .tle_sources import get_source
+from .tle_sources import TleFetcher, get_source
 
 
 ANCHORS = ("aos", "tca", "los")
@@ -135,10 +135,10 @@ class ContactPlanner:
         self.computed_at = None  # last time the whole window was refreshed
         self.compute_seconds = None
         self.problems = {}  # satellite id -> why it has no contacts
-        self.last_polled = {}
         self.last_pruned = 0.0
         self.last_rules = 0.0
         self.intake = TleIntake(self)
+        self.fetcher = TleFetcher(self)  # CelesTrak and Space-Track
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread = None
@@ -165,6 +165,7 @@ class ContactPlanner:
             self.rules = self.store.records("rules")
             self.settings.update(self.store.records("planner_settings").get("settings", {}))
             self.intake.load()
+            self.fetcher.load()
             now = self.clock()
             for activity in self.activities.values():
                 if activity["status"] == "running":
@@ -388,6 +389,7 @@ class ContactPlanner:
         result["tle_age_days"] = (now - epoch) / 86400 if epoch else None
         result["tle_stale"] = bool(epoch) and result["tle_age_days"] > self.stale_tle_days
         result["problem"] = self.problems.get(sat["id"])
+        result["tle_fetch"] = self.fetcher.sat_status.get(sat["id"])
         result["predicting"] = sat["id"] in self.pending or sat["id"] == self.in_flight
         return result
 
@@ -430,6 +432,9 @@ class ContactPlanner:
             tle_text = payload.get("tle")
             if isinstance(tle_text, str) and tle_text.strip():
                 self._apply_tle(sat, tle_text, payload.get("source") or source.get("kind", "manual"), user)
+            fetcher = get_source(source.get("kind"))
+            if fetcher.internet and not (sat.get("catalog") or (sat.get("tle") or {}).get("norad_id")):
+                raise PlannerError(f"{fetcher.label} looks satellites up by catalog number: enter it (or paste a TLE)")
             self.satellites[sat["id"]] = sat
             self._save("satellites", sat)
             if not sat["enabled"]:
@@ -1244,22 +1249,7 @@ class ContactPlanner:
         return removed
 
     def _poll_sources(self, now):
-        for sat in list(self.satellites.values()):
-            config = sat.get("tle_source") or {}
-            try:
-                source = get_source(config.get("kind"))
-            except KeyError:
-                continue
-            if not source.poll_period or now - self.last_polled.get(sat["id"], 0) < source.poll_period:
-                continue
-            self.last_polled[sat["id"]] = now
-            try:
-                text = source.fetch(sat, config, self.engine.backend)
-                if text:
-                    self.set_tle(sat["id"], text, source.kind)
-                    self.audit(source.kind, "updated TLE", "satellite", sat["id"], sat["name"])
-            except Exception as error:  # noqa: BLE001
-                self.problems[sat["id"]] = f"TLE source {source.kind}: {error}"
+        self.fetcher.poll(now)
 
     def run_variables(self, activity, now):
         variables, _problems = fill_parameters(activity["flow"].get("parameters"), activity["params"])

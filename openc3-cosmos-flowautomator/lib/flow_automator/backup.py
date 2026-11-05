@@ -68,6 +68,7 @@ def make_backup(engine, include_history=False, now=None):
         "rules": rules,
         "activities": activities,
         "tle_inputs": copy.deepcopy(planner.intake.settings),
+        "tle_sources": copy.deepcopy(planner.fetcher.settings),  # secret names only, never the credentials
         "alerts": alerts,
     }
     if include_history:
@@ -100,7 +101,7 @@ def check_backup(backup):
         )
     for key in ("flows", "satellites", "stations", "rules"):
         _items(backup, key)
-    for key in ("versions", "tle_inputs", "alerts"):
+    for key in ("versions", "tle_inputs", "tle_sources", "alerts"):
         if backup.get(key) is not None and not isinstance(backup[key], dict):
             raise BackupError(f"'{key}' in the backup must be an object")
     return found
@@ -158,6 +159,12 @@ def restore_backup(engine, backup, user=None):
             result["settings"].append("TLE inputs")
         except Exception as error:  # noqa: BLE001
             result["skipped"].append(f"TLE input settings: {error}")
+    if isinstance(backup.get("tle_sources"), dict):
+        try:
+            planner.fetcher.save_settings(backup["tle_sources"])
+            result["settings"].append("TLE sources")
+        except Exception as error:  # noqa: BLE001
+            result["skipped"].append(f"TLE source settings: {error}")
     if isinstance(backup.get("alerts"), dict):
         _restore_alerts(engine, backup["alerts"], result)
 

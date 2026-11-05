@@ -65,7 +65,7 @@ editor: closing it changes nothing, and two people can have it open at once.
 | `lib/flow_automator/orbit.py` | TLE parsing/checksums, SGP4 propagation, TEME → ECEF → topocentric, pass finding |
 | `lib/flow_automator/templates.py` | Template parameter types, validation, `fill_parameters`, `CONTACT_VARIABLES` |
 | `lib/flow_automator/tle_inputs.py` | `TleIntake`: TLEs from the HTTP bulk endpoint, a stash key, bucket files and telemetry, with the safeguards |
-| `lib/flow_automator/tle_sources.py` | Pluggable per-satellite TLE source interface (only `manual` exists) |
+| `lib/flow_automator/tle_sources.py` | Per-satellite TLE sources: `manual`, `celestrak`, `spacetrack`. `TleFetcher` runs on the `flow-tle-inputs` thread and sends what it fetches through `TleIntake.ingest` |
 | `lib/flow_automator/demo.py` | `load_demo` / `clear_demo` (File → Load Demo) |
 | `lib/flow_automator/cosmos_backend.py` | The only module that imports `openc3`. `CosmosBackend` and `TokenAuthorizer` |
 | `lib/flow_automator/http_api.py` | Route table (`_routes()`), handlers, the full endpoint list in the module docstring, the stdlib HTTP server |

@@ -24,6 +24,15 @@ class CosmosBackend:
     def __init__(self, scope, logger):
         self.scope = scope
         self.logger = logger
+        self._secrets = None
+
+    def get_secret(self, name):
+        """A COSMOS secret (Admin Console → Secrets), read when needed so a change applies without a restart."""
+        from openc3.utilities.secrets import Secrets
+
+        if self._secrets is None:
+            self._secrets = Secrets.get_client()
+        return self._secrets.get(name, scope=self.scope)
 
     def tlm(self, item, value_type="CONVERTED"):
         from openc3.api.tlm_api import tlm

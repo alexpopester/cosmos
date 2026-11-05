@@ -329,3 +329,27 @@ updates its memory before writing, so retrying keeps memory and Valkey in
 step. An operator's save that only lived in memory would look stored, and
 then vanish on restart.
 
+## D29. Internet TLEs pass the safeguards; credentials stay in COSMOS secrets
+
+CelesTrak and Space-Track TLEs go through `TleIntake.ingest`, like any
+automated TLE: the catalog must match, the epoch must be newer, a preferred
+source wins, and a big jump is held for review.
+
+- **Credentials:** the Space-Track login is read from COSMOS secrets each
+  time it's needed. The plugin stores only the secret names.
+- **Schedule:** each catalog number is fetched at most every `hours`, never
+  below the service's minimum (CelesTrak 2 h, Space-Track 1 h), even on
+  Fetch now.
+- **Failures:** a failure of the whole source backs off from 10 minutes,
+  doubling.
+- **Requests:** no redirects are followed.
+
+*Why:*
+- **Safeguards:** a public catalog can carry a wrong or post-maneuver
+  element set like any feed, and re-timing every activity on one deserves
+  the same review.
+- **Credentials:** keeping them out of Valkey keeps them out of backups and
+  API responses (as with webhook URLs, D27). It also lets Enterprise
+  installs use their own secret store.
+- **Rate limits:** both services ban clients that poll too hard, and a
+  ban would stop every satellite's updates.

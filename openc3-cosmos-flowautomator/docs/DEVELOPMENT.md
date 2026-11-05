@@ -164,8 +164,15 @@ pass it down, add it to the README table.
 
 ### Add a TLE source
 
-Per-satellite polled sources: subclass `TleSource` in `tle_sources.py` and
-register it. Scope-wide feeds (like a new file format or protocol): add to
+Per-satellite polled sources: subclass `TleSource` in `tle_sources.py`.
+Implement `fetch(catalogs, settings, backend, session)`, which returns
+`({catalog: text}, {catalog: reason})` and raises `FetchError` when the
+whole source fails. Register it in `SOURCES`. For an internet source, set
+`internet = True` and `min_hours`, and add defaults to `DEFAULT_SETTINGS`.
+`TleFetcher` then handles the schedule, backoff and safeguards.
+
+Credentials come from COSMOS secrets through `backend.get_secret`, never
+from settings. Tests use `FakeService` in `test/test_tle_sources.py`. Scope-wide feeds (like a new file format or protocol): add to
 `TleIntake` in `tle_inputs.py` so the safeguards apply.
 
 ### Record or extend the demo walkthrough

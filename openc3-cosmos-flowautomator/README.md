@@ -402,6 +402,46 @@ A satellite that never sets over a station, such as a GEO satellite, gets one
 contact per UTC day there: AOS at 00:00 and LOS at 24:00. Schedule it with an
 offset from AOS, for example `AOS + 3600` for 01:00 UTC.
 
+### CelesTrak and Space-Track
+
+In a satellite's dialog, **Keep the TLE current from** picks where its TLE
+comes from:
+
+- **Pasting, or other apps** is the default (see below).
+- **CelesTrak** is public and needs no login.
+- **Space-Track** needs an account.
+
+Both look the satellite up by its **catalog number**. Enter it, or paste one
+TLE and it's taken from that. A fetched TLE isn't applied blindly. It goes
+through the same checks as every automated TLE (below): it must be newer, it
+gives way to a preferred source, and a big jump is held for review.
+
+Both services block clients that ask too often, so:
+
+- **Schedule:** each satellite is fetched every 4 hours by default. You can
+  change this in **TLE sources and inputs**, down to 2 hours for CelesTrak
+  and 1 hour for Space-Track.
+- **Fetch now** fetches straight away, but still never asks more often than
+  those minimums.
+- **Failures:** if a source fails as a whole (no network, refused, wrong
+  login), the engine retries after 10 minutes, doubling each time, and shows
+  the error there.
+- **Problems with one satellite:** for example, no element set for that
+  catalog number. These show on that satellite, in the list and in its
+  dialog.
+
+**Space-Track login:** add two secrets in **Admin Console → Secrets**:
+`SPACETRACK_USERNAME` and `SPACETRACK_PASSWORD`. You can use other names and
+set them in TLE sources and inputs. The engine reads them from COSMOS each
+time it logs in. They're never stored by the plugin, shown by its API, or
+put in backups. A change takes effect at the next fetch, without a restart.
+
+**Network:** the engine fetches from the operator container, so that
+container needs to reach `celestrak.org` or `www.space-track.org`. It uses
+the standard `HTTPS_PROXY` setting if there is one. An air-gapped COSMOS can
+point either address at a local mirror that serves the same API. Redirects
+aren't followed, so give the final address.
+
 ### Feeding TLEs from other apps
 
 Paste a TLE in the satellite dialog, upload a file of them (the upload button
@@ -432,8 +472,9 @@ then by name. Every TLE from these inputs must pass these checks:
   dialog (a maneuver, or a wrong TLE?).
 
 Pasting in the satellite dialog is an operator's decision and applies as is.
-**TLE inputs** (the import button next to Satellites) sets the stash key, files,
-packets, jump limit and polling interval, and shows each input's last result.
+**TLE sources and inputs** (the import button next to Satellites) sets the
+CelesTrak and Space-Track options, the stash key, files, packets, jump limit
+and polling interval. It shows each one's last result.
 Every TLE that applies re-times scheduled activities like any other update,
 and the audit log records every batch.
 
@@ -614,5 +655,4 @@ The engine keeps running flows when Valkey stops taking writes.
 - Each run keeps its last 1,000 steps; each flow its last `run_history` runs.
 - Predicting 50 satellites × 20 stations for 7 days takes about a minute in
   the background after a restart or a full recompute.
-- No built-in internet TLE fetch (CelesTrak, Space-Track) yet; times are UTC; stations have one elevation
-  mask, not a horizon profile.
+- Times are UTC. Stations have one elevation mask, not a horizon profile.
