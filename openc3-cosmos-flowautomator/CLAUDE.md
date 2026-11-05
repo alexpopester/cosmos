@@ -23,7 +23,7 @@ A standalone COSMOS plugin (gem) with two halves:
 | How it's built: threads, locks, data model, run lifecycle | `docs/ARCHITECTURE.md` |
 | Why it's built that way; things not to undo casually | `docs/DECISIONS.md` |
 | What changed in each version | `CHANGELOG.md` |
-| Known issues and the prioritised improvement backlog | `docs/EVALUATION-2026-11-04.md` |
+| Known issues and the prioritised improvement backlog | `docs/EVALUATION-2026-11-05.md` section 2 (Status column says what's still open; the 11-04 evaluation is history) |
 | Build, install, test, recipes for common changes | `docs/DEVELOPMENT.md` |
 | Every API endpoint | docstring at the top of `lib/flow_automator/http_api.py` |
 | Flow JSON shape | docstring of `lib/flow_automator/graph.py` |

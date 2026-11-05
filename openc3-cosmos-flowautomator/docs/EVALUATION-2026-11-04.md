@@ -1,5 +1,7 @@
 # Flow Automator: full evaluation (2026-11-04)
 
+> **Superseded.** This evaluation of 1.7.8 is kept for history. Most items were fixed in 1.8.0–1.11.0. The current backlog is [EVALUATION-2026-11-05.md](EVALUATION-2026-11-05.md).
+
 Six independent reviews of plugin 1.7.8 (branch `automation_flowgraph`, commit
 `c2a0120fb`):
 
