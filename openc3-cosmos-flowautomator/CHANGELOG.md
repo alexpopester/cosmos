@@ -20,6 +20,30 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Correctness fixes from the second evaluation (`docs/EVALUATION-2026-11-05.md`,
+section 2.2).
+
+### Fixed
+- **One GEO activity no longer blocks its station for the whole day.** A GEO
+  day contact uses the antenna only while its activities run, so a GEO
+  activity needs a duration; rules without one skip GEO days and say so (B20).
+- **A hand-edited rule activity is flagged for review when its pass moves**,
+  keeping the edits, instead of being cancelled and replaced (B21).
+- **Migrations now upgrade the flow snapshots inside scheduled activities**,
+  sub-flow snapshots included: these are what actually run (B24).
+- **During an upgrade the new engine leaves the old one's runs alone.** Each
+  engine has an id and a heartbeat; runs are recorded as interrupted only once
+  their engine is gone (B26).
+- **A planner that fails to load at startup is retried** every 30 s, with an
+  alert, instead of leaving no schedule until a restart (B27).
+
+### Security
+- **Template parameter patterns can't freeze the scheduler.** Patterns that
+  can backtrack for ever (`(a+)+`, `(a|ab)*`) or are over 200 characters are
+  refused, and values are checked only up to 1,000 characters (B22).
+- **Backups need write permission**, run one at a time and are audited. A
+  read-only user could have the engine build any number of full backups (B25).
+
 ## [1.12.0] - 2026-11-05
 
 Fixes from the second evaluation (`docs/EVALUATION-2026-11-05.md`, backlog

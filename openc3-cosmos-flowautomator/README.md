@@ -43,7 +43,9 @@ saved in a format the older one doesn't know is left untouched and not
 loaded, and the engine raises an alert. Reinstall the newer version to get it
 back.
 
-**File → Back Up Everything** downloads one JSON file. It holds the scope's
+**File → Back Up Everything** downloads one JSON file. It needs the
+`script_run` permission, one backup is made at a time, and each one is in the
+audit log. It holds the scope's
 flows and their versions, satellites with their TLEs, stations, rules, TLE
 input settings and alert settings. **File → Restore From Backup** merges a
 backup into this or another COSMOS:
@@ -425,7 +427,10 @@ decayed orbit, bad elements) shows a prediction problem and raises an alert.
 
 A satellite that never sets over a station, such as a GEO satellite, gets one
 contact per UTC day there: AOS at 00:00 and LOS at 24:00. Schedule it with an
-offset from AOS, for example `AOS + 3600` for 01:00 UTC.
+offset from AOS, for example `AOS + 3600` for 01:00 UTC, and give it a
+**duration**: that's how long it uses the antenna, so the station stays free
+for other passes the rest of the day. A rule without a duration skips GEO
+days, and says so.
 
 ### CelesTrak and Space-Track
 

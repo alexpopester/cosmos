@@ -29,6 +29,12 @@ command also refuses values that would change it (see runner.render_command).
 import re
 
 
+try:  # the regular expression parser re uses (re._parser since Python 3.11, sre_parse before)
+    from re import _parser as _sre_parse
+except ImportError:  # pragma: no cover
+    import sre_parse as _sre_parse
+
+
 PARAM_TYPES = ("string", "number", "boolean", "choice", "item", "command", "list")
 # Set by the contact planner for runs of scheduled activities. Other runs of a
 # template get them as None, so templates fail with "this run has no contact"
@@ -76,10 +82,9 @@ def check_parameters(parameters):
         if kind == "choice" and not [c for c in param.get("choices") or [] if str(c) != ""]:
             messages.append(f"{label}: a choice needs at least one option")
         if param.get("pattern") not in (None, ""):
-            try:
-                re.compile(str(param["pattern"]))
-            except re.error as error:
-                messages.append(f"{label}: pattern is not a valid regular expression ({error})")
+            problem = pattern_problem(param["pattern"])
+            if problem:
+                messages.append(f"{label}: pattern {problem}")
         for key in ("min", "max", "max_length"):
             if param.get(key) not in (None, ""):
                 try:
@@ -162,9 +167,65 @@ def coerce_value(param, value):
     max_length = _limit(param, "max_length")
     if max_length is not None and len(text) > max_length:
         raise ValueError(f"is longer than {max_length:g} characters")
-    if param.get("pattern") not in (None, "") and not re.fullmatch(str(param["pattern"]), text):
-        raise ValueError(f"'{text}' doesn't match the pattern {param['pattern']}")
+    if param.get("pattern") not in (None, ""):
+        # Checked again here: a flow saved before patterns were checked may still carry a dangerous one
+        problem = pattern_problem(param["pattern"])
+        if problem:
+            raise ValueError(f"its pattern {problem}")
+        if len(text) > MAX_PATTERN_INPUT:
+            raise ValueError(f"is longer than {MAX_PATTERN_INPUT} characters")
+        if not re.fullmatch(str(param["pattern"]), text):
+            raise ValueError(f"'{text}' doesn't match the pattern {param['pattern']}")
     return text
+
+
+MAX_PATTERN_LENGTH = 200
+MAX_PATTERN_INPUT = 1000  # characters of a value checked against a pattern
+
+
+def pattern_problem(pattern):
+    """Why a parameter pattern isn't allowed, or None.
+
+    Patterns run under the planner's lock and Python's re has no timeout, so ones that can backtrack for ever
+    are refused: a repetition inside another (``(a+)+``) or a repeated alternation (``(a|ab)*``).
+    """
+    text = str(pattern)
+    if len(text) > MAX_PATTERN_LENGTH:
+        return f"is longer than {MAX_PATTERN_LENGTH} characters"
+    try:
+        parsed = _sre_parse.parse(text)
+    except re.error as error:
+        return f"is not a valid regular expression ({error})"
+    repeats = {_sre_parse.MAX_REPEAT, _sre_parse.MIN_REPEAT, getattr(_sre_parse, "POSSESSIVE_REPEAT", None)}
+
+    def walk(items, inside_repeat):
+        for op, value in items:
+            if op in repeats:
+                low, high, sub = value
+                repeated = high is _sre_parse.MAXREPEAT or high > 1
+                if repeated and inside_repeat:
+                    return "repeats something that already repeats (like (a+)+), which can take for ever to check"
+                found = walk(sub, inside_repeat or repeated)
+                if found:
+                    return found
+            elif op is _sre_parse.BRANCH:
+                if inside_repeat:
+                    return "repeats a choice of alternatives (like (a|ab)*), which can take for ever to check"
+                for branch in value[1]:
+                    found = walk(branch, inside_repeat)
+                    if found:
+                        return found
+            elif op is _sre_parse.SUBPATTERN:
+                found = walk(value[-1], inside_repeat)
+                if found:
+                    return found
+            elif op in (_sre_parse.ASSERT, _sre_parse.ASSERT_NOT):
+                found = walk(value[1], inside_repeat)
+                if found:
+                    return found
+        return None
+
+    return walk(parsed, False)
 
 
 def fill_parameters(parameters, values):

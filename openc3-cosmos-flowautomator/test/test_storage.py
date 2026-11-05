@@ -311,3 +311,45 @@ def test_backup_and_restore_through_the_api(engine):
     )
     assert status == 200, result
     assert engine.audit.entries(kind="backup")[0]["action"] == "restored"
+
+
+# B24 (R-14): the flow snapshots inside scheduled activities (what actually runs) were never upgraded
+def test_activity_flow_snapshots_are_upgraded(monkeypatch):
+    from flow_automator import migrations
+
+    def rename(flow):
+        flow = dict(flow)
+        flow["renamed"] = flow.pop("old_field", None)
+        return flow
+
+    monkeypatch.setattr(migrations, "FORMAT_VERSION", 2)
+    monkeypatch.setitem(migrations.STEPS, "flow", {**migrations.STEPS["flow"], 1: rename})
+    activity = {
+        "format": 1,
+        "id": "a1",
+        "flow": {"name": "T", "old_field": "x", "subflow_snapshots": {"s1": {"name": "S", "old_field": "y"}}},
+    }
+    upgraded = migrations.upgrade("activities", activity)
+    assert upgraded["flow"]["renamed"] == "x" and "old_field" not in upgraded["flow"]
+    assert upgraded["flow"]["subflow_snapshots"]["s1"]["renamed"] == "y"
+
+
+# B25 (R-15): any read-only user could have the engine build an unbounded backup, any number at once
+def test_backups_need_write_and_run_one_at_a_time(engine):
+    from flow_automator import http_api
+    from flow_automator.http_api import AuthError, FlowApi
+
+    def authorize(token, write):
+        if token == "reader" and write:
+            raise AuthError("Forbidden", 403)
+        return {"username": token}
+
+    api = FlowApi(engine, authorize)
+    assert api.handle("GET", "/flow-automator/api/backup", {}, {"Authorization": "reader"}, "")[0] == 403
+    assert api.handle("GET", "/flow-automator/api/backup", {}, {"Authorization": "writer"}, "")[0] == 200
+    http_api._backing_up.acquire()
+    try:
+        assert api.handle("GET", "/flow-automator/api/backup", {}, {"Authorization": "writer"}, "")[0] == 409
+    finally:
+        http_api._backing_up.release()
+    assert any(e["action"] == "backed up" for e in engine.audit.entries())

@@ -1,6 +1,7 @@
 """The flow engine: owns the flows, starts runs, applies policies and safety controls."""
 
 import collections
+import contextlib
 import copy
 import threading
 import time
@@ -28,6 +29,9 @@ STORE_FLUSH_SECONDS = 2.0  # how often writes Valkey refused are retried
 SCRIPT_STOP_WAIT_SECONDS = 10.0  # STOP ALL waits this long (in all) for Script Runner to stop scripts
 DETACHED_PRUNE_SECONDS = 60.0  # how often finished fire-and-forget scripts are forgotten
 MAX_DETACHED_SCRIPTS = 1000
+ENGINE_HEARTBEAT_SECONDS = 5.0
+ENGINE_STALE_SECONDS = 30.0  # an engine that hasn't written its heartbeat for this long is gone
+RECOVERY_CHECK_SECONDS = 30.0
 RECENTLY_FINISHED = 50  # finished runs kept in memory until their history is surely in Valkey
 
 
@@ -105,6 +109,10 @@ class FlowEngine:
         self.finished = collections.OrderedDict()  # run id -> json of runs that just finished
         # Set by shutdown: nothing starts any more (queued runs included)
         self.halted = False
+        # During an upgrade the old engine may still be finishing its runs while this one starts: each engine
+        # marks its active-run records with its id and keeps a heartbeat, and recovery leaves a live engine's
+        # runs alone
+        self.engine_id = uuid.uuid4().hex[:12]
         self.branch_threads = 0  # Parallel branch threads running now, across every run
         self.lock = threading.RLock()
         self.triggers = TriggerManager(self, period=trigger_period)
@@ -125,14 +133,13 @@ class FlowEngine:
         self._recover_interrupted_runs()
         armed = [flow["name"] for flow in self.flows.values() if flow.get("armed")]
         self.log("info", f"Flow engine loaded {len(self.flows)} flows ({len(armed)} armed)")
-        try:
-            self.planner.load()
-        except Exception as error:  # noqa: BLE001 - flows still run without contact planning
-            self.log("error", f"Contact planner could not load: {error}")
+        self.planner_loaded = False
+        self._load_planner()
         if start_triggers:
             # The store thread makes buffered writes from now on: a caller holding the engine lock never
             # waits on Valkey for a run's bookkeeping
             self.store.inline_flush = False
+            self._heartbeat()
             self.triggers.start()
             self.planner.start()
             self.alerts.start()
@@ -160,6 +167,9 @@ class FlowEngine:
         self.store._wake.set()
         if self._store_thread:
             self._store_thread.join(timeout=5)
+        # Gone: a successor recovers anything this engine left at once, without waiting for it to look stale
+        with contextlib.suppress(Exception):
+            self.store.delete_record("engines", self.engine_id, defer=True)
         self.store.flush()  # one last try at anything Valkey refused
 
     # ---- storage format and outages ----------------------------------------------
@@ -183,12 +193,49 @@ class FlowEngine:
             summary = ", ".join(f"{count} {kind}{'s' if count > 1 else ''}" for kind, count in sorted(kinds.items()))
             self.log("error", f"Not loaded, saved by a newer Flow Automator: {summary}")
 
+    def _load_planner(self):
+        """Load the contact planner. If that fails (Valkey busy at startup), the store thread tries again."""
+        try:
+            self.planner.load()
+        except Exception as error:  # noqa: BLE001 - flows still run without contact planning
+            if not getattr(self, "_planner_error", None):
+                self.log("error", f"Contact planner could not load (retrying every 30 s): {error}")
+                self.alerts.emit(
+                    "prediction_failed",
+                    "Contact scheduling isn't running",
+                    f"The contact planner couldn't load its satellites, stations and activities ({error}). The "
+                    "engine keeps trying; nothing scheduled runs until it succeeds.",
+                    key=f"planner_load:{time.time()}",
+                )
+            self._planner_error = str(error)
+            return False
+        if getattr(self, "_planner_error", None):
+            self.log("info", "Contact planner loaded")
+        self._planner_error = None
+        self.planner_loaded = True
+        return True
+
+    def _heartbeat(self):
+        try:
+            self.store.save_record("engines", self.engine_id, {"id": self.engine_id, "at": time.time()}, defer=True)
+        except Exception as error:  # noqa: BLE001
+            self.log("warn", f"Could not write the engine heartbeat: {error}")
+
     def _store_loop(self):
         last_prune = time.monotonic()
+        last_heartbeat = last_recovery = 0.0
         while not self._store_stop.is_set():
             self.store.wait_for_writes(STORE_FLUSH_SECONDS)
             if self._store_stop.is_set():
                 return
+            if time.monotonic() - last_heartbeat >= ENGINE_HEARTBEAT_SECONDS:
+                last_heartbeat = time.monotonic()
+                self._heartbeat()
+            if time.monotonic() - last_recovery >= RECOVERY_CHECK_SECONDS:
+                last_recovery = time.monotonic()
+                if not self.planner_loaded:
+                    self._load_planner()
+                self._recover_interrupted_runs()  # runs of an engine that stopped since (an old one, mid-upgrade)
             try:
                 self.store.flush()
             except Exception as error:  # noqa: BLE001 - keep retrying
@@ -243,6 +290,7 @@ class FlowEngine:
                     "dry_run": run.dry_run,
                     "activity_id": run.activity_id,
                     "scripts": list(run.scripts),
+                    "engine_id": self.engine_id,
                 },
                 defer=True,
             )
@@ -259,10 +307,30 @@ class FlowEngine:
         stop the scripts they started, and alert about the unattended ones."""
         try:
             leftovers = self.store.records("active_runs")
+            heartbeats = self.store.records("engines")
         except Exception as error:  # noqa: BLE001
             self.log("error", f"Could not read interrupted runs: {error}")
             return
         now = time.time()
+
+        def alive(engine_id):
+            beat = heartbeats.get(engine_id) or {}
+            return now - float(beat.get("at") or 0) < ENGINE_STALE_SECONDS
+
+        for engine_id, beat in heartbeats.items():
+            if engine_id != self.engine_id and now - float(beat.get("at") or 0) > 86400:
+                with contextlib.suppress(Exception):
+                    self.store.delete_record("engines", engine_id, defer=True)  # long gone
+
+        leftovers = {
+            run_id: record
+            for run_id, record in leftovers.items()
+            # Ours (still running here), or another engine's that is still alive: not interrupted
+            if record.get("engine_id") != self.engine_id
+            and not (record.get("engine_id") and alive(record["engine_id"]))
+        }
+        if not leftovers:
+            return
         # Stop every leftover script at once: one slow Script Runner call each would delay startup by minutes
         all_scripts = [sid for record in leftovers.values() for sid in record.get("scripts") or []]
         stopped = set(self._stop_scripts(all_scripts, collect=True)) if all_scripts else set()

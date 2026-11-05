@@ -153,7 +153,9 @@ def test_geo_activity_survives_a_recompute_later_the_same_day(engine, planner, c
     planner.save_station(
         {"name": "Under", "latitude": 0.0, "longitude": round(lon, 2), "altitude": 0, "min_elevation": 5}
     )
-    planner.save_rule({"template_id": tmpl(engine)["id"], "name": "Daily", "anchor": "aos", "offset": 20 * HOUR})
+    planner.save_rule(
+        {"template_id": tmpl(engine)["id"], "name": "Daily", "anchor": "aos", "offset": 20 * HOUR, "duration": 600}
+    )
     first = min(
         (a for a in planner.activities.values() if a["status"] == "scheduled"), key=lambda a: a["contact"]["aos"]
     )
@@ -184,3 +186,91 @@ def test_applying_rules_with_nothing_new_is_fast(engine, planner):
     with planner.lock:
         assert planner._apply_rules(planner.clock()) == 0
     assert time.perf_counter() - started < 0.1
+
+
+# B20 (C-3, CON-5): one short GEO activity made its station "full" for the whole 24 h day
+def _geo_tle():
+    from flow_automator.orbit import Station
+
+    for mean_anomaly in range(0, 360, 10):
+        tle = make_tle(EPOCH, 0.05, 0.0, mean_anomaly, mean_motion=1.00273791, eccentricity=0.0001, catalog=90010)
+        line1, line2 = tle.split("\n")[-2:]
+        position = Propagator(line1, line2).ecef([EPOCH])[0]
+        if Station(DC["latitude"], DC["longitude"], DC["altitude"], 10).look(position)[1][0] > 30:
+            return tle
+    raise AssertionError("no GEO slot visible from the station")
+
+
+def test_a_short_geo_activity_leaves_the_rest_of_the_day_free(engine, planner):
+    planner.horizon = 3 * 86400
+    planner.save_station(DC)  # capacity 1
+    geo = planner.save_satellite({"name": "GEO", "tle": _geo_tle()})
+    iss = planner.save_satellite({"name": "ISS", "tle": iss_like(90001, 325.0)})
+    day = next(
+        c
+        for c in planner.contacts
+        if c["satellite_id"] == geo["id"] and not c["partial"] and c["aos"] > planner.clock()
+    )
+    t = tmpl(engine)
+    with pytest.raises(PlannerError, match="duration"):
+        planner.create_activity({"contact_id": day["id"], "template_id": t["id"], "offset": 3600})
+    planner.create_activity({"contact_id": day["id"], "template_id": t["id"], "offset": 3600, "duration": 600})
+    result = planner.save_rule({"name": "iss", "template_id": t["id"], "satellite_ids": [iss["id"]]})
+    geo_window = (day["aos"] + 3600, day["aos"] + 4200)
+    iss_that_day = [
+        c
+        for c in planner.contacts
+        if c["satellite_id"] == iss["id"]
+        and not c["partial"]
+        and day["aos"] <= c["aos"] < day["los"]
+        and not (c["aos"] < geo_window[1] and geo_window[0] < c["los"])
+        and c["aos"] - 0 > planner.clock() + 10
+    ]
+    scheduled = [
+        a
+        for a in planner.activities.values()
+        if a.get("rule_id") == result["rule"]["id"] and day["aos"] <= a["contact"]["aos"] < day["los"]
+    ]
+    assert iss_that_day and len(scheduled) == len(iss_that_day)
+
+
+# B21 (C-9): a hand-edited rule activity was cancelled and replaced when its pass moved, losing the edits
+def test_a_hand_edited_rule_activity_is_flagged_not_replaced_when_its_pass_moves(engine, planner):
+    planner.save_station(DC)
+    sat = planner.save_satellite({"name": "ISS", "tle": iss_like(90001, 325.0)})
+    planner.save_rule({"name": "r", "template_id": tmpl(engine)["id"], "satellite_ids": [sat["id"]]})
+    activity = min(
+        (a for a in planner.activities.values() if a["status"] == "scheduled"), key=lambda a: a["contact"]["aos"]
+    )
+    planner.update_activity(activity["id"], {"offset": -300, "label": "hand tuned"})
+    planner.set_tle(sat["id"], iss_like(90001, 315.0))  # moves the pass well past the re-time tolerance
+    edited = planner.activities[activity["id"]]
+    assert edited["status"] == "needs_review" and not edited.get("superseded")
+    assert edited["label"] == "hand tuned" and edited["offset"] == -300
+    assert edited["suggested_contact_id"]
+
+
+# B22 (C-13): a template parameter's pattern runs under the planner lock: catastrophic ones are refused
+@pytest.mark.parametrize("pattern", [r"(a+)+$", r"(a*)*b", r"(a|aa)*c", r"(\w+\s?)+$", "x" * 201])
+def test_dangerous_parameter_patterns_are_refused(pattern):
+    from flow_automator.templates import check_parameters
+
+    problems = check_parameters([{"name": "p", "type": "string", "pattern": pattern}])
+    assert problems, pattern
+
+
+@pytest.mark.parametrize("pattern", [r"[A-Z]{3}\d+", r"(NORMAL|SPECIAL)", r"\d{1,5}(\.\d+)?", r"^[a-z_]+$"])
+def test_ordinary_parameter_patterns_are_fine(pattern):
+    from flow_automator.templates import check_parameters
+
+    assert check_parameters([{"name": "p", "type": "string", "pattern": pattern}]) == []
+
+
+def test_a_stored_dangerous_pattern_is_not_run():
+    import time
+
+    from flow_automator.templates import fill_parameters
+
+    started = time.monotonic()
+    _values, problems = fill_parameters([{"name": "p", "type": "string", "pattern": r"(a+)+$"}], {"p": "a" * 40 + "!"})
+    assert problems and time.monotonic() - started < 0.5

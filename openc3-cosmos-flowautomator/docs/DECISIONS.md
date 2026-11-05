@@ -319,7 +319,8 @@ stay partial. Partial contacts can't be scheduled.
 *Amended 2026-11-05 (1.12.0):* today's contact starts at 00:00 even when the
 prediction window starts later in the day. Before, it changed shape with every
 window roll, so it was partial and its activities were cancelled (R-4).
-Counting a day contact as 24 h of antenna use is still open (B20).
+A GEO activity needs a duration, and only that window counts as antenna use
+for station capacity (B20). Rules without a duration skip GEO days.
 
 *Why:* a single window-long partial contact could never be scheduled, so GEO
 satellites couldn't be used at all (CON-5). Daily windows let activities

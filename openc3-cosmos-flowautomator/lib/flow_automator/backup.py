@@ -36,7 +36,9 @@ _ID = re.compile(r"[\w-]{1,64}")
 
 
 class BackupError(Exception):
-    status = 400
+    def __init__(self, message, status=400):
+        super().__init__(message)
+        self.status = status
 
 
 def make_backup(engine, include_history=False, now=None):

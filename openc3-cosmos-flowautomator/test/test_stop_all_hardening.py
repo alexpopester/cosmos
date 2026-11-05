@@ -317,3 +317,54 @@ def test_pause_works_while_the_planner_is_busy(engine, monkeypatch):
     finally:
         done.set()
         thread.join()
+
+
+# B26 (R-16, P-9): during an upgrade the new engine failed the old engine's live runs and stopped their scripts
+def test_a_new_engine_leaves_a_live_engines_runs_alone():
+    redis = MemoryRedis()
+    old_backend, new_backend = FakeBackend(), FakeBackend()
+    old = FlowEngine(FlowStore(redis, "DEFAULT"), old_backend, ListLogger())
+    old.start(start_triggers=False)
+    old._heartbeat()
+    flow, _ = old.save_flow(
+        make_flow(
+            [node("t", "trigger_manual"), node("s", "run_script", filename="INST/procedures/x.py", wait=True)],
+            [edge("t", "s")],
+        )
+    )
+    old_backend.scripts[1] = ["running"]
+    run_id = old.trigger(flow["id"], manual=True)["run"]["id"]
+    assert wait_until(lambda: old_backend.started_scripts)
+
+    new = FlowEngine(FlowStore(redis, "DEFAULT"), new_backend, ListLogger())
+    new.start(start_triggers=False)  # recovery runs here, while the old engine is still alive
+    assert new_backend.stopped_scripts == []
+    assert run_id in old.runs and not old.runs[run_id].cancelled()
+
+    # The old engine dies without cleaning up: once its heartbeat is stale, the new engine records the run
+    redis.hashes["flow_automator__DEFAULT__engines"][old.engine_id] = json.dumps({"id": old.engine_id, "at": 0})
+    new._recover_interrupted_runs()
+    assert new_backend.stopped_scripts == [1]
+    assert new.get_run(run_id)["interrupted"] is True
+    old.shutdown()
+    new.shutdown()
+
+
+# B27 (R-28): a planner that failed to load at startup was never retried (no schedule until a restart)
+def test_planner_load_is_retried(flaky):
+    engine = FlowEngine(FlowStore(flaky, "DEFAULT"), FakeBackend(), ListLogger())
+    real_load = engine.planner.load
+    calls = {"n": 0}
+
+    def flaky_load():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ConnectionError("Valkey is loading")
+        return real_load()
+
+    engine.planner.load = flaky_load
+    engine.start(start_triggers=False)
+    assert engine.planner_loaded is False
+    engine.planner.tick()  # does nothing while not loaded
+    assert engine._load_planner() is True and engine.planner_loaded is True
+    engine.shutdown()

@@ -101,6 +101,16 @@ def activity_start(activity):
     return contact[activity.get("anchor", "aos")] + float(activity.get("offset") or 0)
 
 
+def occupancy(activity):
+    """When an activity uses its station's antenna: the whole pass, or for a GEO day contact, its own run."""
+    contact = activity["contact"]
+    window = {k: contact.get(k) for k in ("id", "station_id", "station", "aos", "los")}
+    if contact.get("continuous") and activity.get("duration"):
+        start = activity_start(activity)
+        window.update(aos=start, los=min(start + float(activity["duration"]), contact["los"]))
+    return window
+
+
 def _overlap(a, b):
     return a["aos"] < b["los"] and b["aos"] < a["los"]
 
@@ -614,8 +624,9 @@ class ContactPlanner:
                     continue
                 shift = anchor_shift
                 nearest = dict(nearest)  # flagged below, like a pass that moved too far
-            if activity.get("rule_id"):
-                # The rule schedules whatever pass is predicted now; this one is gone
+            if activity.get("rule_id") and not activity.get("detached"):
+                # The rule schedules whatever pass is predicted now; this one is gone. A hand-edited (detached)
+                # one is flagged for review below instead, so the operator's edits aren't thrown away (D23)
                 why = "contact no longer predicted" if nearest is None else f"contact moved {shift:+.0f}s"
                 self._finish(activity, "cancelled", f"Cancelled: {why}; the rule schedules the new prediction", now)
                 activity["superseded"] = True
@@ -664,7 +675,7 @@ class ContactPlanner:
             activity["message"] = f"Re-timed {shift:+.1f}s to follow the updated prediction"
         problem = self._window_problem(activity)
         if problem:
-            if activity.get("rule_id"):
+            if activity.get("rule_id") and not activity.get("detached"):
                 self._finish(activity, "cancelled", f"Cancelled: {problem}; the rule schedules the new prediction", now)
                 activity["superseded"] = True
             else:
@@ -714,17 +725,33 @@ class ContactPlanner:
             "station_id",
             "station",
         )
-        return {k: contact[k] for k in keys}
+        ref = {k: contact[k] for k in keys}
+        if contact.get("continuous"):
+            ref["continuous"] = True  # a GEO day: the antenna is in use only while its activities run
+        return ref
 
     # ---- station capacity --------------------------------------------------
 
     def _used_contacts(self, exclude_activity=None):
-        """Contacts that have a scheduled or running activity: {contact id: contact ref}."""
+        """Contacts that have a scheduled or running activity: {contact id: when the antenna is in use}.
+
+        A pass uses the antenna for the whole pass. A GEO day contact (``continuous``) lasts 24 h, so it uses
+        the antenna only while its activities run: from the earliest start to the latest end on that day.
+        """
         used = {}
         for activity in self.activities.values():
             if activity is exclude_activity or not (activity["status"] in WAITING or activity["status"] == "running"):
                 continue
-            used[activity["contact"]["id"]] = activity["contact"]
+            contact = activity["contact"]
+            window = occupancy(activity)
+            if contact["id"] in used and contact.get("continuous"):
+                current = used[contact["id"]]
+                window = {
+                    **window,
+                    "aos": min(window["aos"], current["aos"]),
+                    "los": max(window["los"], current["los"]),
+                }
+            used[contact["id"]] = window
         return used
 
     def _capacity(self, station_id):
@@ -835,6 +862,11 @@ class ContactPlanner:
     def _check_activity(self, activity, template, now, require_future=True):
         self._check_timing(activity)
         self._check_mode_floor(activity, template)
+        if activity["contact"].get("continuous") and not activity.get("duration"):
+            raise PlannerError(
+                "A GEO day contact lasts 24 h: set the activity's duration (how long it uses the antenna), so other "
+                "passes at that station can still be scheduled"
+            )
         start = activity_start(activity)
         if start >= activity["contact"]["los"]:
             raise PlannerError("The activity would start after LOS")
@@ -1203,13 +1235,18 @@ class ContactPlanner:
                 n.get("type") == "ask" for n in template.get("nodes") or []
             )
             skipped_full = 0
+            needs_duration = False
             for contact in self.contacts:
                 if already_taken(rule["id"], contact) or not self._rule_matches(rule, contact, now):
                     continue
+                if contact.get("continuous") and not rule.get("duration"):
+                    needs_duration = True  # a GEO day lasts 24 h: how long would it use the antenna?
+                    continue
+                window = occupancy({**rule, "contact": contact})
                 if (
                     rule.get("skip_full_stations", True)
-                    and self._station_full(contact, used)
-                    and not self._preempt(rule, contact, used, now)
+                    and self._station_full(window, used)
+                    and not self._preempt(rule, window, used, now)
                 ):
                     skipped_full += 1
                     continue
@@ -1221,9 +1258,11 @@ class ContactPlanner:
                 self.activities[activity["id"]] = activity
                 self._save("activities", activity)
                 take(rule["id"], contact)
-                used[contact["id"]] = activity["contact"]
+                used[contact["id"]] = window
                 created += 1
             rule["skipped_full"] = skipped_full
+            if needs_duration:
+                rule["last_error"] = "Set a duration to schedule GEO day contacts (how long the antenna is used)"
             rule.pop("_asks", None)
         if created:
             self.audit(SCHEDULER, "scheduled from rules", "activity", detail=f"{created} new activities")
@@ -1333,6 +1372,8 @@ class ContactPlanner:
         return dict(self.settings)
 
     def tick(self):
+        if getattr(self.engine, "planner_loaded", True) is False:
+            return  # still loading (Valkey wasn't there at startup): nothing to schedule from yet
         now = self.clock()
         if self.computed_at is not None and now - self.computed_at >= self.recompute_every and not self.predicting():
             self.recompute()

@@ -14,8 +14,10 @@ When a change renames or reshapes a stored field:
    to n + 1). Kinds without a step for n are copied unchanged;
 3. add a test that loads a record in the old format.
 
-A saved version holds a whole flow (``NESTED``); it's upgraded with the flow
-steps, so a flow change needs no separate version step.
+A saved version holds a whole flow, and a scheduled activity holds the flow
+snapshot it runs plus snapshots of its sub-flows (``NESTED``). They're
+upgraded with the flow steps, so a flow change needs no separate version or
+activity step, and the snapshots that actually run are never left behind.
 
 Steps must be pure and must accept anything an older engine could have
 written, including fields that were missing then. Records saved before
@@ -39,8 +41,13 @@ STEPS = {
     "flow": {0: _flow_0},
 }
 
-# Records that carry another kind inside them, saved in the same format: upgraded along with them
-NESTED = {"version": {"flow": "flow"}}
+# Records that carry another kind inside them, saved in the same format: upgraded along with them.
+# ("map", kind): a dict of id -> record of that kind.
+NESTED = {
+    "version": {"flow": "flow"},
+    "activities": {"flow": "flow"},
+    "flow": {"subflow_snapshots": ("map", "flow")},
+}
 
 
 class NewerFormatError(Exception):
@@ -74,8 +81,13 @@ def upgrade(kind, record, found=None):
         if step is not None:
             record = step(record)
     for key, nested_kind in NESTED.get(kind, {}).items():
-        if isinstance(record.get(key), dict):
-            record[key] = upgrade(nested_kind, record[key], found)
+        value = record.get(key)
+        if not isinstance(value, dict):
+            continue
+        if isinstance(nested_kind, tuple):
+            record[key] = {k: upgrade(nested_kind[1], v, found) for k, v in value.items()}
+        else:
+            record[key] = upgrade(nested_kind, value, found)
     return record
 
 

@@ -12,8 +12,8 @@ which every write records in the audit log.
     POST   <prefix>/api/demo                     reset and load the demo (needs the COSMOS demo plugin's INST)
     DELETE <prefix>/api/demo                     remove the demo
     GET    <prefix>/api/audit?limit=&kind=&user=&target_id=&search=   who did what, newest first
-    GET    <prefix>/api/backup?history=1         everything in this scope as one JSON document (backup.py);
-                                                 history=1 adds run history and the audit log
+    GET    <prefix>/api/backup?history=1         write: everything in this scope as one JSON document (backup.py);
+                                                 history=1 adds run history and the audit log; one at a time
     POST   <prefix>/api/restore                  {"backup": ...}: merge a backup in; restored flows are
                                                  disarmed and the scheduler is paused
     GET    <prefix>/api/flows
@@ -104,6 +104,7 @@ from .tle_sources import TleSourceError
 MAX_BODY_BYTES = 5 * 1024 * 1024
 MAX_RESTORE_BYTES = 25 * 1024 * 1024  # a backup with every version; one restore is read at a time
 _restoring = threading.Semaphore(1)
+_backing_up = threading.Semaphore(1)  # one backup at a time: each holds a copy of everything in memory
 MAX_CONCURRENT_REQUESTS = 64
 # When every slot is busy (slow or hostile clients), up to this many more connections are peeked at, and served
 # only if they ask for STOP ALL or /health: a full server can always still stop everything
@@ -135,7 +136,7 @@ def _routes():
         ("POST", r"/api/demo", "load_demo", True),
         ("DELETE", r"/api/demo", "clear_demo", True),
         ("GET", r"/api/audit", "audit_log", False),
-        ("GET", r"/api/backup", "backup", False),
+        ("GET", r"/api/backup", "backup", True),  # write: it holds everything (and history), and is big
         ("POST", r"/api/restore", "restore", True),
         ("GET", r"/api/flows", "list_flows", False),
         ("POST", r"/api/flows", "create_flow", True),
@@ -279,7 +280,14 @@ class FlowApi:
 
     def backup(self, query, user, **_):
         history = (query.get("history") or [""])[0] in ("1", "true", "yes")
-        return make_backup(self.engine, include_history=history)
+        if not _backing_up.acquire(blocking=False):
+            raise BackupError("A backup is already being made: try again in a moment", status=409)
+        try:
+            backup = make_backup(self.engine, include_history=history)
+        finally:
+            _backing_up.release()
+        self._audit(user, "backed up", "scope", detail="with run history and audit log" if history else "")
+        return backup
 
     def restore(self, payload, user, **_):
         backup = payload.get("backup", payload)

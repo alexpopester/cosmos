@@ -187,7 +187,7 @@ def test_geo_gets_daily_contacts(engine, planner):
     full = [c for c in planner.contacts if not c["partial"]]
     assert full and all(c["continuous"] and c["duration"] == 86400 and c["aos"] % 86400 == 0 for c in full)
     created = planner.save_rule(
-        {"template_id": template(engine)["id"], "name": "Daily", "anchor": "aos", "offset": 3600}
+        {"template_id": template(engine)["id"], "name": "Daily", "anchor": "aos", "offset": 3600, "duration": 600}
     )
     assert created["created"] >= 1
 
