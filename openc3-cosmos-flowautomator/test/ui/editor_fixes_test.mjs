@@ -144,7 +144,83 @@ try {
   const toast = await page.locator('text=Still armed').count()
   check('a failed disarm still shows Armed, with a warning', stillArmed === 1 && toast > 0, `armed=${stillArmed} toast=${toast}`)
   await page.unroute('**/flow-automator/api/flows/*/disarm*')
+  await api('POST', `/flows/${varsId}/disarm`, {})
   await page.screenshot({ path: `${SHOTS}/editor_fixes.png` })
+
+  // ---- B36: "Run vN" asks once, and the run dialog describes vN, not the draft ----
+  const tplId = await make(
+    'Editor test template',
+    [n('t', 'trigger_manual', 0, 0), n('l', 'log', 300, 0, { message: 'rate {{ rate }}' })],
+    [e('t', 'l')],
+    { template: true, parameters: [{ name: 'rate', type: 'number', default: 2 }] },
+  )
+  await open(tplId, 2)
+  await page.locator('.vue-flow__node[data-id="l"] .fa-header').click()
+  await page.locator('.fa-inspector textarea').first().fill('changed in the draft')
+  let prompts = 0
+  const countPrompt = () => page.locator('.v-dialog', { hasText: 'Save changes first?' }).count()
+  await page.getByRole('button', { name: 'Run now' }).click()
+  await page.locator('.v-dialog', { hasText: 'Save changes first?' }).waitFor({ timeout: 5000 })
+  prompts += 1
+  await page.locator('.fa-use-saved').click()
+  await page.locator('.fa-run-dialog').waitFor({ timeout: 5000 })
+  const previousNote = await page.locator('.fa-run-previous').count()
+  await page.locator('.fa-run-dialog .fa-run-dry input').uncheck().catch(() => {})
+  await page.locator('.fa-run-go').click()
+  await page.waitForTimeout(1000)
+  prompts += await countPrompt()
+  const [, runs] = await api('GET', `/runs?flow_id=${tplId}`)
+  check(
+    '"Run vN" asks once and runs the saved version',
+    prompts === 1 && previousNote === 1 && runs.length === 1 && runs[0].flow_version === 1,
+    `prompts=${prompts} note=${previousNote} runs=${runs.length} v${runs[0]?.flow_version}`,
+  )
+
+  // ---- B39: leaving for another COSMOS tool with unsaved edits asks first ----
+  const dialogs = []
+  const onDialog = (dialog) => {
+    dialogs.push(dialog.message())
+    dialog.dismiss()
+  }
+  page.on('dialog', onDialog)
+  await page.evaluate(() => window.history.pushState({}, '', '/tools/cmdsender'))
+  await page.evaluate(() => window.dispatchEvent(new PopStateEvent('popstate')))
+  await page.waitForTimeout(1500)
+  page.off('dialog', onDialog)
+  check(
+    'leaving for another tool with unsaved edits asks first, and Cancel stays',
+    dialogs.some((m) => m.includes("aren't saved")) && (await page.locator('.fa-palette').count()) === 1,
+    JSON.stringify(dialogs),
+  )
+
+  // ---- B38: a hung engine shows "not answering" and locks approval cards ----
+  const askId = await make(
+    'Editor test hung',
+    [n('t', 'trigger_manual', 0, 0), n('c', 'log', 300, 0, { message: 'x', require_approval: true })],
+    [e('t', 'c')],
+    { mode: 'crawl' },
+  )
+  await page.goto(`${BASE}/tools/flowautomator?flow=${askId}`)
+  await page.locator('.vue-flow__node').nth(1).waitFor({ timeout: 30000 })
+  const [, started] = await api('POST', `/flows/${askId}/run`, {})
+  await page.locator('.fa-approval').first().waitFor({ timeout: 10000 })
+  await page.route('**/flow-automator/api/status*', () => {}) // never answers
+  const deadline = Date.now() + 15000
+  let chip = ''
+  while (Date.now() < deadline) {
+    chip = await page.locator('.fa-engine-chip').innerText()
+    if (chip.includes('not answering')) break
+    await page.waitForTimeout(500)
+  }
+  const goDisabled = await page.locator('.fa-approval-go').first().isDisabled()
+  const staleNote = await page.locator('.fa-approval-stale').count()
+  check(
+    'a hung engine shows "not answering" and approval cards are locked',
+    chip.includes('not answering') && goDisabled && staleNote > 0,
+    `${chip.replace(/\s+/g, ' ')} go-disabled=${goDisabled} stale=${staleNote}`,
+  )
+  await page.unroute('**/flow-automator/api/status*')
+  await api('POST', `/runs/${started.run.id}/stop`, {}).catch(() => {})
 } catch (error) {
   check('unexpected error', false, error.message.split('\n')[0])
   await page.screenshot({ path: `${SHOTS}/editor_fixes_error.png` }).catch(() => {})

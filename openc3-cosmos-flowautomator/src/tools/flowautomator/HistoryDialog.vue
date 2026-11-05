@@ -296,8 +296,11 @@ export default {
       this.selected = version
       this.diff = null
       try {
-        this.diff = await flowApi.diff(this.flowId, version.version)
+        const diff = await flowApi.diff(this.flowId, version.version)
+        if (this.selected !== version) return // another version was picked meanwhile
+        this.diff = diff
       } catch (error) {
+        if (this.selected !== version) return
         this.diff = null
         this.$notify.caution({
           title: 'Could not compare',

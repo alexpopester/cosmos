@@ -233,7 +233,11 @@
                   {{ engineStatus.active_runs.length }} running
                   <template v-if="storeTrouble">· storage problem</template>
                 </template>
-                <template v-else>Engine offline</template>
+                <template v-else>{{
+                  engineError === notAnswering
+                    ? 'Engine not answering'
+                    : 'Engine offline'
+                }}</template>
               </v-chip>
             </template>
             <span v-if="engineOnline">
@@ -414,6 +418,7 @@
       <approval-panel
         :approvals="allApprovals"
         :now="engineStatus.time"
+        :stale="!engineOnline"
         show-flow
         class="fa-approvals-inline"
         @decided="pollStatus"
@@ -491,6 +496,7 @@
         <approval-panel
           :approvals="flowApprovals"
           :now="engineStatus.time"
+          :stale="!engineOnline"
           :class="{ 'fa-approvals-inline': layout === 'log' }"
           @decided="pollStatus"
         />
@@ -802,16 +808,26 @@
     <v-dialog v-model="runDialog.show" max-width="560" scrollable>
       <v-card class="fa-run-dialog">
         <v-card-title>
-          {{ runDialog.dry_run ? 'Dry run' : 'Run' }} '{{ flowSettings.name }}'
+          {{ runDialog.dry_run ? 'Dry run' : 'Run' }} '{{ runSrc.name }}'
         </v-card-title>
         <v-card-text>
+          <v-alert
+            v-if="runSrc.previous"
+            type="info"
+            variant="tonal"
+            density="compact"
+            class="mb-3 fa-run-previous"
+          >
+            Runs v{{ runSrc.version }} as saved: your unsaved edits aren't
+            included.
+          </v-alert>
           <v-switch
             v-model="runDialog.dry_run"
             label="Dry run: check commands but send nothing"
             color="info"
             density="compact"
             hide-details
-            :disabled="flowSettings.dry_run"
+            :disabled="runSrc.dry_run"
             class="fa-run-dry"
           />
           <v-switch
@@ -854,21 +870,21 @@
             </v-btn-toggle>
           </div>
           <div
-            v-if="!runDialog.dry_run && flowSettings.mode !== 'run'"
+            v-if="!runDialog.dry_run && runSrc.mode !== 'run'"
             class="text-caption text-medium-emphasis mt-n2 mb-3"
           >
             A real run can't be less cautious than the flow's mode ({{
-              flowSettings.mode
+              runSrc.mode
             }}). Change the flow's mode to run with fewer approvals.
           </div>
-          <template v-if="(flowSettings.parameters || []).length">
+          <template v-if="runSrc.parameters.length">
             <div class="text-caption mb-1">Parameters</div>
             <param-form
               v-model="runDialog.values"
-              :parameters="flowSettings.parameters || []"
+              :parameters="runSrc.parameters"
             />
           </template>
-          <template v-if="flowSettings.template || usesContact">
+          <template v-if="runSrc.template || usesContact">
             <div class="text-caption mb-1">Contact</div>
             <v-btn-toggle
               v-model="runDialog.contactKind"
@@ -1149,6 +1165,11 @@ export default {
       seenApprovals: new Set(),
       modes: MODES,
       engineOnline: true,
+      statusInFlight: false,
+      statusMisses: 0,
+      hiddenTicks: 0,
+      notAnswering:
+        'The flow engine is not answering (it may be busy or stuck)',
       engineError: '',
       scripts: [],
       confirmStopAll: false,
@@ -1170,6 +1191,20 @@ export default {
     }
   },
   computed: {
+    // What the run dialog describes: the flow that will run (see runSource)
+    runSrc() {
+      return (
+        this.runDialog.source || {
+          name: this.flowSettings.name,
+          mode: this.flowSettings.mode || 'run',
+          dry_run: !!this.flowSettings.dry_run,
+          parameters: this.flowSettings.parameters || [],
+          template: !!this.flowSettings.template,
+          version: this.flowVersion,
+          previous: false,
+        }
+      )
+    },
     storeTrouble() {
       // Valkey refusing writes (or data from a newer version): the engine runs, but say so
       const store = this.engineStatus?.store
@@ -1462,6 +1497,10 @@ export default {
       })
       .catch(() => {})
     window.addEventListener('beforeunload', this.beforeUnload)
+    window.addEventListener(
+      'single-spa:before-routing-event',
+      this.beforeRouting,
+    )
   },
   mounted() {
     window.addEventListener('resize', this.fitHeight)
@@ -1476,6 +1515,10 @@ export default {
     this.timers.forEach(clearInterval)
     clearTimeout(this.validateTimer)
     window.removeEventListener('beforeunload', this.beforeUnload)
+    window.removeEventListener(
+      'single-spa:before-routing-event',
+      this.beforeRouting,
+    )
   },
   methods: {
     // ---- flows --------------------------------------------------------
@@ -1888,12 +1931,32 @@ export default {
         event.returnValue = ''
       }
     },
+    // Going to another COSMOS tool doesn't unload the page (single-spa swaps the tool), so beforeunload
+    // never fires: ask here, and cancel the navigation if the edits should stay
+    beforeRouting(event) {
+      const detail = event.detail || {}
+      if (!this.dirty || !detail.cancelNavigation) return
+      const target = new URL(
+        detail.newUrl || window.location.href,
+        window.location.href,
+      )
+      if (target.pathname.startsWith('/tools/flowautomator')) return
+      if (
+        !window.confirm(
+          `'${this.flowSettings.name}' has changes that aren't saved. Leave and lose them?`,
+        )
+      ) {
+        detail.cancelNavigation()
+      }
+    },
 
     // ---- arming and running --------------------------------------------
     // Running or arming needs the flow saved. With unsaved edits, ask: save them (a new version) and go
     // on, go on with the last saved version, or cancel. Resolves true to go on.
+    // Resolves to what will run: 'current' (nothing unsaved), 'saved' (the edits were just saved), 'previous'
+    // (the last saved version, edits left out), or false (cancelled)
     ensureSaved(action = 'run') {
-      if (!this.dirty && this.flowId) return Promise.resolve(true)
+      if (!this.dirty && this.flowId) return Promise.resolve('current')
       return new Promise((resolve) => {
         this.saveFirst = { show: true, action, resolve }
       })
@@ -1901,8 +1964,33 @@ export default {
     async answerSaveFirst(choice) {
       const { resolve } = this.saveFirst
       this.saveFirst = { show: false, action: '', resolve: null }
-      if (choice === 'save') resolve(await this.save())
-      else resolve(choice === 'saved' && !!this.flowId)
+      if (choice === 'save') resolve((await this.save()) ? 'saved' : false)
+      else resolve(choice === 'saved' && !!this.flowId ? 'previous' : false)
+    },
+    // The settings of the flow a run will use: the editor's, or the last saved version's when the unsaved
+    // edits are left out (its parameters and mode may differ from the draft's)
+    async runSource(how) {
+      if (how !== 'previous') {
+        return {
+          name: this.flowSettings.name,
+          mode: this.flowSettings.mode || 'run',
+          dry_run: !!this.flowSettings.dry_run,
+          parameters: this.flowSettings.parameters || [],
+          template: !!this.flowSettings.template,
+          version: this.flowVersion,
+          previous: false,
+        }
+      }
+      const { flow } = await flowApi.getFlow(this.flowId)
+      return {
+        name: flow.name,
+        mode: flow.mode || 'run',
+        dry_run: !!flow.dry_run,
+        parameters: flow.parameters || [],
+        template: !!flow.template,
+        version: flow.version,
+        previous: true,
+      }
     },
     async setArmed(value) {
       if (value && !(await this.ensureSaved('arm'))) return
@@ -1943,14 +2031,15 @@ export default {
         this.refreshFlows()
       }
     },
-    async runNow(triggerNode, variables = null, options = null) {
-      if (!(await this.ensureSaved())) return
-      const parameters = this.flowSettings.parameters || []
-      if (
-        options === null &&
-        (parameters.length || this.flowSettings.template)
-      ) {
-        return this.openRunDialog(triggerNode)
+    async runNow(triggerNode, variables = null, options = null, how = null) {
+      // One save prompt per run: the run dialog's own Run passes how it was decided
+      how = how || (await this.ensureSaved())
+      if (!how) return
+      if (options === null) {
+        const source = await this.runSource(how)
+        if (source.parameters.length || source.template) {
+          return this.openRunDialog(triggerNode, {}, how, source)
+        }
       }
       try {
         const result = await flowApi.run(
@@ -1977,22 +2066,25 @@ export default {
         this.$notify.caution({ title: 'Run not started', body: info.message })
       }
     },
-    async openRunDialog(triggerNode, preset = {}) {
-      if (!(await this.ensureSaved())) return
+    async openRunDialog(triggerNode, preset = {}, how = null, source = null) {
+      how = how || (await this.ensureSaved())
+      if (!how) return
+      source = source || (await this.runSource(how))
       this.runDialog = {
         show: true,
         triggerNode,
+        how,
+        source,
         values: {},
-        dry_run: this.flowSettings.dry_run || !!preset.dry_run,
+        dry_run: source.dry_run || !!preset.dry_run,
         skip_waits: true,
-        mode: this.flowSettings.mode || 'run',
-        contactKind:
-          this.flowSettings.template || this.usesContact ? 'simulated' : 'none',
+        mode: source.mode,
+        contactKind: source.template || this.usesContact ? 'simulated' : 'none',
         aos_in: 30,
         duration: 300,
         contact_id: null,
       }
-      if (this.flowSettings.template || this.usesContact) {
+      if (source.template || this.usesContact) {
         const now = Date.now() / 1000
         flowApi
           .schedule(Math.floor(now), Math.ceil(now + 86400))
@@ -2022,7 +2114,7 @@ export default {
       } else if (d.contactKind === 'predicted' && d.contact_id) {
         options.contact = { contact_id: d.contact_id }
       }
-      this.runNow(d.triggerNode, d.values, options)
+      this.runNow(d.triggerNode, d.values, options, d.how)
     },
     openRunFromHistory(flowId, runId) {
       this.showRunHistory = false
@@ -2063,9 +2155,9 @@ export default {
     },
     lessCautious(mode) {
       const order = this.modes.map((m) => m.value)
-      return (
-        order.indexOf(mode) > order.indexOf(this.flowSettings.mode || 'run')
-      )
+      const floor =
+        this.runDialog.source?.mode || this.flowSettings.mode || 'run'
+      return order.indexOf(mode) > order.indexOf(floor)
     },
     stopFlowRuns() {
       this.activeRunIds.forEach(this.stopRun)
@@ -2109,8 +2201,26 @@ export default {
 
     // ---- live status ----------------------------------------------------
     async pollStatus() {
+      // One status request at a time: a hung engine mustn't pile them up (they'd also queue a Stop all
+      // behind them on HTTP/1.1). A tab nobody is looking at polls every 5th tick.
+      if (this.statusInFlight) {
+        this.statusMisses += 1
+        if (this.statusMisses >= 2) {
+          this.engineOnline = false
+          this.engineError = this.notAnswering
+        }
+        return
+      }
+      if (
+        typeof document !== 'undefined' &&
+        document.hidden &&
+        this.hiddenTicks++ % 5
+      )
+        return
+      this.statusInFlight = true
       try {
         const status = await flowApi.status()
+        this.statusMisses = 0
         this.engineStatus = status
         try {
           this.announceApprovals(status.approvals || [])
@@ -2139,8 +2249,16 @@ export default {
           await this.refreshRuns()
         }
       } catch (error) {
+        if (error.timeout) {
+          this.statusMisses += 1
+          if (this.statusMisses < 2) return
+          this.engineError = this.notAnswering
+        } else {
+          this.engineError = errorInfo(error).message
+        }
         this.engineOnline = false
-        this.engineError = errorInfo(error).message
+      } finally {
+        this.statusInFlight = false
       }
     },
     async refreshRuns() {
@@ -2234,8 +2352,11 @@ export default {
     validateSoon() {
       clearTimeout(this.validateTimer)
       this.validateTimer = setTimeout(async () => {
+        // A slow answer for an older edit (or another flow) mustn't replace a newer one
+        const ticket = (this.validateTicket = (this.validateTicket || 0) + 1)
         try {
           const { problems } = await flowApi.validate(this.toEngine())
+          if (ticket !== this.validateTicket) return
           this.applyProblems(problems)
         } catch {
           // Engine offline: shown in the toolbar

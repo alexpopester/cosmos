@@ -130,7 +130,13 @@
             </tr>
             <tr v-if="!runs.length">
               <td colspan="7" class="text-caption text-medium-emphasis">
-                {{ loading ? 'Loading…' : 'No runs match.' }}
+                {{
+                  loading
+                    ? 'Loading…'
+                    : error
+                      ? `Couldn't load runs: ${error}`
+                      : 'No runs match.'
+                }}
               </td>
             </tr>
           </tbody>
@@ -152,7 +158,7 @@
 </template>
 
 <script>
-import flowApi from './flowApi'
+import flowApi, { errorInfo } from './flowApi'
 
 export default {
   props: {
@@ -163,6 +169,8 @@ export default {
   data() {
     return {
       runs: [],
+      error: '',
+      ticket: 0,
       loading: false,
       timer: null,
       limit: 300,
@@ -217,17 +225,25 @@ export default {
       this.timer = setTimeout(this.load, 300)
     },
     async load() {
+      // Only the newest search counts: an older, slower one mustn't overwrite it
+      const ticket = (this.ticket = (this.ticket || 0) + 1)
       this.loading = true
       try {
         const params = { limit: this.limit }
         for (const [key, value] of Object.entries(this.filters)) {
           if (value !== null && value !== '') params[key] = value
         }
-        this.runs = await flowApi.searchRuns(params)
-      } catch {
+        const runs = await flowApi.searchRuns(params)
+        if (ticket !== this.ticket) return
+        this.runs = runs
+        this.error = ''
+      } catch (error) {
+        if (ticket !== this.ticket) return
         this.runs = []
+        // Not "no runs": the engine didn't answer
+        this.error = errorInfo(error).message
       } finally {
-        this.loading = false
+        if (ticket === this.ticket) this.loading = false
       }
     },
     triggerText(r) {

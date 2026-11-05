@@ -20,10 +20,31 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.13.0] - 2026-11-05
+
 Correctness fixes from the second evaluation (`docs/EVALUATION-2026-11-05.md`,
 section 2.2).
 
 ### Fixed
+- **"Run vN" asks once.** Choosing to run the last saved version used to ask up
+  to three times, and the run dialog showed the draft's parameters and mode;
+  it now describes the saved version and says the edits aren't included (B36).
+- **Approval cards are harder to answer by accident.** Ask answers get the
+  same short click guard as Go, a card that slides up under the cursor after
+  another is answered is guarded too, and a new question no longer takes the
+  keyboard from a field you're typing in (B37).
+- **A hung engine shows *Engine not answering* within a few seconds**, status
+  polls no longer pile up (one at a time, 4 s timeout), approval cards are
+  locked and marked as possibly out of date until it's back, and a hidden tab
+  polls less (B38).
+- **Leaving for another COSMOS tool with unsaved edits asks first** (B39).
+- **Slow answers no longer overwrite newer ones** in the Problems list, the
+  version diff and Run History search; Run History says when it couldn't load
+  instead of showing no runs; the telemetry picker remembers the cursor per
+  node (B40).
+- **Contacts marks GEO day contacts (*all day*) and partial ones**, Schedule
+  is disabled on partial contacts, and LOS shows its date when it's on another
+  day (B42).
 - **A COSMOS API blip no longer blinds every telemetry trigger for 30 s.** When
   every read fails, nothing is set aside as a bad item (B30).
 - **Cron:** a day-of-month like `*/2` combines with the weekday the way cron

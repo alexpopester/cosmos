@@ -392,7 +392,7 @@ export default {
   emits: ['changed', 'delete-node', 'list-removed'],
   data() {
     return {
-      carets: {}, // field key -> cursor position when it last lost focus
+      carets: {}, // 'node id:field key' -> cursor position when it last lost focus
       picker: {
         show: false,
         key: null,
@@ -472,7 +472,7 @@ export default {
         // Insert where the cursor was (the end if the field was never focused), with spaces around it
         const existing = String(this.config[key] || '')
         const at = Math.min(
-          this.carets[key] ?? existing.length,
+          this.carets[this.caretKey(key)] ?? existing.length,
           existing.length,
         )
         const before = existing.slice(0, at)
@@ -480,15 +480,20 @@ export default {
         const left = before && !/\s$/.test(before) ? ' ' : ''
         const right = after && !/^\s/.test(after) ? ' ' : ''
         this.config[key] = `${before}${left}${selection.text}${right}${after}`
-        this.carets[key] = at + left.length + selection.text.length
+        this.carets[this.caretKey(key)] =
+          at + left.length + selection.text.length
       }
       this.changed()
     },
     rememberCaret(key, event) {
       const target = event.target
       if (target && typeof target.selectionStart === 'number') {
-        this.carets[key] = target.selectionStart
+        this.carets[this.caretKey(key)] = target.selectionStart
       }
+    },
+    caretKey(key) {
+      // Per node: picking telemetry for node B mustn't insert at the place last used on node A
+      return `${this.node?.id || 'flow'}:${key}`
     },
     onBuild(command) {
       this.config[this.builder.key] = command

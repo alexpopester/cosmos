@@ -65,6 +65,13 @@
         <span v-if="showFlow">{{ a.flow_name }} · </span>run {{ a.run_id }} ·
         {{ a.reason }}
       </div>
+      <div
+        v-if="stale"
+        class="px-3 text-caption text-warning fa-approval-stale"
+      >
+        The engine isn't answering: this may be out of date, and can't be
+        answered until it's back.
+      </div>
       <pre v-if="!a.ask" class="fa-approval-preview mx-3 my-2">{{
         a.preview
       }}</pre>
@@ -90,17 +97,18 @@
             density="compact"
             variant="outlined"
             hide-details
-            autofocus
             class="mr-2 fa-ask-input"
-            @keyup.enter="answer(a, answers[a.id])"
+            :data-approval="a.id"
+            @keydown.enter="answer(a, answers[a.id])"
           />
           <template v-if="a.ask.kind === 'confirm'">
             <v-btn
               size="small"
               color="success"
               variant="flat"
-              class="mr-2"
+              class="mr-2 fa-ask-yes"
               :loading="busy === a.id"
+              :disabled="locked(a)"
               @click="answer(a, true)"
             >
               Yes
@@ -108,8 +116,8 @@
             <v-btn
               size="small"
               variant="tonal"
-              class="mr-2"
-              :disabled="busy === a.id"
+              class="mr-2 fa-ask-no"
+              :disabled="busy === a.id || locked(a)"
               @click="answer(a, false)"
             >
               No
@@ -122,6 +130,7 @@
             variant="flat"
             class="mr-2 fa-ask-submit"
             :loading="busy === a.id"
+            :disabled="locked(a)"
             @click="answer(a, answers[a.id])"
           >
             Answer
@@ -147,7 +156,7 @@
           class="mr-2 fa-approval-go"
           :class="hazardous(a) ? 'fa-btn-danger' : 'fa-btn-go'"
           :loading="busy === a.id"
-          :disabled="fresh.includes(a.id)"
+          :disabled="locked(a)"
           @click="go(a, 'go')"
         >
           {{ hazardous(a) ? 'Send hazardous…' : 'Go' }}
@@ -158,7 +167,7 @@
           prepend-icon="mdi-run-fast"
           class="mr-2"
           title="Approve this step and stop asking for routine steps in this run. Hazardous commands still ask."
-          :disabled="busy === a.id || fresh.includes(a.id)"
+          :disabled="busy === a.id || locked(a)"
           @click="go(a, 'run')"
         >
           Go &amp; run rest
@@ -227,6 +236,8 @@ export default {
     approvals: { type: Array, default: () => [] },
     showFlow: { type: Boolean, default: false },
     now: { type: Number, default: () => Date.now() / 1000 },
+    // The engine isn't answering: these cards may be out of date, so nothing can be decided on them
+    stale: { type: Boolean, default: false },
   },
   emits: ['decided'],
   data() {
@@ -238,6 +249,7 @@ export default {
       // Cards that just appeared ignore clicks for a moment, so a fast second click meant for the
       // previous card can't approve the next step that took its place
       fresh: [],
+      shown: [], // card ids in display order, to notice cards sliding up
       seen: [],
       confirm: { show: false, approval: null, decision: null },
     }
@@ -253,13 +265,25 @@ export default {
           this.minimized = false
         }
         const added = list.filter((a) => !this.seen.includes(a.id))
-        if (!added.length) return
+        const current = list.map((a) => a.id)
+        // A card that was answered disappears and the ones below slide up under the cursor: those are
+        // "new under the cursor" too, so a second click meant for the gone card can't hit them
+        const moved =
+          this.shown.length > 0 &&
+          this.shown.some(
+            (id, i) => current.indexOf(id) !== -1 && current.indexOf(id) !== i,
+          )
+        this.shown = current
+        if (!added.length && !moved) return
         this.seen = [...this.seen, ...added.map((a) => a.id)].slice(-200)
-        const ids = added.map((a) => a.id)
-        this.fresh = [...this.fresh, ...ids]
+        const ids = moved ? current : added.map((a) => a.id)
+        this.fresh = [...new Set([...this.fresh, ...ids])]
         setTimeout(() => {
           this.fresh = this.fresh.filter((id) => !ids.includes(id))
         }, FRESH_MS)
+        if (added.some((a) => a.ask && a.ask.kind !== 'confirm')) {
+          this.$nextTick(() => this.focusAnswer(added.find((a) => a.ask)))
+        }
       },
     },
   },
@@ -268,8 +292,11 @@ export default {
       // The engine flags it; older engines only said so in the reason text
       return approval.hazardous ?? approval.reason.includes('HAZARDOUS')
     },
+    locked(approval) {
+      return this.stale || this.fresh.includes(approval.id)
+    },
     go(approval, decision) {
-      if (this.fresh.includes(approval.id)) return
+      if (this.locked(approval)) return
       if (this.hazardous(approval)) {
         this.confirm = { show: true, approval, decision }
         return
@@ -287,7 +314,18 @@ export default {
       this.minimizedIds = this.approvals.map((a) => a.id)
       this.minimized = true
     },
+    focusAnswer(approval) {
+      // Only when nobody is typing elsewhere: a card appearing mustn't take the keyboard (and an Enter that
+      // was meant for another field mustn't answer it)
+      const active = document.activeElement
+      if (active && active !== document.body) return
+      const input = this.$el?.querySelector?.(
+        `.fa-ask-input[data-approval="${approval.id}"] input`,
+      )
+      if (input) input.focus()
+    },
     answer(approval, value) {
+      if (this.locked(approval)) return
       const empty = value === undefined || value === null || value === ''
       const fallback = approval.ask.default
       return this.decide(

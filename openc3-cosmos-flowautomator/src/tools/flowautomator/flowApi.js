@@ -30,6 +30,20 @@ const get = (path, params) =>
   Api.get(`${BASE}${path}`, { params, headers: quiet }).then(unwrap)
 
 const unwrap = (response) => response.data
+// The COSMOS Api helper has no timeout: a hung engine would keep a poll open for a minute. Give up waiting
+// after a few seconds (the request itself may still finish; callers poll one at a time).
+export const STATUS_TIMEOUT_MS = 4000
+const withTimeout = (promise, ms) =>
+  Promise.race([
+    promise,
+    new Promise((_resolve, reject) =>
+      setTimeout(() => {
+        const error = new Error('The flow engine is not answering')
+        error.timeout = true
+        reject(error)
+      }, ms),
+    ),
+  ])
 const post = (path, data = {}) =>
   Api.post(`${BASE}${path}`, { data, headers: handled }).then(unwrap)
 const put = (path, data) =>
@@ -38,7 +52,7 @@ const del = (path) =>
   Api.delete(`${BASE}${path}`, { headers: handled }).then(unwrap)
 
 export default {
-  status: () => get('/status'),
+  status: () => withTimeout(get('/status'), STATUS_TIMEOUT_MS),
   listFlows: () => get('/flows'),
   getFlow: (id) =>
     Api.get(`${BASE}/flows/${id}`, { headers: handled }).then(unwrap),

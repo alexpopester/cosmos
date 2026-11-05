@@ -566,7 +566,28 @@
               :data-contact="c.id"
               @click="selectedContactId = c.id"
             >
-              <td>{{ c.satellite }}</td>
+              <td>
+                {{ c.satellite }}
+                <v-chip
+                  v-if="c.continuous"
+                  size="x-small"
+                  label
+                  class="ml-1 fa-contact-geo"
+                  title="The satellite never sets here: one contact per UTC day. Give activities a duration."
+                >
+                  all day
+                </v-chip>
+                <v-chip
+                  v-if="c.partial"
+                  size="x-small"
+                  label
+                  variant="outlined"
+                  class="ml-1 fa-contact-partial"
+                  title="Only partly inside the prediction window (in progress or past the horizon): its times aren't known yet, so it can't be scheduled"
+                >
+                  partial
+                </v-chip>
+              </td>
               <td>{{ c.station }}</td>
               <td>
                 {{ fmtTime(c.aos) }}
@@ -574,7 +595,7 @@
                   {{ relText(c.aos) }}
                 </div>
               </td>
-              <td>{{ fmtTime(c.los).slice(11) }}</td>
+              <td>{{ losText(c) }}</td>
               <td>{{ duration(c.duration) }}</td>
               <td>{{ c.max_elevation.toFixed(1) }}°</td>
               <td class="text-no-wrap">
@@ -604,7 +625,12 @@
                   variant="tonal"
                   color="primary"
                   prepend-icon="mdi-calendar-plus"
-                  :disabled="c.los < now"
+                  :disabled="c.los < now || c.partial"
+                  :title="
+                    c.partial
+                      ? 'Can\'t be scheduled until its times are known (wait for the next prediction)'
+                      : ''
+                  "
                   class="fa-schedule-btn"
                   @click.stop="newActivity(c)"
                 >
@@ -1309,6 +1335,8 @@ export default {
   emits: ['open-run', 'changed'],
   data() {
     return {
+      refreshing: false,
+      hiddenTicks: 0,
       schedule: null,
       now: Date.now() / 1000,
       rangeHours: 6,
@@ -1484,6 +1512,15 @@ export default {
   },
   methods: {
     async refresh() {
+      // One request at a time (a slow engine mustn't pile them up); a hidden tab refreshes every 5th tick
+      if (this.refreshing) return
+      if (
+        typeof document !== 'undefined' &&
+        document.hidden &&
+        this.hiddenTicks++ % 5
+      )
+        return
+      this.refreshing = true
       try {
         // Only the contacts in view (at least a day ahead, for the schedule dialog)
         const now = Date.now() / 1000
@@ -1494,6 +1531,8 @@ export default {
         this.now = this.schedule.time
       } catch {
         this.now = Date.now() / 1000 // engine offline: the toolbar shows it
+      } finally {
+        this.refreshing = false
       }
     },
     notifyError(title, error) {
@@ -1504,6 +1543,12 @@ export default {
     fmtTime(t) {
       if (t == null) return ''
       return new Date(t * 1000).toISOString().slice(0, 19).replace('T', ' ')
+    },
+    losText(c) {
+      // The time only, unless LOS is on a later UTC day than AOS (a GEO day ends at 24:00)
+      const aos = this.fmtTime(c.aos)
+      const los = this.fmtTime(c.los)
+      return aos.slice(0, 10) === los.slice(0, 10) ? los.slice(11) : los
     },
     duration(seconds) {
       const s = Math.round(seconds)
