@@ -32,6 +32,7 @@ class FakeService:
         self.calls = []
         self.celestrak = {"25544": f"ISS (ZARYA)\n{ISS_1}\n{ISS_2}\n"}
         self.celestrak_status = 200
+        self.celestrak_errors = {}  # catalog -> HTTP status for that one catalog
         self.spacetrack = f"0 ISS (ZARYA)\n{ISS_1}\n{ISS_2}\n0 OTHER\n{OTHER_1}\n{OTHER_2}\n"
         self.login_text = '""'
 
@@ -44,7 +45,12 @@ class FakeService:
         if "gp.php" in url:
             if self.celestrak_status != 200:
                 return Response(self.celestrak_status, "Forbidden")
-            return Response(200, self.celestrak.get(str(params["CATNR"]), "No GP data found"))
+            catalog = str(params["CATNR"])
+            if catalog in self.celestrak_errors:
+                return Response(self.celestrak_errors[catalog], "")
+            if catalog not in self.celestrak:
+                return Response(404, "No GP data found")  # what CelesTrak really answers
+            return Response(200, self.celestrak[catalog])
         if "/basicspacedata/" in url:
             return Response(200, self.spacetrack)
         return Response(200, "")
@@ -388,3 +394,46 @@ def test_a_huge_answer_is_stopped_while_reading(monkeypatch):
     with pytest.raises(tle_sources.FetchError, match="too large"):
         tle_sources._get(Session(), "https://celestrak.org/x", "CelesTrak")
     assert read[-1] == "closed" and len(read) < 10
+
+
+# Found by the real-pass soak (docs/REAL-DATA-TESTING.md step 2): CelesTrak answers 404 "No GP data found" for a
+# catalog number it doesn't publish (analyst numbers 80000-99999, decayed objects), and the whole fetch stopped
+# there, so one such satellite kept every other satellite from ever getting a TLE.
+def test_a_catalog_celestrak_does_not_publish_does_not_block_the_others(engine, service):
+    planner = engine.planner
+    analyst = add_sat(planner, "celestrak", catalog="98330", name="PEARL-1B")
+    iss = add_sat(planner, "celestrak")
+    planner.fetcher.poll(EPOCH)
+    assert planner.satellites[iss["id"]]["tle"]["line1"] == ISS_1
+    assert "analyst number" in planner.fetcher.sat_status[analyst["id"]]["reason"]
+    assert planner.fetcher.status["celestrak"]["error"] is None
+
+
+def test_a_server_error_for_one_catalog_does_not_block_the_others(engine, service):
+    sent = []
+    engine.alerts.emit = lambda event, *a, **k: sent.append(event)
+    planner = engine.planner
+    service.celestrak["62391"] = f"ISS (ZARYA)\n{ISS_1}\n{ISS_2}\n"  # never reached
+    service.celestrak_errors["62391"] = 500
+    broken = add_sat(planner, "celestrak", catalog="62391", name="LASARSAT")
+    iss = add_sat(planner, "celestrak")
+    planner.fetcher.poll(EPOCH)
+    assert planner.satellites[iss["id"]]["tle"]["line1"] == ISS_1
+    assert "500" in planner.fetcher.sat_status[broken["id"]]["reason"]
+    assert planner.fetcher.status["celestrak"]["error"] is None and "tle_source_failing" not in sent
+
+
+def test_a_server_error_for_one_catalog_is_retried_soon(engine, service):
+    planner = engine.planner
+    service.celestrak["62391"] = f"ISS (ZARYA)\n{ISS_1}\n{ISS_2}\n".replace("25544", "62391")
+    service.celestrak_errors["62391"] = 500  # CelesTrak's 500s for single catalogs come and go
+    broken = add_sat(planner, "celestrak", catalog="62391", name="LASARSAT")
+    planner.fetcher.poll(EPOCH)
+    assert "minutes" in planner.fetcher.sat_status[broken["id"]]["reason"]
+    calls = len(service.calls)
+    planner.fetcher.poll(EPOCH + 300)
+    assert len(service.calls) == calls  # not hammered
+    del service.celestrak_errors["62391"]
+    planner.fetcher.poll(EPOCH + 600)  # not the whole 4 hours
+    assert len(service.calls) == calls + 1
+    assert planner.fetcher.sat_status[broken["id"]]["result"] in ("applied", "rejected", "skipped")

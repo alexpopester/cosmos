@@ -20,6 +20,22 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.13.1] - 2026-11-05
+
+Found by the real-pass soak (`docs/REAL-DATA-TESTING.md` step 2).
+
+### Fixed
+- **One satellite CelesTrak doesn't publish no longer stops TLE updates for
+  all the others.** CelesTrak answers 404 "No GP data found" for catalog
+  numbers it doesn't publish (temporary analyst numbers 80000-99999,
+  decayed objects), and the fetch used to give up there, on every retry, so
+  satellites after it never got a TLE. Now that satellite says why (and
+  suggests Space-Track) and the rest are fetched.
+- **A CelesTrak server error for one satellite is retried in 10 minutes**,
+  not after the whole fetch interval (4 hours by default), and doesn't stop
+  the others. CelesTrak gives intermittent 500s for single catalog numbers.
+  Only when every request fails is CelesTrak treated as down.
+
 ### Docs
 - **Real-data testing plan** (`docs/REAL-DATA-TESTING.md`): how contact
   scheduling gets proven against real satellites (SatNOGS) and real flight

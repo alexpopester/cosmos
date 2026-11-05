@@ -185,6 +185,17 @@ def _by_catalog(text, wanted):
     return found
 
 
+class RetrySoon(str):
+    """A per-satellite reason that was the server's fault (a 5xx): try that catalog again after
+    FIRST_BACKOFF_SECONDS instead of waiting the source's whole interval."""
+
+
+NO_CELESTRAK_DATA = (
+    "CelesTrak has no element set for this catalog number (decayed, not public, or a temporary analyst number: "
+    "try Space-Track)"
+)
+
+
 class CelestrakSource(TleSource):
     kind = "celestrak"
     label = "CelesTrak"
@@ -193,6 +204,7 @@ class CelestrakSource(TleSource):
 
     def fetch(self, catalogs, settings, backend, session):
         texts, reasons = {}, {}
+        server_errors = []
         base = settings["url"].rstrip("/")
         _check_https_host(base, "CelesTrak")
         for index, catalog in enumerate(catalogs):
@@ -214,15 +226,31 @@ class CelestrakSource(TleSource):
                     refused=True,
                     partial=(texts, reasons),
                 )
+            # A catalog number CelesTrak doesn't publish (decayed, classified, or a temporary analyst number
+            # 80000-99999) is answered 404 "No GP data found", and some single objects get a 500 every time.
+            # Either is about that satellite: note it and go on, so one doesn't block every other satellite.
+            if response.status_code == 404 and "no gp data" in response.text.lower():
+                reasons[catalog] = NO_CELESTRAK_DATA
+                continue
+            if response.status_code >= 500:
+                server_errors.append(response.status_code)
+                reasons[catalog] = RetrySoon(
+                    f"CelesTrak answered {response.status_code} for this catalog number; trying again in "
+                    f"{FIRST_BACKOFF_SECONDS // 60} minutes"
+                )
+                continue
             if response.status_code != 200:
                 raise FetchError(f"CelesTrak answered {response.status_code}", partial=(texts, reasons))
             found = _by_catalog(response.text, {catalog})
             if catalog in found:
                 texts[catalog] = found[catalog]
             elif "no gp data" in response.text.lower():
-                reasons[catalog] = "CelesTrak has no element set for this catalog number (decayed, or not public?)"
+                reasons[catalog] = NO_CELESTRAK_DATA
             else:
                 reasons[catalog] = "CelesTrak's answer had no TLE for this catalog number"
+        if server_errors and len(server_errors) == len(catalogs):
+            # Nothing but server errors: CelesTrak itself is in trouble, so back off as a whole
+            raise FetchError(f"CelesTrak answered {server_errors[-1]}", partial=(texts, reasons))
         return texts, reasons
 
 
@@ -549,6 +577,9 @@ class TleFetcher:
         counts = {}
         for catalog in catalogs:
             self.fetched[(kind, catalog)] = now
+            if isinstance(reasons.get(catalog), RetrySoon) and catalog not in texts:
+                # Due again FIRST_BACKOFF_SECONDS from now, whatever the source's interval
+                self.fetched[(kind, catalog)] = now - self.settings[kind]["hours"] * 3600 + FIRST_BACKOFF_SECONDS
             for sat_id in wanted[catalog]:
                 if catalog in texts:
                     outcome = self.planner.intake.ingest(texts[catalog], kind, satellite_id=sat_id, now=now)

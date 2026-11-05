@@ -19,24 +19,26 @@ MANIFEST = os.path.join(SOAK_DIR, "manifest.json")
 TOKEN_FILE = os.path.join(SOAK_DIR, "token")
 PREFIX = "Soak: "
 
-# Satellites with many decoded frames in SatNOGS (step 1 sample, 2026-11-05), named, still transmitting.
-# KNACKSAT-2 decays fast (TLEs age quickly); METEOR M2-3 is higher (~830 km); ISS is the familiar one.
+# Satellites with many decoded frames in SatNOGS (step 1 sample, 2026-11-05), named, still transmitting,
+# and in CelesTrak's public catalog (temporary analyst numbers 80000-99999 aren't: SatNOGS gets those from
+# Space-Track). KNACKSAT-2 and CATSAT decay fast (TLEs age quickly); METEOR M2-3 is higher (~830 km);
+# LASARSAT is in a 45 deg orbit; ISS is the familiar one.
 SATELLITES = [
     (69015, "FRONTIERSAT"),
     (60528, "ERNST"),
-    (98330, "PEARL-1B"),
-    (99299, "SPRITE"),
     (62391, "LASARSAT"),
     (68635, "CANVAS"),
     (44530, "TAURUS-1"),
     (68460, "COSMO"),
     (68506, "AEPEX"),
     (63235, "OTP-2"),
-    (98267, "REPLICATOR-2"),
-    (98273, "KOYO"),
-    (98238, "CRIMSON-1"),
-    (98293, "MARINA"),
-    (98395, "KOSTKA"),
+    (64875, "REAL"),
+    (60246, "CATSAT"),
+    (68481, "TORO-3"),
+    (42829, "TECHNOSAT"),
+    (62394, "CROCUBE"),
+    (63216, "BOTSAT-1"),
+    (67685, "GXIBA-1"),
     (67683, "KNACKSAT-2"),
     (57166, "METEOR M2-3"),
     (25544, "ISS"),

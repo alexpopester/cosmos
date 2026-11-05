@@ -93,9 +93,12 @@ disagreement has either a fix or a DECISIONS entry explaining it.
 What's set up (`realdata/soak_setup.py`; everything is named `Soak: ...`):
 
 - **18 real satellites** (`soak_common.SATELLITES`): the most-heard named
-  satellites from the step 1 sample, plus KNACKSAT-2 (fast decay), METEOR
-  M2-3 (higher orbit) and the ISS. TLEs come from CelesTrak through the
+  satellites from the step 1 sample that CelesTrak publishes, including
+  KNACKSAT-2 and CATSAT (fast decay), METEOR M2-3 (higher orbit), LASARSAT
+  (45° inclination) and the ISS. TLEs come from CelesTrak through the
   engine's own fetcher (D29), so TLE ageing and updates are the real thing.
+  Temporary analyst catalog numbers (80000–99999) are left out: CelesTrak
+  doesn't publish them (SatNOGS gets them from Space-Track).
 - **13 real SatNOGS stations** (`soak_common.STATIONS`): busy, online,
   spread over six continents (41° S to 65° N), at their real position and
   `min_horizon`, capacity 1.
@@ -233,3 +236,22 @@ a second and matches what stations actually heard. No code change needed.
 day old is already about 8 s out along track. Pass times are only as good as
 the TLE, which supports keeping automated TLE fetching on (D29) and retiming
 activities on TLE updates (D12). Step 2 should measure this drift directly.
+
+### Step 2 (started 2026-11-05)
+
+**Found while setting up, fixed in 1.13.1:**
+
+- **One satellite CelesTrak doesn't publish blocked TLEs for all the
+  others.** CelesTrak answers HTTP 404 "No GP data found" for catalog numbers
+  it doesn't publish, and the engine treated that as the whole source
+  failing. On the first setup, 8 of 18 picks had temporary analyst numbers
+  (98xxx–99xxx), so 2 satellites got TLEs and 16 never would. The unit tests
+  had missed it because their CelesTrak double answered 200; it now answers
+  what CelesTrak really does.
+- **CelesTrak gives intermittent 500s for single catalog numbers** (5 of 17
+  in one sweep, all fine on retry). A per-satellite server error now leaves
+  the others alone and is retried in 10 minutes instead of the 4-hour
+  interval.
+- The planner gives a pass a new contact id when a re-prediction moves its
+  TCA more than 5 s (activities still follow it, by `retime_tolerance`).
+  Anything tracking passes by id must pair them up again; the recorder does.
