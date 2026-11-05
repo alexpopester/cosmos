@@ -124,6 +124,7 @@ export default {
   deleteStation: (id) => del(`/stations/${id}`),
   saveActivity: (id, activity) =>
     id ? put(`/activities/${id}`, activity) : post('/activities', activity),
+  getActivity: (id) => get(`/activities/${id}`),
   deleteActivity: (id) => del(`/activities/${id}`),
   acceptActivity: (id) => post(`/activities/${id}/accept`),
   refreshActivityTemplate: (id) => post(`/activities/${id}/refresh_template`),

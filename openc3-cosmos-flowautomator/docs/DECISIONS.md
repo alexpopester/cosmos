@@ -426,3 +426,36 @@ source wins, and a big jump is held for review.
   installs use their own secret store.
 - **Rate limits:** both services ban clients that poll too hard, and a
   ban would stop every satellite's updates.
+
+## D30. `/schedule` is a window; capacity is indexed and cached by a change version
+
+`/schedule` returns only the activities whose pass overlaps the requested
+`start`–`end`, plus every running or needs-review activity wherever it is.
+List entries leave out the template's parameter definitions;
+`GET /activities/<id>` returns one in full, and `GET /activities` still
+returns them all. The response also counts the scheduled activities it left
+out. Responses of 2 KB or more are gzipped when the client accepts it.
+
+Antenna use (`StationUse`) keeps each station's windows sorted by AOS.
+`_usage()` caches it and the station conflicts under a version number that
+every change bumps.
+
+*Why:* found by the real-pass soak (docs/REAL-DATA-TESTING.md). At 16
+satellites × 13 stations (4,600 activities over 7 days):
+
+| | Before | After |
+|---|---|---|
+| `/schedule`, 1 day | 1 s, 6 MB | 34 ms, 1.2 MB (123 KB gzipped) |
+| `/status` | 255 ms | 3 ms |
+| Scheduler tick, 5 clients polling | 3.9 s (up to 10 s) | ~25 ms |
+
+Before, every capacity question scanned every activity, so the cost grew
+with activities squared. Holding the planner lock that long meant a few
+open Contacts views could delay activity starts by seconds.
+
+*Trade-offs:*
+- The activities table follows the view's time range, and says how many
+  more are outside it.
+- Code that changes planner state outside `_save`, `_delete`, `_merge` or
+  `load` must call `_changed()`. The cache key also includes the number of
+  activities as a backstop.

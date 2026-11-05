@@ -148,7 +148,8 @@ try {
   await page.locator('.fa-station', { hasText: 'Test Site' }).waitFor()
 
   // Passes are predicted in the background
-  await waitFor(async () => (await api('GET', '/schedule'))[1].status.predicting === 0, 30000, 'prediction')
+  // Every satellite is re-predicted for a new station: on a busy engine (the real-pass soak) that's many
+  await waitFor(async () => (await api('GET', '/schedule'))[1].status.predicting === 0, 120000, 'prediction')
   const [, schedule] = await api('GET', '/schedule')
   const sat = schedule.satellites.find((s) => s.name === 'FA-TEST')
   const contact = schedule.contacts.find((c) => c.satellite_id === sat.id && c.aos > Date.now() / 1000)

@@ -80,7 +80,8 @@ try {
   await page.locator('.fa-station', { hasText: 'Rule Site' }).waitFor()
   const [, schedule] = await api('GET', '/schedule')
   created.stations.push(schedule.stations.find((s) => s.name === 'Rule Site').id)
-  await waitFor(async () => (await api('GET', '/schedule'))[1].status.predicting === 0, 30000, 'prediction')
+  // Every satellite is re-predicted for a new station: on a busy engine (the real-pass soak) that's many
+  await waitFor(async () => (await api('GET', '/schedule'))[1].status.predicting === 0, 120000, 'prediction')
   const contacts = (await api('GET', '/schedule'))[1].contacts.filter((c) => c.station === 'Rule Site')
   const overlapping = contacts.filter((a) =>
     contacts.some((b) => b.satellite !== a.satellite && a.aos < b.los && b.aos < a.los && !a.partial && !b.partial),
@@ -124,7 +125,10 @@ try {
   )
   check('rule scheduled every RULE-A pass', aActs.length === aPasses.length && aActs.length > 0, `${aActs.length} activities · ${ruleText.replace(/\n/g, ' ')}`)
   check('rule activities carry its parameters', aActs.every((a) => String(a.params.rate) === '8' && a.offset === -30))
-  check('rule chip shown on activities', (await page.locator('.fa-activities .fa-rule-chip', { hasText: 'A passes' }).count()) === aActs.length)
+  // The table lists the activities in the view's time range and counts the rest (D30)
+  const chips = await page.locator('.fa-activities .fa-rule-chip', { hasText: 'A passes' }).count()
+  const nextDay = aActs.filter((a) => a.contact.aos <= Date.now() / 1000 + 86400).length // always in view
+  check('rule chip shown on the activities in view', chips >= nextDay && chips <= aActs.length && chips > 0, `${chips} shown, ${nextDay} in the next day, ${aActs.length} in all`)
 
   // ---- a lower-priority rule for RULE-B skips passes where the station is busy ----
   const [, ruleB] = await api('POST', '/rules', { name: 'B passes', template_id: flow.flow.id, satellite_ids: [created.sats[1]], station_ids: [created.stations[0]], min_elevation: 0, offset: -30 })
@@ -153,7 +157,7 @@ try {
   const after = (await api('GET', '/activities'))[1].find((a) => a.id === victim.id)
   check('deleting a rule activity cancels it', after.status === 'cancelled' && after.message.includes('Cancelled by'), after.message)
   await api('POST', '/contacts/recompute', {})
-  await waitFor(async () => (await api('GET', '/schedule'))[1].status.predicting === 0, 30000, 'recompute')
+  await waitFor(async () => (await api('GET', '/schedule'))[1].status.predicting === 0, 120000, 'recompute')
   const again = (await api('GET', '/activities'))[1].filter((a) => a.contact.id === victim.contact.id && a.status === 'scheduled' && a.rule_name === 'A passes')
   check('the rule does not schedule it again', again.length === 0)
 

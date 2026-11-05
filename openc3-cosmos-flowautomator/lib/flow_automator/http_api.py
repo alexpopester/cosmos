@@ -69,7 +69,8 @@ which every write records in the audit log.
     POST   <prefix>/api/stations                 {"name", "latitude", "longitude", "altitude", "min_elevation"}
     PUT    <prefix>/api/stations/<id>
     DELETE <prefix>/api/stations/<id>
-    GET    <prefix>/api/activities
+    GET    <prefix>/api/activities               all of them, in full
+    GET    <prefix>/api/activities/<id>          one, in full (/schedule lists them without template parameters)
     POST   <prefix>/api/activities               {"template_id", "contact_id", "params", "anchor", "offset", "mode", ...}
     PUT    <prefix>/api/activities/<id>
     DELETE <prefix>/api/activities/<id>          stops its run if it's running
@@ -84,6 +85,7 @@ which every write records in the audit log.
 """
 
 import contextlib
+import gzip
 import json
 import re
 import socket
@@ -102,6 +104,8 @@ from .tle_sources import TleSourceError
 
 
 MAX_BODY_BYTES = 5 * 1024 * 1024
+GZIP_MIN_BYTES = 2048
+GZIP_LEVEL = 5  # fast; level 9 saves little more on JSON
 MAX_RESTORE_BYTES = 25 * 1024 * 1024  # a backup with every version; one restore is read at a time
 _restoring = threading.Semaphore(1)
 _backing_up = threading.Semaphore(1)  # one backup at a time: each holds a copy of everything in memory
@@ -177,6 +181,7 @@ def _routes():
         ("PUT", r"/api/stations/(?P<item_id>[\w-]+)", "update_station", True),
         ("DELETE", r"/api/stations/(?P<item_id>[\w-]+)", "delete_station", True),
         ("GET", r"/api/activities", "list_activities", False),
+        ("GET", r"/api/activities/(?P<item_id>[\w-]+)", "get_activity", False),
         ("POST", r"/api/activities", "create_activity", True),
         ("PUT", r"/api/activities/(?P<item_id>[\w-]+)", "update_activity", True),
         ("DELETE", r"/api/activities/(?P<item_id>[\w-]+)", "delete_activity", True),
@@ -651,6 +656,9 @@ class FlowApi:
     def list_activities(self, **_):
         return self.planner.list_activities()
 
+    def get_activity(self, item_id, **_):
+        return {"activity": self.planner.get_activity(item_id)}
+
     def create_activity(self, payload, user, **_):
         activity = self.planner.create_activity(payload, user=user)
         self._audit(user, "scheduled", "activity", activity["id"], activity["label"], self._activity_detail(activity))
@@ -802,6 +810,11 @@ def make_handler(api, logger=None):
             data = json.dumps(result, default=str).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
+            # JSON shrinks ~10x; /schedule at real scale is megabytes (EVALUATION-2026-11-05 B43)
+            if len(data) >= GZIP_MIN_BYTES and "gzip" in (self.headers.get("Accept-Encoding") or ""):
+                data = gzip.compress(data, GZIP_LEVEL)
+                self.send_header("Content-Encoding", "gzip")
+                self.send_header("Vary", "Accept-Encoding")
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()

@@ -20,6 +20,45 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.14.1] - 2026-11-05
+
+### Fixed
+- **Adding a station or satellite re-plans faster.** After each satellite's
+  passes were predicted, rules re-planned every contact of every satellite;
+  now only that satellite's (the full re-plan every minute still runs).
+  Adding one station at the soak's scale (16 satellites) went from 5.4 s to
+  3.6 s in the benchmark, most of it now orbit propagation.
+
+## [1.14.0] - 2026-11-05
+
+Scale fixes found by the real-pass soak (`docs/REAL-DATA-TESTING.md`,
+EVALUATION-2026-11-05 B43 and B45). Measured at the soak's scale, 16
+satellites × 13 stations with 4,600 scheduled activities.
+
+### Fixed
+- **Scheduler ticks no longer stall with many activities.** Station capacity
+  checks scanned every activity for every pass, so one tick could take 4 to
+  10 seconds with a few Contacts views open, delaying activity starts. Now
+  about 25 ms (D30).
+- **`/status` is 3 ms instead of 255 ms**: station conflicts are cached until
+  something changes.
+- **The Contacts view loads a day in 34 ms instead of 1 s**, and 123 KB
+  instead of 6 MB.
+
+### Changed
+- **`/schedule` lists only the activities in the requested time range**,
+  plus any running or needing review, without template parameter definitions.
+  It counts the scheduled ones it left out (`activities_outside`). The
+  Contacts view's table is now "Activities in view" and says how many more
+  are scheduled outside the range.
+- **Large API responses are gzipped** when the client accepts it.
+
+### Added
+- `GET /activities/<id>`: one activity in full. The activity dialog loads
+  its parameters from it.
+- `realdata/bench_soak.py`: rebuilds the soak in memory and times
+  `/schedule`, `/status` and the scheduler tick.
+
 ## [1.13.2] - 2026-11-05
 
 Found by the real-pass soak (`docs/REAL-DATA-TESTING.md` step 2).

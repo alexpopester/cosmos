@@ -115,6 +115,108 @@ def _overlap(a, b):
     return a["aos"] < b["los"] and b["aos"] < a["los"]
 
 
+class _ActivityIndex:
+    """Activities by station and by contact, for pre-emption (which asks per contact). Lookups skip
+    activities that have left ``activities`` since (pre-empted ones)."""
+
+    def __init__(self, activities):
+        self.by_station = {}
+        self.by_contact = {}
+        for activity in activities.values():
+            self.add(activity)
+
+    def add(self, activity):
+        ref = activity["contact"]
+        self.by_station.setdefault(ref["station_id"], []).append(activity)
+        self.by_contact.setdefault(ref["id"], []).append(activity)
+
+    @staticmethod
+    def _live(items, activities):
+        return [a for a in items if activities.get(a["id"]) is a]
+
+    def at_station(self, station_id, activities):
+        return self._live(self.by_station.get(station_id, ()), activities)
+
+    def on_contact(self, contact_id, activities):
+        return self._live(self.by_contact.get(contact_id, ()), activities)
+
+
+class StationUse:
+    """When each station's antenna is in use: {contact id: window}, plus each station's windows sorted by
+    AOS, so "what overlaps this window" is a binary search instead of a scan of every activity.
+
+    Planning, conflicts and the contact list ask that for every contact; with thousands of activities the
+    scans made one scheduler tick take seconds (found by the real-pass soak, docs/REAL-DATA-TESTING.md).
+    """
+
+    def __init__(self):
+        self.windows = {}
+        self._sorted = {}  # station id -> [(aos, contact id)]
+        self._longest = {}  # station id -> longest window there (s), how far back an overlap can start
+
+    @classmethod
+    def of(cls, windows):
+        """Built from {contact id: window} in one go (sorting once, not inserting one by one)."""
+        use = cls()
+        use.windows = dict(windows)
+        for contact_id, window in use.windows.items():
+            station_id = window["station_id"]
+            use._sorted.setdefault(station_id, []).append((window["aos"], contact_id))
+            use._longest[station_id] = max(use._longest.get(station_id, 0.0), window["los"] - window["aos"])
+        for entries in use._sorted.values():
+            entries.sort()
+        return use
+
+    def __contains__(self, contact_id):
+        return contact_id in self.windows
+
+    def __getitem__(self, contact_id):
+        return self.windows[contact_id]
+
+    def __setitem__(self, contact_id, window):
+        self.pop(contact_id)
+        self.windows[contact_id] = window
+        station_id = window["station_id"]
+        bisect.insort(self._sorted.setdefault(station_id, []), (window["aos"], contact_id))
+        self._longest[station_id] = max(self._longest.get(station_id, 0.0), window["los"] - window["aos"])
+
+    def pop(self, contact_id, default=None):
+        window = self.windows.pop(contact_id, None)
+        if window is None:
+            return default
+        entries = self._sorted.get(window["station_id"]) or []
+        index = bisect.bisect_left(entries, (window["aos"], contact_id))
+        if index < len(entries) and entries[index] == (window["aos"], contact_id):
+            del entries[index]
+        return window
+
+    def values(self):
+        return self.windows.values()
+
+    def copy(self):
+        other = StationUse()
+        other.windows = dict(self.windows)
+        other._sorted = {k: list(v) for k, v in self._sorted.items()}
+        other._longest = dict(self._longest)
+        return other
+
+    def replace_with(self, other):
+        self.windows, self._sorted, self._longest = other.windows, other._sorted, other._longest
+
+    def overlapping(self, window):
+        """Windows at the same station overlapping this one (it included, if it's in use)."""
+        station_id = window["station_id"]
+        entries = self._sorted.get(station_id) or []
+        low = bisect.bisect_left(entries, (window["aos"] - self._longest.get(station_id, 0.0),))
+        high = bisect.bisect_left(entries, (window["los"],))
+        found = []
+        for _aos, contact_id in entries[low:high]:
+            other = self.windows[contact_id]
+            if other["los"] > window["aos"]:
+                found.append(other)
+        return found
+
+
 class ContactPlanner:
     def __init__(
         self,
@@ -149,6 +251,8 @@ class ContactPlanner:
         self.contacts = []
         self.contacts_by_id = {}
         self.pending = {}  # satellite id -> set of station ids to predict (None = all)
+        self._version = 0  # bumped by every change planning depends on (_changed)
+        self._usage_cache = None
         self.computed_at = None  # last time the whole window was refreshed
         self.compute_seconds = None
         self.problems = {}  # satellite id -> why it has no contacts
@@ -193,6 +297,7 @@ class ContactPlanner:
             self.contacts_by_id = {}
             self.pending = dict.fromkeys(self.satellites)
             self.computed_at = None
+            self._changed()
         self.engine.log(
             "info",
             f"Contact planner loaded {len(self.satellites)} satellites, {len(self.stations)} stations, "
@@ -380,8 +485,12 @@ class ContactPlanner:
         contacts.sort(key=lambda c: c["aos"])
         self.contacts = contacts
         self.contacts_by_id = {c["id"]: c for c in contacts}
+        self._changed()
         self._retime(now, satellite_id)
-        self._apply_rules(now)
+        # After predicting one satellite only its contacts changed: rules look at those (the full pass every
+        # 60 s in tick() picks up anything else). Re-planning every contact after each satellite made adding a
+        # station take ~1 s per satellite at the soak's scale.
+        self._apply_rules(now, satellite_id=satellite_id)
 
     def _contact(self, sat, station, found):
         contact = dict(found)
@@ -401,6 +510,26 @@ class ContactPlanner:
         # The planner's memory already holds the change: if Valkey refuses it, retry rather than leave them
         # disagreeing (the engine alerts while writes are waiting; see store.py)
         self.store.save_record(kind, record["id"], record, defer=True)
+        self._changed()
+
+    def _delete(self, kind, record_id):
+        self.store.delete_record(kind, record_id)
+        self._changed()
+
+    def _changed(self):
+        """Something planning depends on changed (an activity, rule, station or the contacts)."""
+        self._version += 1
+
+    def _usage(self):
+        """(antenna use, station conflicts), rebuilt only after a change: /status, /schedule and the
+        contact list all ask, and rebuilding them for every request held the lock long enough to delay
+        scheduler ticks by seconds with a few clients open (EVALUATION-2026-11-05 B45). Read only: copy
+        the antenna use before changing it."""
+        key = (self._version, len(self.activities))
+        if self._usage_cache is None or self._usage_cache[0] != key:
+            used = self._used_contacts()
+            self._usage_cache = (key, used, self._station_conflicts(used))
+        return self._usage_cache[1], self._usage_cache[2]
 
     def _satellite_json(self, sat, now):
         result = copy.deepcopy(sat)
@@ -519,7 +648,7 @@ class ContactPlanner:
             sat = self.satellites.pop(sat_id, None)
             if sat is None:
                 raise PlannerNotFoundError(f"Satellite '{sat_id}' not found")
-            self.store.delete_record("satellites", sat_id)
+            self._delete("satellites", sat_id)
             self.pending.pop(sat_id, None)
             self.problems.pop(sat_id, None)
             self._drop_pairs(satellite_id=sat_id)
@@ -575,7 +704,7 @@ class ContactPlanner:
             station = self.stations.pop(station_id, None)
             if station is None:
                 raise PlannerNotFoundError(f"Station '{station_id}' not found")
-            self.store.delete_record("stations", station_id)
+            self._delete("stations", station_id)
             self._drop_pairs(station_id=station_id)
             self._merge(self.clock())
             return station
@@ -751,51 +880,46 @@ class ContactPlanner:
         A pass uses the antenna for the whole pass. A GEO day contact (``continuous``) lasts 24 h, so it uses
         the antenna only while its activities run: from the earliest start to the latest end on that day.
         """
-        used = {}
+        windows = {}
         for activity in self.activities.values():
             if activity is exclude_activity or not (activity["status"] in WAITING or activity["status"] == "running"):
                 continue
             contact = activity["contact"]
             window = occupancy(activity)
-            if contact["id"] in used and contact.get("continuous"):
-                current = used[contact["id"]]
+            if contact["id"] in windows and contact.get("continuous"):
+                current = windows[contact["id"]]
                 window = {
                     **window,
                     "aos": min(window["aos"], current["aos"]),
                     "los": max(window["los"], current["los"]),
                 }
-            used[contact["id"]] = window
-        return used
+            windows[contact["id"]] = window
+        return StationUse.of(windows)
 
     def _capacity(self, station_id):
         return int((self.stations.get(station_id) or {}).get("capacity") or 1)
 
     def _station_conflicts(self, used):
         """Contacts in use that overlap more than their station's capacity: {contact id: [other contact ids]}."""
-        by_station = {}
-        for contact in used.values():
-            by_station.setdefault(contact["station_id"], []).append(contact)
         conflicts = {}
-        for station_id, contacts in by_station.items():
-            capacity = self._capacity(station_id)
-            contacts.sort(key=lambda c: c["aos"])
-            for contact in contacts:
-                others = [o for o in contacts if o is not contact and _overlap(o, contact)]
-                if len(others) < capacity:
-                    continue
-                # Worst moment inside this contact: count the overlapping ones at each of their starts
-                worst = 0
-                for moment in [contact["aos"]] + [o["aos"] for o in others if o["aos"] > contact["aos"]]:
-                    worst = max(worst, sum(1 for o in others if o["aos"] <= moment < o["los"]))
-                if worst >= capacity:
-                    conflicts[contact["id"]] = [o["id"] for o in others]
+        for contact in used.values():
+            capacity = self._capacity(contact["station_id"])
+            others = [o for o in used.overlapping(contact) if o is not contact]
+            if len(others) < capacity:
+                continue
+            # Worst moment inside this contact: count the overlapping ones at each of their starts
+            worst = 0
+            for moment in [contact["aos"]] + [o["aos"] for o in others if o["aos"] > contact["aos"]]:
+                worst = max(worst, sum(1 for o in others if o["aos"] <= moment < o["los"]))
+            if worst >= capacity:
+                conflicts[contact["id"]] = [o["id"] for o in sorted(others, key=lambda o: o["aos"])]
         return conflicts
 
     def _station_full(self, contact, used):
         """True if scheduling into contact would put its station over capacity."""
         if contact["id"] in used:
             return False  # already worked; another activity in the same pass doesn't need an antenna
-        others = [o for o in used.values() if o["station_id"] == contact["station_id"] and _overlap(o, contact)]
+        others = used.overlapping(contact)
         if len(others) < self._capacity(contact["station_id"]):
             return False
         moments = [contact["aos"]] + [o["aos"] for o in others if o["aos"] > contact["aos"]]
@@ -818,8 +942,7 @@ class ContactPlanner:
                 if activity.get("superseded"):
                     continue
                 by_contact.setdefault(activity["contact"]["id"], []).append(activity["id"])
-            used = self._used_contacts()
-            conflicts = self._station_conflicts(used)
+            used, conflicts = self._usage()
             return [
                 {
                     **c,
@@ -1012,7 +1135,7 @@ class ContactPlanner:
                 self._finish(activity, "cancelled", f"Cancelled by {user_name(user)}", self.clock())
             else:
                 del self.activities[activity_id]
-                self.store.delete_record("activities", activity_id)
+                self._delete("activities", activity_id)
         if run_id:
             with contextlib.suppress(Exception):  # it may have just finished
                 self.engine.stop_run(run_id)
@@ -1033,7 +1156,9 @@ class ContactPlanner:
             raise PlannerNotFoundError(f"Activity '{activity_id}' not found")
         return activity
 
-    def activity_json(self, activity, now=None):
+    def activity_json(self, activity, now=None, slim=False):
+        """An activity for the API. ``slim`` leaves out the template's parameter definitions, which only the
+        edit dialog needs (/schedule lists thousands of activities; GET /activities/<id> has them)."""
         now = self.clock() if now is None else now
         result = {k: copy.deepcopy(v) for k, v in activity.items() if k != "flow"}
         result["start"] = activity_start(activity)
@@ -1042,7 +1167,8 @@ class ContactPlanner:
             if activity.get("duration")
             else activity["contact"]["los"]
         )
-        result["parameters"] = copy.deepcopy(activity["flow"].get("parameters") or [])
+        if not slim:
+            result["parameters"] = copy.deepcopy(activity["flow"].get("parameters") or [])
         current = self.engine.flows.get(activity["template_id"])
         result["template_missing"] = current is None
         result["template_version"] = activity["flow"].get("version")
@@ -1057,15 +1183,26 @@ class ContactPlanner:
         result["conflicts"] = []
         return result
 
-    def list_activities(self, include_superseded=False):
+    def get_activity(self, activity_id):
+        with self.lock:
+            return self.activity_json(self._activity(activity_id))
+
+    def list_activities(self, include_superseded=False, start=None, end=None, slim=False):
+        """Activities sorted by start. With start/end: only those whose pass overlaps that window, plus
+        any running or needing review wherever they are (they need attention)."""
+
+        def wanted(activity):
+            if activity.get("superseded") and not include_superseded:
+                return False
+            if start is None and end is None or activity["status"] in ("running", "needs_review"):
+                return True
+            contact = activity["contact"]
+            return (start is None or contact["los"] >= start) and (end is None or contact["aos"] <= end)
+
         with self.lock:
             now = self.clock()
-            items = [
-                self.activity_json(a, now)
-                for a in self.activities.values()
-                if include_superseded or not a.get("superseded")
-            ]
-            conflicts = self._station_conflicts(self._used_contacts())
+            items = [self.activity_json(a, now, slim) for a in self.activities.values() if wanted(a)]
+            conflicts = self._usage()[1]
         items.sort(key=lambda a: a["start"])
         # Activities sharing a contact whose windows overlap (allowed, but worth a look)
         by_contact = {}
@@ -1153,7 +1290,7 @@ class ContactPlanner:
             rule = self.rules.pop(rule_id, None)
             if rule is None:
                 raise PlannerNotFoundError(f"Rule '{rule_id}' not found")
-            self.store.delete_record("rules", rule_id)
+            self._delete("rules", rule_id)
             removed = self._remove_rule_activities(rule_id, keep_cancelled=False)
             return rule, removed
 
@@ -1179,7 +1316,7 @@ class ContactPlanner:
                 continue
             if activity["status"] in WAITING or (not keep_cancelled and activity["status"] == "cancelled"):
                 del self.activities[activity["id"]]
-                self.store.delete_record("activities", activity["id"])
+                self._delete("activities", activity["id"])
                 removed += 1
         return removed
 
@@ -1198,8 +1335,9 @@ class ContactPlanner:
         # A rule whose activities ask the operator skips passes where approvals would close before the start
         return not (rule.get("_asks") and start >= contact["los"] - rule["approval_margin"])
 
-    def _apply_rules(self, now, only=None):
-        """Create activities for every enabled rule's matching contacts that don't have one yet."""
+    def _apply_rules(self, now, only=None, satellite_id=None):
+        """Create activities for every enabled rule's matching contacts that don't have one yet (only that
+        rule's, and only that satellite's contacts, when given)."""
         created = 0
         rules = sorted(
             (r for r in self.rules.values() if r.get("enabled", True) and (only is None or r["id"] == only)),
@@ -1232,7 +1370,11 @@ class ContactPlanner:
                 taken.setdefault((rule_id, contact["satellite_id"], contact["station_id"]), []), contact["tca"]
             )
 
-        used = self._used_contacts()
+        used = self._usage()[0].copy()  # planning adds to it
+        index_holder = []  # activities by station and contact: built by _preempt if it gets that far
+        contacts = self.contacts
+        if satellite_id is not None:
+            contacts = [c for c in contacts if c["satellite_id"] == satellite_id]
         for rule in rules:
             template = self.engine.flows.get(rule["template_id"])
             if template is None:
@@ -1249,7 +1391,7 @@ class ContactPlanner:
             )
             skipped_full = 0
             needs_duration = False
-            for contact in self.contacts:
+            for contact in contacts:
                 if already_taken(rule["id"], contact) or not self._rule_matches(rule, contact, now):
                     continue
                 if contact.get("continuous") and not rule.get("duration"):
@@ -1259,7 +1401,7 @@ class ContactPlanner:
                 if (
                     rule.get("skip_full_stations", True)
                     and self._station_full(window, used)
-                    and not self._preempt(rule, window, used, now)
+                    and not self._preempt(rule, window, used, now, index_holder)
                 ):
                     skipped_full += 1
                     continue
@@ -1269,11 +1411,14 @@ class ContactPlanner:
                 activity["rule_id"] = rule["id"]
                 activity["message"] = f"Scheduled by rule '{rule['name']}'"
                 self.activities[activity["id"]] = activity
+                if index_holder:
+                    index_holder[0].add(activity)
                 self._save("activities", activity)
                 take(rule["id"], contact)
                 used[contact["id"]] = window
                 created += 1
-            rule["skipped_full"] = skipped_full
+            if satellite_id is None:  # a count over every contact; a one-satellite pass would undercount
+                rule["skipped_full"] = skipped_full
             if needs_duration:
                 rule["last_error"] = "Set a duration to schedule GEO day contacts (how long the antenna is used)"
             rule.pop("_asks", None)
@@ -1281,7 +1426,7 @@ class ContactPlanner:
             self.audit(SCHEDULER, "scheduled from rules", "activity", detail=f"{created} new activities")
         return created
 
-    def _preempt(self, rule, contact, used, now):
+    def _preempt(self, rule, contact, used, now, index_holder=None):
         """Make room at a full station for a higher-priority rule by removing lower-priority rule activities.
 
         Only activities a lower-priority rule created, not hand-edited, still scheduled and not starting within
@@ -1289,8 +1434,15 @@ class ContactPlanner:
         """
         priority = int(rule.get("priority") or 0)
         station_id = contact["station_id"]
+        if not any(int(r.get("priority") or 0) < priority for r in self.rules.values()):
+            return False  # no rule it outranks: nothing to pre-empt
+        if index_holder is None:
+            index_holder = []
+        if not index_holder:
+            index_holder.append(_ActivityIndex(self.activities))
+        index = index_holder[0]
         candidates = []
-        for activity in self.activities.values():
+        for activity in index.at_station(station_id, self.activities):
             ref = activity["contact"]
             other = self.rules.get(activity.get("rule_id")) if activity.get("rule_id") else None
             if (
@@ -1306,16 +1458,13 @@ class ContactPlanner:
             candidates.append((int(other.get("priority") or 0), activity_start(activity), activity))
         if not candidates:
             return False
-        trial = dict(used)
+        trial = used.copy()
         chosen = []
         for _priority, _start, activity in sorted(candidates, key=lambda c: (c[0], -c[1])):
             others_there = [
                 a
-                for a in self.activities.values()
-                if a is not activity
-                and a["contact"]["id"] == activity["contact"]["id"]
-                and a not in chosen
-                and (a["status"] in WAITING or a["status"] == "running")
+                for a in index.on_contact(activity["contact"]["id"], self.activities)
+                if a is not activity and a not in chosen and (a["status"] in WAITING or a["status"] == "running")
             ]
             chosen.append(activity)
             if not others_there:
@@ -1326,7 +1475,7 @@ class ContactPlanner:
             return False
         for activity in chosen:
             del self.activities[activity["id"]]
-            self.store.delete_record("activities", activity["id"])
+            self._delete("activities", activity["id"])
             self.audit(
                 SCHEDULER,
                 "pre-empted",
@@ -1335,8 +1484,7 @@ class ContactPlanner:
                 activity["label"],
                 f"rule '{rule['name']}' (priority {priority}) needs {contact['station']} at that time",
             )
-        used.clear()
-        used.update(trial)
+        used.replace_with(trial)
         return True
 
     def rule_json(self, rule):
@@ -1473,7 +1621,7 @@ class ContactPlanner:
                 ended = max(float(activity.get("ended_at") or 0), activity["contact"]["los"])
                 if now - ended > self.retention:
                     del self.activities[activity["id"]]
-                    self.store.delete_record("activities", activity["id"])
+                    self._delete("activities", activity["id"])
                     removed += 1
         if removed:
             self.engine.log("info", f"Deleted {removed} finished activities older than the retention period")
@@ -1677,7 +1825,7 @@ class ContactPlanner:
             upcoming = [a for a in self.activities.values() if a["status"] in WAITING]
             next_activity = min(upcoming, key=activity_start, default=None)
             next_contact = next((c for c in self.contacts if c["los"] >= now), None)
-            conflicts = self._station_conflicts(self._used_contacts())
+            conflicts = self._usage()[1]
             return {
                 "satellites": len(self.satellites),
                 "stations": len(self.stations),
@@ -1703,13 +1851,19 @@ class ContactPlanner:
         """Everything the Contacts view shows, in one response."""
         now = self.clock()
         with self.lock:
+            activities = self.list_activities(start=start, end=end, slim=True)
+            listed = {a["id"] for a in activities}
             return {
                 "time": now,
                 "window": {"start": now - self.lookback, "end": now + self.horizon},
                 "satellites": [self._satellite_json(s, now) for s in self.satellites.values()],
                 "stations": [copy.deepcopy(s) for s in self.stations.values()],
                 "contacts": self.list_contacts(start, end),
-                "activities": self.list_activities(),
+                "activities": activities,
+                # Scheduled outside the window asked for (so the view can say there are more)
+                "activities_outside": sum(
+                    1 for a in self.activities.values() if a["status"] == "scheduled" and a["id"] not in listed
+                ),
                 "rules": self.list_rules(),
                 "status": self.status(),
             }

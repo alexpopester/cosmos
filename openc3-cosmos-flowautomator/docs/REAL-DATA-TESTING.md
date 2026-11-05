@@ -269,9 +269,13 @@ activities on TLE updates (D12). Step 2 should measure this drift directly.
 - **Load at realistic scale.** 18 satellites × 13 stations over the 7-day
   horizon is 10,325 contacts and 4,571 scheduled activities. `/schedule` is
   10.8 MB and takes 3 s, and the idle engine uses a steady ~20% of a CPU.
-  These are backlog items B43 and B45 (EVALUATION-2026-11-05 section 2.3),
-  now reproduced on real data; the soak's start-lateness numbers will show
-  whether the load delays runs.
+  These are backlog items B43 and B45 (EVALUATION-2026-11-05 section 2.3).
+  Profiling at this scale showed worse: one scheduler tick took 4–10 s with a
+  few clients polling, because every capacity check scanned every activity.
+  **Fixed in 1.14.0** (D30): on the live soak, the Contacts view's day now
+  loads in 64 ms (159 KB on the wire, was 1.4 s and 6 MB), `/status` takes
+  7 ms (was 0.3–0.4 s) and the operator's CPU fell from ~40% to ~23%.
+  `realdata/bench_soak.py` reproduces the soak in memory for these numbers.
 
 **Recording since 2026-11-05 20:19 UTC.** First read: 16 TLEs, 7,063
 predicted passes at the soak stations, 4,571 activities.
@@ -280,5 +284,5 @@ predicted passes at the soak stations, 4,571 activities.
 plugin version without reloading the demo and records the engine restart as
 a maintenance window in the manifest. The report leaves activities that
 overlap a window out of the scheduler scores (runs interrupted by a restart
-stop, by design: D25). 1.13.2 was installed this way at 21:07 UTC; the 4
-runs in progress stopped.
+stop, by design: D25). 1.13.2 was installed this way at 21:07 UTC (the 4
+runs in progress stopped), and 1.14.0 at 21:31 UTC.

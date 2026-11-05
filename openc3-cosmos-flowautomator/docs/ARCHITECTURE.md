@@ -319,6 +319,17 @@ docstring, the README table and the editor's hints, and add a test in
   and creates activities for matching future contacts not already used,
   honouring station capacity when `skip_full_stations`. Cancelled activities
   are kept as tombstones so a rule won't recreate them.
+- **Capacity and the change version.** Antenna use is a `StationUse`: each
+  station's windows sorted by AOS, so "what overlaps this pass" is a binary
+  search. `_usage()` caches it with the station conflicts, keyed by
+  `_version`, which `_save`, `_delete`, `_merge` and `load` bump; anything
+  that changes an activity, rule, station or the contacts must go through
+  one of them (or call `_changed()`), or `/status` and `/schedule` show stale
+  conflicts. Planning copies it before adding to it.
+- **`/schedule`** lists only activities whose pass overlaps the requested
+  window, plus running and needs-review ones, without template parameters
+  (`GET /activities/<id>` has them), and says how many are outside. Large
+  responses are gzipped (D30).
 - **TLEs.** Every change goes through `set_tle` / `_apply_tle` (keeps the last
   5, records the source, invalidates that satellite). `TleIntake` adds the
   automated inputs and the safeguards (catalog number, newer epoch, preferred
@@ -379,4 +390,8 @@ The tool keeps no state the engine doesn't also have: it validates through
 - One engine per scope, and the tool hardcodes `/flow-automator`, so in
   practice the plugin is installed in one scope.
 - Prediction of 50 satellites × 20 stations × 7 days takes about a minute.
+- At the real-pass soak's scale (16 satellites × 13 stations, 4,600
+  activities over 7 days; `realdata/bench_soak.py`): `/schedule` for a day
+  34 ms and 123 KB gzipped, `/status` 3 ms, a scheduler tick ~25 ms with 5
+  clients polling.
 - A 2,000-node flow works but a save takes a few seconds in the browser.

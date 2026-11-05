@@ -339,7 +339,7 @@
 
       <div class="fa-contacts-tables">
         <div class="d-flex align-center px-3 pt-3">
-          <span class="text-subtitle-2">Activities</span>
+          <span class="text-subtitle-2">Activities in view</span>
           <v-chip
             v-if="status.needs_review"
             size="x-small"
@@ -531,10 +531,16 @@
                 />
               </td>
             </tr>
-            <tr v-if="!visibleActivities.length">
+            <tr v-if="!visibleActivities.length && !activitiesOutside">
               <td colspan="6" class="text-caption text-medium-emphasis">
                 Nothing scheduled. Pick a contact on the timeline or in the list
                 and schedule a template into it.
+              </td>
+            </tr>
+            <tr v-if="activitiesOutside">
+              <td colspan="6" class="text-caption text-medium-emphasis">
+                {{ activitiesOutside }} more scheduled outside this time range
+                (widen the range to see them).
               </td>
             </tr>
           </tbody>
@@ -1324,6 +1330,7 @@ function blankActivity() {
     label: '',
     error: '',
     busy: false,
+    parameters: null, // an existing activity's, loaded when its dialog opens
   }
 }
 
@@ -1375,6 +1382,9 @@ export default {
     },
     activities() {
       return this.schedule?.activities || []
+    },
+    activitiesOutside() {
+      return this.schedule?.activities_outside || 0
     },
     rules() {
       return this.schedule?.rules || []
@@ -1444,10 +1454,7 @@ export default {
       return this.flows.find((f) => f.id === this.actDialog.template_id)
     },
     actParameters() {
-      if (this.actDialog.id) {
-        const existing = this.activities.find((a) => a.id === this.actDialog.id)
-        if (existing) return existing.parameters
-      }
+      if (this.actDialog.id) return this.actDialog.parameters || []
       return this.actTemplate?.parameters || []
     },
     actContact() {
@@ -1824,6 +1831,18 @@ export default {
         stop_at_los: a.stop_at_los,
         label: a.label,
       }
+      // /schedule lists activities without their template's parameter definitions: load them
+      flowApi
+        .getActivity(a.id)
+        .then((result) => {
+          if (this.actDialog.id === a.id) {
+            this.actDialog.parameters = result.activity.parameters
+          }
+        })
+        .catch((error) => {
+          if (this.actDialog.id === a.id)
+            this.actDialog.error = errorInfo(error).message
+        })
     },
     async saveActivity() {
       const d = this.actDialog

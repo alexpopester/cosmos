@@ -542,6 +542,10 @@ the first packet, with **Contact time left** guarding the long steps.
 
 ### Activities
 
+The **Activities in view** table lists the activities in the timeline's time
+range, plus any running or needing review wherever they are, and says how many
+more are scheduled outside it.
+
 Click **Schedule** on a pass: pick a template, fill its parameters, and set
 the start relative to AOS, TCA or LOS (`AOS - 120` starts two minutes before
 the satellite rises). A pass that is only partly inside the prediction window
