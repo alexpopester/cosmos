@@ -149,8 +149,19 @@ def clear(fa):
     return removed
 
 
+def pin_demo_rules(fa):
+    """Keep the demo's all-stations rule on the stations it covers today, so it doesn't schedule fake
+    DEMOSAT passes (with approvals and alerts) on the soak's real stations. File > Load Demo resets it."""
+    existing = [s["id"] for s in fa.get("/schedule")["stations"] if not s["name"].startswith(common.PREFIX)]
+    for rule in fa.get("/rules") or []:
+        if rule["name"].startswith("Demo: ") and not rule.get("station_ids"):
+            fa.put(f"/rules/{rule['id']}", {"station_ids": existing})
+            print(f"Rule '{rule['name']}' now covers only the {len(existing)} stations it covered before the soak")
+
+
 def setup(fa):
     print("Removing an earlier soak:", clear(fa))
+    pin_demo_rules(fa)
     stations = satnogs_stations()
     manifest = {"started": time.time(), "started_iso": common.now_iso(), "satellites": {}, "stations": {}}
 

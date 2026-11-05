@@ -212,3 +212,25 @@ def test_tle_timeline_picks_the_tle_held_at_the_time():
     assert timeline.held_at(1, 150) == (50.0, "a1", "a2")
     assert timeline.held_at(1, 200) == (150.0, "b1", "b2")
     assert timeline.held_at(2, 500) is None
+
+
+def test_setup_pins_the_demo_rule_to_its_own_stations():
+    class FakeApi:
+        def __init__(self):
+            self.puts = []
+
+        def get(self, path):
+            if path == "/schedule":
+                return {"stations": [{"id": "d1", "name": "Demo Pass Site"}, {"id": "s1", "name": "Soak: X #1"}]}
+            return [
+                {"id": "r1", "name": "Demo: DEMOSAT-1 downlinks", "station_ids": []},
+                {"id": "r2", "name": "Demo: pinned already", "station_ids": ["d1"]},
+                {"id": "r3", "name": "Someone else's rule", "station_ids": []},
+            ]
+
+        def put(self, path, body):
+            self.puts.append((path, body))
+
+    api = FakeApi()
+    soak_setup.pin_demo_rules(api)
+    assert api.puts == [("/rules/r1", {"station_ids": ["d1"]})]
