@@ -162,7 +162,20 @@ def validate_flow(flow):
             problem("Parallel needs at least two outgoing wires", node["id"])
         if node.get("type") == "parallel" and used_handles.get((node["id"], "out"), 0) > MAX_PARALLEL_BRANCHES:
             problem(f"Parallel can start at most {MAX_PARALLEL_BRANCHES} branches", node["id"])
+    if not problems:
+        graph = Graph(flow)
+        for join_id, owners in graph.shared_join_problems():
+            names = ", ".join(_label(by_id[n]) for n in owners)
+            problem(
+                f"This Join is reached by the branches of separate Parallels ({names}): the nodes after it "
+                "would run more than once. Give each Parallel its own Join.",
+                join_id,
+            )
     return problems
+
+
+def _label(node):
+    return (node.get("data") or {}).get("label") or node["id"]
 
 
 def _shape_problem(flow):
@@ -290,9 +303,13 @@ class Graph:
         self.flow = flow
         self.nodes = {node["id"]: node for node in flow.get("nodes") or []}
         self._next = {}
+        self._out = {}  # node id -> every target, whatever the handle
         for edge in flow.get("edges") or []:
             key = (edge["source"], edge.get("sourceHandle") or "out")
             self._next.setdefault(key, []).append(edge["target"])
+            self._out.setdefault(edge["source"], []).append(edge["target"])
+        # Worked out once here, not lazily: branch threads read it concurrently
+        self._join_owners, self._parallels_reached = self._pair_joins()
 
     def next_nodes(self, node_id, handle):
         return [self.nodes[target] for target in self._next.get((node_id, handle), []) if target in self.nodes]
@@ -300,35 +317,70 @@ class Graph:
     def has_output(self, node_id, handle):
         return bool(self._next.get((node_id, handle)))
 
+    def _pair_joins(self):
+        """For each Join, the Parallels whose branches reach it without passing another Parallel or Join.
+
+        Also returns, for each Parallel, the Parallels its branches reach first (nested inside it).
+        """
+        owners = {}
+        reached = {}
+        for node in self.nodes.values():
+            if node.get("type") != "parallel":
+                continue
+            nested = reached.setdefault(node["id"], set())
+            seen = set()
+            stack = [n["id"] for n in self.next_nodes(node["id"], "out")]
+            while stack:
+                current = stack.pop()
+                if current in seen or current not in self.nodes:
+                    continue
+                seen.add(current)
+                kind = self.nodes[current].get("type")
+                if kind == "join":
+                    owners.setdefault(current, set()).add(node["id"])
+                    continue
+                if kind == "parallel":
+                    nested.add(current)
+                    continue
+                stack.extend(self._out.get(current, []))
+        return owners, reached
+
     def join_owners(self, join_id):
         """Parallel nodes whose branches can reach this Join without passing another Parallel or Join.
 
         A Join reached straight from the branches of a nested Parallel *and* from its enclosing Parallel
         belongs to both: the nested one must hand it back to the enclosing branch, not run past it.
         """
-        cache = self.__dict__.setdefault("_join_owners", {})
-        if not cache:
-            for node in self.nodes.values():
-                if node.get("type") != "parallel":
-                    continue
-                seen = set()
-                stack = [n["id"] for n in self.next_nodes(node["id"], "out")]
-                while stack:
-                    current = stack.pop()
-                    if current in seen or current not in self.nodes:
-                        continue
-                    seen.add(current)
-                    kind = self.nodes[current].get("type")
-                    if kind == "join":
-                        cache.setdefault(current, set()).add(node["id"])
-                        continue
-                    if kind == "parallel":
-                        continue
-                    for (source, _handle), targets in self._next.items():
-                        if source == current:
-                            stack.extend(targets)
-            cache.setdefault(None, set())  # mark as computed
-        return cache.get(join_id, set())
+        return self._join_owners.get(join_id, set())
+
+    def shared_join_problems(self):
+        """Joins claimed by several Parallels with no single outermost one enclosing the others.
+
+        Nested Parallels hand a shared Join back to the Parallel that encloses them, and only that one
+        runs past it. Without one, each claimant would run past the Join and the nodes after it would run
+        more than once. Returns [(join id, [claimant ids])].
+        """
+        problems = []
+        for join_id, owners in self._join_owners.items():
+            if len(owners) < 2:
+                continue
+            if not any(all(o == outer or self._encloses(outer, o) for o in owners) for outer in owners):
+                problems.append((join_id, sorted(owners)))
+        return problems
+
+    def _encloses(self, outer, inner):
+        """True if inner is a Parallel nested (at any depth) in outer's branches."""
+        seen = set()
+        stack = list(self._parallels_reached.get(outer, ()))
+        while stack:
+            current = stack.pop()
+            if current == inner:
+                return True
+            if current in seen:
+                continue
+            seen.add(current)
+            stack.extend(self._parallels_reached.get(current, ()))
+        return False
 
     def triggers(self):
         return [node for node in self.nodes.values() if is_trigger(node)]

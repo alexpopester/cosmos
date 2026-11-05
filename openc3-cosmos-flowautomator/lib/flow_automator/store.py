@@ -19,7 +19,15 @@ Valkey outages: appends (run history, the audit log, saved versions) and
 reached. They're kept in memory, in order, and written by ``flush()`` (the
 engine calls it every few seconds) once Valkey is back. ``health()`` reports
 how many are waiting. Everything else raises, so an operator's save fails
-visibly instead of being silently kept only in memory.
+visibly instead of being silently kept only in memory. Writes that only
+reduce activity (disarm, STOP ALL, pause) use ``defer`` too: they must never
+fail (D28).
+
+A delete drops any buffered write to the same record first, so a retried
+write can't bring a deleted record back. In the running engine buffered
+writes are made by its store thread (``inline_flush`` off), never by the
+caller: the engine queues writes while holding its lock, and a slow or hung
+Valkey must not hold that lock.
 """
 
 import collections
@@ -50,6 +58,8 @@ class FlowStore:
         self._pending_lock = threading.Lock()
         self._flush_lock = threading.Lock()  # one flush at a time, so writes land in order
         self._sequence = 0
+        self._wake = threading.Event()  # set when a write is queued, for the engine's store thread
+        self.inline_flush = True  # write queued writes at once in the caller's thread (tests, no store thread)
         self.dropped_writes = 0
         self.last_error = None
         self.failing_since = None
@@ -99,11 +109,17 @@ class FlowStore:
     def all_flows(self):
         return self._load_hash("flow", self.flows_key)
 
-    def save_flow(self, flow):
-        self.redis.hset(self.flows_key, flow["id"], json.dumps(stamp(flow)))
+    def save_flow(self, flow, defer=False):
+        """Write a flow. With ``defer``, a write Valkey refuses is kept and retried by flush()."""
+        value = json.dumps(stamp(flow))
+        if defer:
+            self._queue(("hash", self.flows_key, flow["id"], value))
+            return
+        self.redis.hset(self.flows_key, flow["id"], value)
 
     def delete_flow(self, flow_id):
         # Run history and versions stay, so a deleted flow can be restored and its runs looked up
+        self._drop_pending(self.flows_key, flow_id)
         self.redis.hdel(self.flows_key, flow_id)
 
     def _versions_key(self, flow_id):
@@ -152,8 +168,21 @@ class FlowStore:
             return
         self.redis.hset(self._records_key(kind), record_id, value)
 
-    def delete_record(self, kind, record_id):
-        self.redis.hdel(self._records_key(kind), record_id)
+    def delete_record(self, kind, record_id, defer=False):
+        """Delete a record. With ``defer`` the delete is queued behind (and in order with) buffered writes."""
+        key = self._records_key(kind)
+        if defer:
+            self._queue(("hdel", key, record_id))
+            return
+        self._drop_pending(key, record_id)
+        self.redis.hdel(key, record_id)
+
+    def _drop_pending(self, key, field):
+        """Forget buffered writes to one hash field: retrying them later would undo a delete."""
+        with self._pending_lock:
+            kept = [item for item in self._pending if not (item[1][0] == "hash" and item[1][1:3] == (key, field))]
+            if len(kept) != len(self._pending):
+                self._pending = collections.deque(kept)
 
     # ---- writes that survive an outage ------------------------------------------------
 
@@ -168,21 +197,33 @@ class FlowStore:
                 self._pending.popleft()
                 self.dropped_writes += 1
             failing = self.failing_since is not None
-        if not failing:
+        if not self.inline_flush:
+            self._wake.set()
+        elif not failing:
             # While Valkey is away the engine's periodic flush retries: a run mustn't wait on a timeout per write
             self.flush(wait=False)
+
+    def wait_for_writes(self, timeout):
+        """Block until a write is queued or the timeout passes (the engine's store thread)."""
+        self._wake.wait(timeout)
+        self._wake.clear()
 
     def flush(self, wait=True):
         """Write what's waiting, oldest first; stop at the first failure. Returns how many are left.
 
         Valkey is called outside the queue's lock, so a write arriving during a slow retry isn't held up.
         """
-        if not self._flush_lock.acquire(blocking=wait):
-            return None  # another flush is writing them
-        try:
-            return self._flush()
-        finally:
-            self._flush_lock.release()
+        while True:
+            if not self._flush_lock.acquire(blocking=wait):
+                return None  # another flush is writing them
+            try:
+                left = self._flush()
+            finally:
+                self._flush_lock.release()
+            with self._pending_lock:
+                # A write queued just as that flush finished found it busy and left it to us
+                if left or not self._pending:
+                    return left
 
     def _flush(self):
         while True:
@@ -195,6 +236,8 @@ class FlowStore:
             try:
                 if write[0] == "list":
                     self.redis.lpush(write[1], write[2])
+                elif write[0] == "hdel":
+                    self.redis.hdel(write[1], write[2])
                 else:
                     self.redis.hset(write[1], write[2], write[3])
             except Exception as error:  # noqa: BLE001 - Valkey is away; keep it for the next flush

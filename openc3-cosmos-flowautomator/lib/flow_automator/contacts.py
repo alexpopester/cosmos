@@ -63,6 +63,9 @@ DEFAULTS = {
 }
 
 
+PAUSE_LOCK_SECONDS = 2.0  # how long pausing waits for a busy planner before pausing anyway
+
+
 class PlannerError(Exception):
     status = 400
 
@@ -1142,10 +1145,20 @@ class ContactPlanner:
         )
 
     def set_paused(self, paused, reason=""):
-        with self.lock:
+        # Pausing must work even while the planner is stuck (a long re-plan, a slow Valkey): if its lock
+        # isn't free soon, the flag is set anyway. The engine refuses scheduled starts while it's set, so an
+        # activity the stuck planner launches afterwards can't start.
+        locked = self.lock.acquire(timeout=PAUSE_LOCK_SECONDS) if paused else self.lock.acquire()
+        try:
             self.settings["paused"] = bool(paused)
             self.settings["paused_reason"] = reason if paused else ""
-            self.store.save_record("planner_settings", "settings", self.settings)
+            # Takes effect at once and is never refused (STOP ALL relies on it): saved when Valkey can be reached
+            self.store.save_record("planner_settings", "settings", dict(self.settings), defer=True)
+        finally:
+            if locked:
+                self.lock.release()
+        if not locked:
+            self.engine.log("warn", "Contact scheduler was busy; paused it without waiting for it")
         self.engine.log("warn" if paused else "info", f"Contact scheduler {'paused' if paused else 'resumed'}")
         self.alert(
             "scheduler_paused",

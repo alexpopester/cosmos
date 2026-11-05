@@ -23,6 +23,7 @@ DEFAULT_MAX_STEPS = 100_000
 HARD_MAX_STEPS = 1_000_000  # a flow's own max_steps can't go above this
 SCRIPT_DONE_STATES = ("completed", "completed_errors", "stopped", "crashed", "killed")
 SCRIPT_POLL_SECONDS = 1.0
+SCRIPT_POLL_FAILURES = 5  # consecutive Script Runner errors before a waiting step gives up (and stops the script)
 APPROVAL_DECISIONS = ("go", "run", "abort")
 
 
@@ -109,11 +110,10 @@ class FlowRun:
         self.active = {}
         self.children = []
         self.scripts = []  # Script Runner scripts this run started
-        self.loop_counters = {}
-        # When each loop was entered and when it last started an iteration (step numbers): a loop entered
-        # during an outer loop's iteration starts again from 0 on the outer loop's next iteration
-        self.loop_entered = {}
-        self.loop_iterated = {}
+        # Loop state lives per thread: each Parallel branch counts its own loops (and its own steps for
+        # the loops' bookkeeping), so loops in sibling branches can't reset each other
+        self._loops = _LoopState()
+        self._step_lock = threading.Lock()
         # Execution mode: an explicit override for this run, else the flow's own.
         # A sub-flow runs at least as cautiously as the run that called it.
         self.mode = mode if mode in MODES else self.flow.get("mode", "run")
@@ -140,6 +140,12 @@ class FlowRun:
     @variables.setter
     def variables(self, value):
         self._variables = value
+
+    @property
+    def loops(self):
+        """This thread's loop state (a Parallel branch has its own)."""
+        local = getattr(self._local, "loops", None)
+        return local if local is not None else self._loops
 
     # ---- control -------------------------------------------------------
 
@@ -200,8 +206,11 @@ class FlowRun:
                 raise RunStoppedError()
             if node["type"] == "join" and in_parallel:
                 return node
-            self.step_count += 1
-            if self.step_count > self.max_steps:
+            with self._step_lock:
+                self.step_count += 1
+                over = self.step_count > self.max_steps
+            self.loops.clock += 1
+            if over:
                 raise RunFailedError(f"Run exceeded {self.max_steps} steps (is there an endless loop?)")
             if node["type"] == "parallel":
                 self._record_instant(node, "out")
@@ -240,6 +249,7 @@ class FlowRun:
         def run_branch(index, start):
             self._local.variables = branch_vars[index]
             self._local.parallels = stack
+            self._local.loops = _LoopState()
             try:
                 results[index] = self._walk(start, in_parallel=True)
             except BaseException as error:  # noqa: BLE001 - collected and re-raised below
@@ -289,6 +299,9 @@ class FlowRun:
         step = self._begin_step(node)
         try:
             self._gate(node, step)
+            if self.cancelled():
+                # Stopped while the operator was deciding (or STOP ALL raced the approval): send nothing
+                raise RunStoppedError()
             step["status"] = "running"
             handle = EXECUTORS[node["type"]](self, node, node.get("data") or {}, step)
             step["status"] = "done"
@@ -611,23 +624,41 @@ def exec_switch(run, node, data, step):
     return "default"
 
 
-def _reset_loops_since(run, step_number):
-    """Forget the counters of loops entered after a step (they belonged to an iteration that's over)."""
-    for loop_id, entered in list(run.loop_entered.items()):
-        if entered > step_number:
-            run.loop_counters.pop(loop_id, None)
-            run.loop_entered.pop(loop_id, None)
-            run.loop_iterated.pop(loop_id, None)
+class _LoopState:
+    """Loop counters for one thread of a run.
+
+    ``entered``/``iterated`` hold the thread's step clock when each loop was entered and last started an
+    iteration: a loop entered during an outer loop's iteration starts again from 0 on the outer loop's
+    next iteration, even if it was left early.
+    """
+
+    def __init__(self):
+        self.clock = 0
+        self.counters = {}
+        self.entered = {}
+        self.iterated = {}
+
+    def reset_since(self, clock):
+        """Forget the counters of loops entered after a point (they belonged to an iteration that's over)."""
+        for loop_id, entered in list(self.entered.items()):
+            if entered > clock:
+                self.forget(loop_id)
+
+    def forget(self, loop_id):
+        self.counters.pop(loop_id, None)
+        self.entered.pop(loop_id, None)
+        self.iterated.pop(loop_id, None)
 
 
 def exec_loop(run, node, data, step):
     node_id = node["id"]
-    if node_id in run.loop_iterated:
+    loops = run.loops
+    if node_id in loops.iterated:
         # Another iteration: loops entered during the last one (and maybe left early) start fresh next time
-        _reset_loops_since(run, run.loop_iterated[node_id])
-    iteration = run.loop_counters.get(node_id, 0)
+        loops.reset_since(loops.iterated[node_id])
+    iteration = loops.counters.get(node_id, 0)
     if iteration == 0:
-        run.loop_entered[node_id] = run.step_count
+        loops.entered[node_id] = loops.clock
     variable = data.get("variable") or "i"
     max_iterations = int(data.get("max_iterations") or 10_000)
     if data.get("mode", "count") == "while":
@@ -637,15 +668,13 @@ def exec_loop(run, node, data, step):
     else:
         keep_going = iteration < int(float(data.get("count") or 0))
     if keep_going:
-        run.loop_counters[node_id] = iteration + 1
-        run.loop_iterated[node_id] = run.step_count
+        loops.counters[node_id] = iteration + 1
+        loops.iterated[node_id] = loops.clock
         run.variables[variable] = iteration
         step["message"] = f"{variable} = {iteration}"
         return "body"
-    _reset_loops_since(run, run.loop_entered.get(node_id, run.step_count))
-    run.loop_counters.pop(node_id, None)
-    run.loop_entered.pop(node_id, None)
-    run.loop_iterated.pop(node_id, None)
+    loops.reset_since(loops.entered.get(node_id, loops.clock))
+    loops.forget(node_id)
     step["message"] = f"done after {iteration} iterations"
     return "done"
 
@@ -881,6 +910,8 @@ def exec_send_cmd(run, node, data, step):
         run.variables["last_command"] = command
         return "out"
     allow = bool(data.get("allow_hazardous")) or bool(step.get("approved_hazardous"))
+    if run.cancelled():
+        raise RunStoppedError()  # rendering read telemetry: STOP ALL may have come in meanwhile
     run.engine.backend.send_cmd(command, allow_hazardous=allow)
     run.variables["last_command"] = command
     return "out"
@@ -897,9 +928,11 @@ def exec_run_script(run, node, data, step):
         return "out"
     # A script can hand a value back: stash_set(os.environ["FLOW_RESULT_KEY"], value)
     result_key = f"flow_automator__{run.id}__{node['id']}"
-    environment.setdefault("FLOW_RESULT_KEY", result_key)
+    environment["FLOW_RESULT_KEY"] = result_key  # never a node's choice: the engine reads and deletes it
     environment.setdefault("FLOW_RUN_ID", run.id)
     environment.setdefault("FLOW_NAME", str(run.flow.get("name") or ""))
+    if run.cancelled():
+        raise RunStoppedError()
     script_id = backend.script_start(filename, environment)
     run.engine.note_script(run, script_id)
     run.variables["script_id"] = script_id
@@ -909,18 +942,31 @@ def exec_run_script(run, node, data, step):
         return "out"
     timeout = _float(data, "timeout", 0)
     deadline = time.monotonic() + timeout if timeout > 0 else None
-    while True:
-        try:
+    state = None
+    failures = 0
+    try:
+        while True:
             run.sleep(SCRIPT_POLL_SECONDS)
-        except RunStoppedError:
+            try:
+                state = backend.script_state(script_id)
+                failures = 0
+            except Exception as error:  # noqa: BLE001 - Script Runner hiccups are retried, then fail the step
+                failures += 1
+                if failures >= SCRIPT_POLL_FAILURES:
+                    raise RuntimeError(
+                        f"Lost track of {filename} ({script_id}): Script Runner didn't answer "
+                        f"{failures} times ({error}); the script was stopped"
+                    ) from error
+                run.log("warn", f"could not read the state of {filename} ({script_id}): {error}")
+                continue
+            if state in SCRIPT_DONE_STATES:
+                break
+            if deadline is not None and time.monotonic() > deadline:
+                raise RuntimeError(f"Script {filename} ({script_id}) timed out after {timeout:g}s")
+    finally:
+        # Whatever ended the wait (a stop, a timeout, Script Runner going away), never leave the script running
+        if state not in SCRIPT_DONE_STATES:
             _stop_script(backend, script_id)
-            raise
-        state = backend.script_state(script_id)
-        if state in SCRIPT_DONE_STATES:
-            break
-        if deadline is not None and time.monotonic() > deadline:
-            _stop_script(backend, script_id)
-            raise RuntimeError(f"Script {filename} ({script_id}) timed out after {timeout:g}s")
     run.variables["script_state"] = state
     step["message"] = f"{filename} ({script_id}) {state}"
     try:
@@ -951,6 +997,8 @@ def exec_set_tlm(run, node, data, step):
         step["message"] = f"DRY RUN: would set {item} = {value!r} ({value_type})"
         step["dry_run"] = True
         return "out"
+    if run.cancelled():
+        raise RunStoppedError()
     run.engine.backend.set_tlm(item, value, value_type)
     step["message"] = f"{item} = {value!r} ({value_type})"
     return "out"

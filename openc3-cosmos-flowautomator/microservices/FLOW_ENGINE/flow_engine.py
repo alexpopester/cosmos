@@ -17,16 +17,49 @@ from openc3.top_level import add_to_search_path
 for path in glob.glob("/gems/gems/**/lib"):
     add_to_search_path(path, True)
 
+import valkey
 from flow_automator.cosmos_backend import CosmosBackend, TokenAuthorizer
 from flow_automator.engine import FlowEngine
 from flow_automator.http_api import FlowApi, FlowHttpServer
 from flow_automator.store import FlowStore
+from valkey.backoff import ExponentialBackoff
+from valkey.exceptions import BusyLoadingError
+from valkey.retry import Retry
 
-from openc3.environment import OPENC3_API_HOSTNAME, OPENC3_API_PORT, OPENC3_API_SCHEMA
+from openc3.environment import (
+    OPENC3_API_HOSTNAME,
+    OPENC3_API_PORT,
+    OPENC3_API_SCHEMA,
+    OPENC3_REDIS_HOSTNAME,
+    OPENC3_REDIS_PASSWORD,
+    OPENC3_REDIS_PORT,
+    OPENC3_REDIS_USERNAME,
+)
 from openc3.microservices.microservice import Microservice
 from openc3.utilities.logger import Logger
 from openc3.utilities.sleeper import Sleeper
-from openc3.utilities.store import Store
+
+
+VALKEY_TIMEOUT_SECONDS = 5
+
+
+def valkey_client():
+    """The engine's own Valkey client: like COSMOS's, but a call that gets no answer fails after a few seconds.
+
+    COSMOS's shared client has no socket timeout and retries for up to ~9 s, so a paused or partitioned Valkey
+    would hang the engine (and STOP ALL) instead of failing over to its outage buffer (D28).
+    """
+    return valkey.Valkey(
+        host=OPENC3_REDIS_HOSTNAME.replace("SHARDNUM", "0"),
+        port=OPENC3_REDIS_PORT,
+        username=OPENC3_REDIS_USERNAME,
+        password=OPENC3_REDIS_PASSWORD,
+        socket_timeout=VALKEY_TIMEOUT_SECONDS,
+        socket_connect_timeout=VALKEY_TIMEOUT_SECONDS,
+        retry=Retry(ExponentialBackoff(cap=1, base=0.2), 1),
+        retry_on_error=[BusyLoadingError, valkey.exceptions.ConnectionError, valkey.exceptions.TimeoutError],
+        health_check_interval=30,
+    )
 
 
 class FlowEngineMicroservice(Microservice):
@@ -57,7 +90,7 @@ class FlowEngineMicroservice(Microservice):
         self.prefix = self.config.get("prefix") or "/flow-automator"
         self.sleeper = Sleeper()
 
-        store = FlowStore(Store.instance(), self.scope, history_limit=self.history)
+        store = FlowStore(valkey_client(), self.scope, history_limit=self.history)
         self.engine = FlowEngine(
             store,
             CosmosBackend(self.scope, self.logger),

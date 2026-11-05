@@ -86,6 +86,7 @@ which every write records in the audit log.
 import contextlib
 import json
 import re
+import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -104,6 +105,11 @@ MAX_BODY_BYTES = 5 * 1024 * 1024
 MAX_RESTORE_BYTES = 25 * 1024 * 1024  # a backup with every version; one restore is read at a time
 _restoring = threading.Semaphore(1)
 MAX_CONCURRENT_REQUESTS = 64
+# When every slot is busy (slow or hostile clients), up to this many more connections are peeked at, and served
+# only if they ask for STOP ALL or /health: a full server can always still stop everything
+MAX_PRIORITY_REQUESTS = 8
+PRIORITY_PEEK_SECONDS = 2.0
+_PRIORITY_PATH = re.compile(rb"^(GET|POST) \S*/api/(stop_all|health)/?[?\s]")
 SOCKET_TIMEOUT_SECONDS = 30
 
 
@@ -196,6 +202,26 @@ class FlowApi:
         self.authorize = authorize
         self.prefix = "/" + prefix.strip("/")
         self.routes = [(m, re.compile(re.escape(self.prefix) + p + r"/?$"), h, w) for m, p, h, w in _routes()]
+
+    def preauthorize(self, method, path, headers):
+        """Check the token before the body is read. Returns None, or (status, body) to refuse with.
+
+        A client with no valid token can't hold a request slot by sending its body slowly.
+        """
+        for route_method, pattern, handler, write in self.routes:
+            if route_method != method or not pattern.match(path):
+                continue
+            if write is None:
+                return None
+            token = headers.get("Authorization") or headers.get("authorization")
+            try:
+                self.authorize(token, write)
+            except AuthError as error:
+                if handler == "stop_all" and error.status == 503 and token:
+                    return None  # see handle(): STOP ALL still works when COSMOS can't check tokens
+                return error.status, {"error": str(error)}
+            return None
+        return None
 
     def handle(self, method, path, query, headers, body):
         """Returns (status, json-able body)."""
@@ -740,11 +766,13 @@ def make_handler(api, logger=None):
                 self.close_connection = True
                 self._send(413, {"error": "Request body too large"})
                 return
-            if length and not (self.headers.get("Authorization") or self.headers.get("authorization")):
-                # Every route with a body needs a token: refuse before reading (and holding) the body
-                self.close_connection = True
-                self._send(401, {"error": "Token is required"})
-                return
+            if length:
+                # Every route with a body needs a token: check it before reading (and holding) the body
+                refused = api.preauthorize(method, parsed.path, self.headers)
+                if refused:
+                    self.close_connection = True
+                    self._send(*refused)
+                    return
             if restoring and not _restoring.acquire(blocking=False):
                 self.close_connection = True
                 self._send(409, {"error": "A restore is already running"})
@@ -795,20 +823,47 @@ class _BoundedHTTPServer(ThreadingHTTPServer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._slots = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
+        self._priority = threading.BoundedSemaphore(MAX_PRIORITY_REQUESTS)
 
     def process_request(self, request, client_address):
-        if not self._slots.acquire(blocking=False):
-            with contextlib.suppress(OSError):
-                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-            self.shutdown_request(request)
+        if self._slots.acquire(blocking=False):
+            thread = threading.Thread(
+                target=self._serve, args=(request, client_address, self._slots), name="flow-http-req", daemon=True
+            )
+        elif self._priority.acquire(blocking=False):
+            thread = threading.Thread(
+                target=self._serve_priority, args=(request, client_address), name="flow-http-prio", daemon=True
+            )
+        else:
+            self._refuse(request)
             return
-        super().process_request(request, client_address)
+        thread.start()
 
-    def process_request_thread(self, request, client_address):
+    def _serve(self, request, client_address, slots):
         try:
-            super().process_request_thread(request, client_address)
+            self.process_request_thread(request, client_address)
         finally:
-            self._slots.release()
+            slots.release()
+
+    def _serve_priority(self, request, client_address):
+        """All slots busy: serve this connection only if it asks for STOP ALL or /health."""
+        try:
+            try:
+                request.settimeout(PRIORITY_PEEK_SECONDS)
+                head = request.recv(512, socket.MSG_PEEK)
+            except OSError:
+                head = b""
+            if not _PRIORITY_PATH.match(head):
+                self._refuse(request)
+                return
+            self.process_request_thread(request, client_address)
+        finally:
+            self._priority.release()
+
+    def _refuse(self, request):
+        with contextlib.suppress(OSError):
+            request.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        self.shutdown_request(request)
 
 
 class FlowHttpServer:

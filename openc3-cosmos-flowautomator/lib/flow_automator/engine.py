@@ -11,7 +11,7 @@ from .audit import AuditLog, user_name
 from .contacts import ContactPlanner
 from .graph import MODES, POLICIES, _shape_problem, is_trigger, validate_flow
 from .migrations import FORMAT_VERSION, NewerFormatError, upgrade
-from .runner import FlowRun
+from .runner import SCRIPT_DONE_STATES, FlowRun
 from .templates import CONTACT_VARIABLES, fill_parameters
 from .triggers import TriggerManager
 from .versions import FlowVersions, content, diff_flows
@@ -25,6 +25,10 @@ MAX_SUBFLOW_DEPTH = 10
 MAX_BRANCH_THREADS = 200
 SHUTDOWN_WAIT_SECONDS = 5.0  # all runs together, not each
 STORE_FLUSH_SECONDS = 2.0  # how often writes Valkey refused are retried
+SCRIPT_STOP_WAIT_SECONDS = 10.0  # STOP ALL waits this long (in all) for Script Runner to stop scripts
+DETACHED_PRUNE_SECONDS = 60.0  # how often finished fire-and-forget scripts are forgotten
+MAX_DETACHED_SCRIPTS = 1000
+RECENTLY_FINISHED = 50  # finished runs kept in memory until their history is surely in Valkey
 
 
 def less_safe_changes(old, new):
@@ -73,7 +77,10 @@ class FlowEngine:
         self.flows = {}
         self.runs = {}
         self.queues = collections.defaultdict(collections.deque)
-        self.detached_scripts = collections.deque(maxlen=200)  # scripts runs started without waiting
+        self.detached_scripts = []  # scripts runs started without waiting (pruned once they finish)
+        self.finished = collections.OrderedDict()  # run id -> json of runs that just finished
+        # Set by shutdown: nothing starts any more (queued runs included)
+        self.halted = False
         self.branch_threads = 0  # Parallel branch threads running now, across every run
         self.lock = threading.RLock()
         self.triggers = TriggerManager(self, period=trigger_period)
@@ -99,6 +106,9 @@ class FlowEngine:
         except Exception as error:  # noqa: BLE001 - flows still run without contact planning
             self.log("error", f"Contact planner could not load: {error}")
         if start_triggers:
+            # The store thread makes buffered writes from now on: a caller holding the engine lock never
+            # waits on Valkey for a run's bookkeeping
+            self.store.inline_flush = False
             self.triggers.start()
             self.planner.start()
             self.alerts.start()
@@ -108,6 +118,9 @@ class FlowEngine:
 
     def shutdown(self):
         # Nothing new starts, then runs stop (recording their history and alerts), then alerts stop
+        with self.lock:
+            self.halted = True
+            self.queues.clear()
         self.triggers.stop()
         self.planner.stop()
         with self.lock:
@@ -120,6 +133,7 @@ class FlowEngine:
                 run.thread.join(timeout=max(0.0, deadline - time.monotonic()))
         self.alerts.stop()
         self._store_stop.set()
+        self.store._wake.set()
         if self._store_thread:
             self._store_thread.join(timeout=5)
         self.store.flush()  # one last try at anything Valkey refused
@@ -146,12 +160,19 @@ class FlowEngine:
             self.log("error", f"Not loaded, saved by a newer Flow Automator: {summary}")
 
     def _store_loop(self):
-        while not self._store_stop.wait(STORE_FLUSH_SECONDS):
+        last_prune = time.monotonic()
+        while not self._store_stop.is_set():
+            self.store.wait_for_writes(STORE_FLUSH_SECONDS)
+            if self._store_stop.is_set():
+                return
             try:
                 self.store.flush()
             except Exception as error:  # noqa: BLE001 - keep retrying
                 self.log("error", f"Retrying buffered writes failed: {error}")
             self._note_store_health()
+            if time.monotonic() - last_prune >= DETACHED_PRUNE_SECONDS:
+                last_prune = time.monotonic()
+                self.prune_detached_scripts()
 
     def _note_store_health(self):
         health = self.store.health()
@@ -178,7 +199,10 @@ class FlowEngine:
     # ---- runs interrupted by a crash ----------------------------------------
 
     def _remember_run(self, run):
-        """Keep a small record of an active run, so a crash or restart can't make it vanish without trace."""
+        """Keep a small record of an active run, so a crash or restart can't make it vanish without trace.
+
+        Deferred: callers hold the engine lock, and a run's start must not wait on Valkey.
+        """
         try:
             self.store.save_record(
                 "active_runs",
@@ -196,6 +220,7 @@ class FlowEngine:
                     "activity_id": run.activity_id,
                     "scripts": list(run.scripts),
                 },
+                defer=True,
             )
         except Exception as error:  # noqa: BLE001 - best effort; the run itself goes on
             self.log("warn", f"Could not record active run {run.id}: {error}")
@@ -214,14 +239,16 @@ class FlowEngine:
             self.log("error", f"Could not read interrupted runs: {error}")
             return
         now = time.time()
+        # Stop every leftover script at once: one slow Script Runner call each would delay startup by minutes
+        all_scripts = [sid for record in leftovers.values() for sid in record.get("scripts") or []]
+        stopped = set(self._stop_scripts(all_scripts, collect=True)) if all_scripts else set()
         for record in leftovers.values():
             message = "The flow engine stopped while this run was active (restart or crash); it did not finish"
             for script_id in record.get("scripts") or []:
-                try:
-                    self.backend.script_stop(script_id)
+                if script_id in stopped:
                     message += f"; stopped script {script_id} it had started"
-                except Exception:  # noqa: BLE001,S110 - it may have finished already
-                    pass
+                else:
+                    message += f"; couldn't confirm script {script_id} it had started was stopped (check Script Runner)"
             history = {
                 "id": record["id"],
                 "flow_id": record.get("flow_id"),
@@ -474,12 +501,14 @@ class FlowEngine:
 
     def delete_flow(self, flow_id, user=None):
         with self.lock:
-            flow = self.flows.pop(flow_id, None)
+            flow = self.flows.get(flow_id)
             if flow is None:
                 raise NotFoundError(f"Flow '{flow_id}' not found")
+            # Valkey first: if it refuses, the flow stays (in memory and after a restart) and its runs go on
+            self.store.delete_flow(flow_id)
+            self.flows.pop(flow_id, None)
             self.queues.pop(flow_id, None)
             runs = [run for run in self.runs.values() if run.flow.get("id") == flow_id]
-            self.store.delete_flow(flow_id)
             self.store.save_record(
                 "deleted_flows",
                 flow_id,
@@ -517,9 +546,17 @@ class FlowEngine:
                 problems = validate_flow(flow)
                 if problems:
                     raise EngineError("Fix the flow's problems before arming it", problems)
-            flow["armed"] = bool(armed)
-            flow.pop("disarmed_reason", None)
-            self.store.save_flow(flow)
+                # Arming is saved first: if Valkey refuses, the flow stays disarmed and the error shows
+                updated = {**flow, "armed": True}
+                updated.pop("disarmed_reason", None)
+                self.store.save_flow(updated)
+                flow["armed"] = True
+                flow.pop("disarmed_reason", None)
+            else:
+                # Disarming takes effect at once and is never refused (D28): saved when Valkey can be reached
+                flow["armed"] = False
+                flow.pop("disarmed_reason", None)
+                self.store.save_flow(flow, defer=True)
         self.log("info", f"Flow '{flow['name']}' {'armed' if armed else 'disarmed'}")
         return copy.deepcopy(flow)
 
@@ -551,6 +588,8 @@ class FlowEngine:
             flow = self.flows.get(flow_id)
             if flow is None:
                 raise NotFoundError(f"Flow '{flow_id}' not found")
+            if self.halted:
+                return {"result": "skipped", "run": None, "message": "The flow engine is shutting down"}
             if not manual and not flow.get("armed"):
                 return {"result": "skipped", "run": None, "message": "Flow is not armed"}
             nodes = {node["id"]: node for node in flow.get("nodes") or []}
@@ -611,6 +650,8 @@ class FlowEngine:
             return self._start_run(flow, node_id, reason, variables, options)
 
     def _start_run(self, flow, node_id, reason, variables, options=None):
+        if self.halted:
+            return {"result": "skipped", "run": None, "message": "The flow engine is shutting down"}
         if len(self.runs) >= MAX_ACTIVE_RUNS:
             message = f"Too many active runs ({MAX_ACTIVE_RUNS}), run not started"
             self.log("error", f"Flow '{flow['name']}': {message}")
@@ -648,7 +689,12 @@ class FlowEngine:
             "detail": reason,
             **(trigger_info or {}),
         }
+        if self.planner.settings.get("paused") and not dry_run:
+            # STOP ALL or an operator paused the scheduler (maybe while it was busy launching this)
+            raise EngineError("The contact scheduler is paused")
         with self.lock:
+            if self.halted:
+                raise EngineError("The flow engine is shutting down")
             if len(self.runs) >= MAX_ACTIVE_RUNS:
                 raise EngineError(f"Too many active runs ({MAX_ACTIVE_RUNS})")
             run = FlowRun(
@@ -720,20 +766,26 @@ class FlowEngine:
         return child
 
     def on_run_finished(self, run):
+        # History first, then clear the active record (queued in that order), so a crash in between never
+        # loses the run; the finished run stays findable in memory until its history is surely written
+        record = run.as_json()
         try:
-            self.store.delete_record("active_runs", run.id)
+            self.store.add_run(run.flow.get("id"), record)
+        except Exception as error:  # noqa: BLE001 - history is best effort
+            self.log("error", f"Could not save run {run.id} history: {error}")
+        try:
+            self.store.delete_record("active_runs", run.id, defer=True)
         except Exception as error:  # noqa: BLE001
             self.log("warn", f"Could not clear active run {run.id}: {error}")
         with self.lock:
+            self.finished[run.id] = record
+            while len(self.finished) > RECENTLY_FINISHED:
+                self.finished.popitem(last=False)
             self.runs.pop(run.id, None)
-            if run.parent is None:
+            if run.parent is None and not self.halted:
                 # Start the next queued run while still holding the lock, so a trigger arriving now sees it
                 # running instead of starting a second run of a "queue" flow
                 self._start_next_queued(run.flow.get("id"))
-        try:
-            self.store.add_run(run.flow.get("id"), run.as_json())
-        except Exception as error:  # noqa: BLE001 - history is best effort
-            self.log("error", f"Could not save run {run.id} history: {error}")
         level = {"success": "info", "stopped": "warn"}.get(run.status, "error")
         detail = f": {run.message}" if run.message else ""
         self.log(level, f"Flow '{run.flow.get('name')}' run {run.id} {run.status}{detail}")
@@ -833,31 +885,38 @@ class FlowEngine:
         run.stop()
 
     def stop_all(self, user=None):
-        """Safety stop: disarm every flow, drop queued triggers, pause scheduled activities, stop every run."""
+        """Safety stop: disarm every flow, drop queued triggers, pause scheduled activities, stop every run.
+
+        Everything takes effect in memory at once and is saved when Valkey can be reached (D28): STOP ALL
+        never fails or waits because Valkey is slow or away.
+        """
         # Pause the scheduler first (planner lock before engine lock): an activity it is launching right now
         # finishes starting before this returns, so the loop below stops it, and nothing launches after
-        self.planner.set_paused(True, "STOP ALL")
+        try:
+            self.planner.set_paused(True, "STOP ALL")
+        except Exception as error:  # noqa: BLE001 - never let pausing stop the rest
+            self.log("error", f"STOP ALL could not pause the contact scheduler: {error}")
         with self.lock:
-            disarmed = 0
+            to_save = []
             for flow in self.flows.values():
                 if flow.get("armed"):
                     flow["armed"] = False
-                    self.store.save_flow(flow)
-                    disarmed += 1
+                    to_save.append(flow)
+            disarmed = len(to_save)
             self.queues.clear()
             runs = list(self.runs.values())
             scripts = list(self.detached_scripts)
             self.detached_scripts.clear()
         for run in runs:
             run.stop()
-        # Scripts started without waiting belong to no run any more; STOP ALL stops them too
-        stopped_scripts = 0
-        for script_id in scripts:
+        for flow in to_save:
             try:
-                self.backend.script_stop(script_id)
-                stopped_scripts += 1
-            except Exception:  # noqa: BLE001,S110 - it may have finished already
-                pass
+                self.store.save_flow(flow, defer=True)
+            except Exception as error:  # noqa: BLE001
+                self.log("error", f"STOP ALL could not queue saving flow '{flow.get('name')}': {error}")
+        # Scripts started without waiting belong to no run any more; STOP ALL stops them too (at once, not
+        # one slow Script Runner call after another)
+        stopped_scripts = self._stop_scripts(scripts)
         summary = f"Disarmed {disarmed} flows, stopped {len(runs)} runs"
         if scripts:
             summary += f" and {stopped_scripts} scripts started without waiting"
@@ -873,7 +932,28 @@ class FlowEngine:
             "stopped": len(runs),
             "scripts_stopped": stopped_scripts,
             "scheduler_paused": True,
+            # False while Valkey is away: it all took effect, and is saved once Valkey is back
+            "persisted": self.store.health()["pending_writes"] == 0,
         }
+
+    def _stop_scripts(self, script_ids, collect=False):
+        """Ask Script Runner to stop scripts, all at once. Returns how many it confirmed in time (or which)."""
+        results = []
+
+        def stop(script_id):
+            try:
+                self.backend.script_stop(script_id)
+                results.append(script_id)
+            except Exception:  # noqa: BLE001,S110 - it may have finished already
+                pass
+
+        threads = [threading.Thread(target=stop, args=(sid,), daemon=True) for sid in script_ids]
+        for thread in threads:
+            thread.start()
+        deadline = time.monotonic() + SCRIPT_STOP_WAIT_SECONDS
+        for thread in threads:
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        return list(results) if collect else len(results)
 
     def reserve_branch_threads(self, count):
         """Take threads for a Parallel's branches from the engine-wide budget. False if there aren't enough."""
@@ -891,6 +971,24 @@ class FlowEngine:
         """Remember a script a run started without waiting for it, so STOP ALL can stop it."""
         with self.lock:
             self.detached_scripts.append(script_id)
+            if len(self.detached_scripts) > MAX_DETACHED_SCRIPTS:
+                dropped = self.detached_scripts.pop(0)
+                self.log("warn", f"Tracking too many scripts started without waiting; STOP ALL forgets {dropped}")
+
+    def prune_detached_scripts(self):
+        """Forget fire-and-forget scripts that have finished (Script Runner is asked outside the lock)."""
+        with self.lock:
+            scripts = list(self.detached_scripts)
+        done = set()
+        for script_id in scripts:
+            try:
+                if self.backend.script_state(script_id) in SCRIPT_DONE_STATES:
+                    done.add(script_id)
+            except Exception:  # noqa: BLE001,S112 - keep it; STOP ALL tries anyway
+                continue
+        if done:
+            with self.lock:
+                self.detached_scripts = [s for s in self.detached_scripts if s not in done]
 
     def _history_flow_ids(self):
         with self.lock:
@@ -900,8 +998,11 @@ class FlowEngine:
     def get_run(self, run_id):
         with self.lock:
             run = self.runs.get(run_id)
+            finished = self.finished.get(run_id)
         if run is not None:
             return run.as_json()
+        if finished is not None:
+            return finished
         for flow_id in self._history_flow_ids():
             for record in self.store.runs(flow_id):
                 if record.get("id") == run_id:

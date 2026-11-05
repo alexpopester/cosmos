@@ -329,6 +329,21 @@ updates its memory before writing, so retrying keeps memory and Valkey in
 step. An operator's save that only lived in memory would look stored, and
 then vanish on restart.
 
+*Amended 2026-11-05 (1.12.0):*
+
+- **Writes that only reduce activity never fail.** STOP ALL, disarming and
+  pausing the scheduler change memory at once and use the buffer. Arming and
+  deleting save first and change memory only if that worked.
+- **The engine never waits on Valkey while holding its lock.** Run
+  bookkeeping (active-run records, history) is queued. The engine's store
+  thread writes the queue, not the caller.
+- **A delete drops buffered writes to the same record**, so a retry can't
+  bring it back.
+- **The engine has its own Valkey client**, with a 5 s socket timeout and one
+  quick retry. COSMOS's shared client has no timeout and retries for about
+  9 s, so a paused or partitioned Valkey used to hang the engine, STOP ALL
+  included.
+
 ## D29. Internet TLEs pass the safeguards; credentials stay in COSMOS secrets
 
 CelesTrak and Space-Track TLEs go through `TleIntake.ingest`, like any

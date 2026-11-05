@@ -90,7 +90,7 @@ installed in). Inside it:
 | `flow-tle-inputs` | `ContactPlanner._poll_loop` | TLE inputs and sources every 1 s (stash, bucket files, packets): kept off the scheduler tick so slow reads can't delay activity starts |
 | `flow-predict` | `ContactPlanner._predict_loop` | Predicts queued satellites one at a time |
 | alert worker | `Alerter` | Delivers webhooks with retries |
-| `flow-store` | `FlowEngine._store_loop` | Every 2 s retries writes Valkey refused (`FlowStore.flush`), alerts when storage fails and recovers |
+| `flow-store` | `FlowEngine._store_loop` | Writes queued writes as soon as they're queued, and retries refused ones every 2 s (`FlowStore.flush`); alerts when storage fails and recovers; forgets finished fire-and-forget scripts every 60 s |
 | `threading.Timer`s | `FlowEngine.on_approval_requested` | Escalate an unanswered approval to an alert after the delay |
 
 Sub-flows do **not** get their own thread: `run_subflow` calls

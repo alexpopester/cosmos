@@ -20,6 +20,50 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Safety fixes from the second evaluation (`docs/EVALUATION-2026-11-05.md`,
+backlog B1, B2, B3, B12).
+
+### Fixed
+- **Loops in parallel branches no longer reset each other.** Two branches each
+  running a loop could send their commands extra times (a regression in
+  1.9.0). Each branch now counts its own loops (B1).
+- **Nodes after a Join can no longer run twice.** Two Parallels side by side
+  sharing one Join with no enclosing Parallel is now a validation problem.
+  Which Parallel owns each Join is worked out when the flow loads, not lazily
+  by racing branch threads (B2).
+- **Stop all works during a Valkey outage.** It used to stop nothing and
+  return an error. It now takes effect at once and is saved when Valkey is
+  back; the response says `persisted: false` until then (B3).
+- **A Valkey that stops answering no longer freezes the engine.** The engine
+  never waits on Valkey while holding its lock, and has its own Valkey client
+  with a 5 s timeout (B3).
+- **Stop all during an approved step no longer sends the command** (B3).
+- **Clients with no valid token can't lock out Stop all** by filling the
+  request slots: tokens are checked before a body is read, and Stop all and
+  `/health` have a reserved lane (B3).
+- **Shutdown no longer starts the next queued run** (B3).
+- **Stop all stops every fire-and-forget script, all at once.** It used to
+  forget scripts after 200 and stop them one slow call at a time (B3).
+- **A Script Runner error while a step waits on a script no longer orphans
+  the script.** Polling retries 5 times, and the script is always stopped
+  when the step ends without it finishing (B12).
+- **Pausing the scheduler works even when the planner is busy**, and the
+  engine refuses scheduled starts while it's paused.
+- A failed disarm no longer re-arms the flow after a restart, and a failed
+  delete no longer leaves a flow that comes back after a restart.
+- A delete can't be undone by a write retried after a Valkey outage.
+- A finished run is never briefly "not found", and its history is queued
+  before its active-run record is cleared, so a crash can't lose it.
+- Startup stops interrupted runs' scripts all at once instead of one at a
+  time.
+
+### Security
+- A node's environment can no longer set `FLOW_RESULT_KEY`, which let a flow
+  read and delete any stash key (S-14).
+
+### Docs
+- README: Parallel/Join rule, Stop all during outages; D28 amended.
+
 ## [1.11.0] - 2026-11-04
 
 CelesTrak and Space-Track TLE sources.

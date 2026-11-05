@@ -219,6 +219,7 @@ def test_http_api_round_trip(server, backend, engine):
         "stopped": 0,
         "scripts_stopped": 0,
         "scheduler_paused": True,
+        "persisted": True,
     }
     assert call(f"{server}/flows/{flow_id}", "DELETE")[0] == 200
     assert call(f"{server}/flows/{flow_id}")[0] == 404

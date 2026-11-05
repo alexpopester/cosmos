@@ -133,6 +133,12 @@ Parallel, whose wires all run at once until they meet at a Join. Nodes that
 can fail have an **error** output; if it's wired the run continues there
 (with the message in the `error` variable), otherwise the run fails.
 
+Each Parallel needs its own Join. A Parallel nested in a branch may send its
+branches straight to the outer Parallel's Join, but two Parallels side by side
+can't share a Join with nothing around them: the nodes after it would run
+twice, so the flow shows a problem on that Join. Loops in different branches
+count separately.
+
 New and imported flows start **disarmed**. Saving keeps a flow armed,
 except in two cases, which disarm it:
 
@@ -151,6 +157,12 @@ last saved version, or cancel.
 - disarms every flow;
 - stops every run;
 - stops scripts that runs started without waiting.
+
+It takes effect at once, even when Valkey is down, slow or not answering:
+the changes are saved when Valkey is back (the engine chip shows *storage
+problem* until then). A step the operator has just approved is not sent if
+Stop all comes in before the command goes out. Even with every request slot
+taken by slow or bogus clients, Stop all and `/health` still get through.
 
 If COSMOS can't be reached to check your login, Stop all still works, and
 the audit log notes that the token wasn't verified. If Stop all fails, a
@@ -642,8 +654,12 @@ The engine keeps running flows when Valkey stops taking writes.
   `storage_unavailable` alert fires.
 - **Lost:** a restart during the outage loses what was waiting, as does
   more than 5,000 waiting writes (the oldest go, and the count is shown).
-- **Saving a flow fails** with an error instead, so you know it wasn't
-  stored.
+- **Saving or arming a flow fails** with an error instead, so you know it
+  wasn't stored.
+- **Stop all, disarming and pausing always work:** they take effect at once
+  and are saved when Valkey is back.
+- **A Valkey that stops answering** (rather than refusing connections) makes
+  each call fail after about 5 s. The engine's own work never waits on it.
 - **At startup:** if Valkey isn't reachable, the engine waits for it and
   retries every 10 s.
 
