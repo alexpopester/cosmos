@@ -20,9 +20,13 @@ TLEs (anything but pasting in the tool) must pass:
 1. the catalog number matches the satellite's,
 2. the epoch is newer than the current TLE's,
 3. the satellite's preferred source, if set, wins while its TLE is fresh,
-4. the new TLE doesn't move the satellite more than ``max_jump_km`` from
-   where the current one puts it now: otherwise it's held for review
-   (Accept/Reject in the tool) instead of re-timing everything.
+4. the new TLE doesn't move the satellite more than ``max_jump_km`` for each
+   day of the current TLE's age (at least one day's worth) from where the
+   current one puts it now: otherwise it's held for review (Accept/Reject in
+   the tool) instead of re-timing everything. An old TLE has drifted, so a
+   good update after a feed outage moves the satellite further;
+5. an automated TLE dated more than a day ahead is rejected, and one that
+   can't be propagated to now is held.
 """
 
 import contextlib
@@ -274,10 +278,15 @@ class TleIntake:
             if old_position is None:
                 return "applied", "The current TLE can't be propagated to now any more"
             jump = math.dist(old_position, new_position)
-            if jump > float(self.settings["max_jump_km"]):
+            # An old current TLE has drifted: a consistent new one after a feed outage moves the satellite further.
+            # Allow the limit for each day of the current TLE's age (at least one day's worth).
+            age_days = max(1.0, (now - current["epoch"]) / 86400)
+            limit = float(self.settings["max_jump_km"]) * age_days
+            if jump > limit:
                 return "held", (
                     f"It moves the satellite {jump:.0f} km from where the current TLE has it "
-                    f"(more than {self.settings['max_jump_km']:g} km): a maneuver, or a wrong TLE?"
+                    f"(more than {limit:.0f} km for a current TLE {age_days:.1f} days old): a maneuver, or a "
+                    "wrong TLE?"
                 )
         return "applied", ""
 

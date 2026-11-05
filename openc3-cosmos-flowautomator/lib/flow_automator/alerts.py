@@ -29,10 +29,12 @@ import uuid
 from urllib.parse import urlparse
 
 import requests
+import urllib3
 
 
 DEDUP_SECONDS = 60
 RETRIES = 3
+TEST_INTERVAL_SECONDS = 5
 TIMEOUT_SECONDS = 5
 QUEUE_LIMIT = 1000  # pending deliveries; past this the oldest are dropped
 SUSPEND_AFTER_FAILURES = 3  # consecutive failed deliveries before a webhook is skipped for a while
@@ -116,6 +118,7 @@ class Alerter:
         self.status = {}  # webhook id -> {"sent", "failed", "last_ok", "last_error"}
         self.recent = {}  # dedup key -> time
         self.sent = []  # the last few events, for the settings dialog
+        self._tested = {}  # webhook id -> when it was last tested
         self.lock = threading.Lock()
         self._queue = queue.Queue(maxsize=QUEUE_LIMIT)
         self._thread = None
@@ -302,6 +305,12 @@ class Alerter:
             hook = next((h for h in self.settings["webhooks"] if h["id"] == hook_id), None)
         if hook is None:
             raise AlertError(f"Webhook '{hook_id}' not found")
+        with self.lock:
+            # A test sends at once and reports the result: not a tool for probing what the engine can reach
+            last = self._tested.get(hook_id, 0)
+            if self.clock() - last < TEST_INTERVAL_SECONDS:
+                raise AlertError(f"Wait {TEST_INTERVAL_SECONDS:g} s between tests of a webhook")
+            self._tested[hook_id] = self.clock()
         error = self._deliver(hook, body, retries=1, force=True)
         return {"ok": error is None, "error": error}
 
@@ -375,34 +384,99 @@ class Alerter:
     def _post(url, payload):
         # Checked again at send time (DNS can change), redirects aren't followed (they could lead anywhere),
         # and the response body isn't reported back (it could be from a service nobody should read this way)
-        blocked = blocked_address(urlparse(url).hostname)
-        if blocked:
-            raise RuntimeError(blocked)
-        response = requests.post(url, json=payload, timeout=TIMEOUT_SECONDS, allow_redirects=False)
-        if 300 <= response.status_code < 400:
-            raise RuntimeError(f"HTTP {response.status_code}: the webhook redirected, which isn't followed")
-        if response.status_code >= 400:
-            raise RuntimeError(f"HTTP {response.status_code} {response.reason or ''}".strip())
+        parsed = urlparse(url)
+        if requests.utils.get_environ_proxies(url):
+            # Through a proxy, which resolves the name itself: check what we can, and let it connect
+            blocked = blocked_address(parsed.hostname)
+            if blocked:
+                raise RuntimeError(blocked)
+            response = requests.post(url, json=payload, timeout=TIMEOUT_SECONDS, allow_redirects=False)
+            status, reason = response.status_code, response.reason
+        else:
+            status, reason = _post_pinned(parsed, payload)
+        if 300 <= status < 400:
+            raise RuntimeError(f"HTTP {status}: the webhook redirected, which isn't followed")
+        if status >= 400:
+            raise RuntimeError(f"HTTP {status} {reason or ''}".strip())
 
 
-def blocked_address(host):
-    """Why a webhook host is refused, or None.
+# Cloud metadata services outside link-local ranges (AWS over IPv6, Alibaba Cloud)
+METADATA_ADDRESSES = {ipaddress.ip_address("fd00:ec2::254"), ipaddress.ip_address("100.100.100.200")}
 
-    Link-local addresses (169.254.0.0/16 and fe80::/10, where cloud metadata services live), multicast and
-    unspecified addresses are refused. Private networks and localhost are allowed: on-premises ops networks
-    run their chat and paging services there (DECISIONS D21).
-    """
+
+def _address_problem(ip):
+    if ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+        return f"{ip} is a link-local, multicast or unspecified address, which webhooks can't use"
+    if ip in METADATA_ADDRESSES:
+        return f"{ip} is a cloud metadata service, which webhooks can't use"
+    mapped = getattr(ip, "ipv4_mapped", None)
+    return _address_problem(mapped) if mapped else None
+
+
+def checked_addresses(host, require=False):
+    """(addresses the host resolves to, why it's refused or None). Every address must be allowed."""
     if not host:
-        return "no host in the URL"
+        return [], "no host in the URL"
     try:
-        addresses = {info[4][0] for info in socket.getaddrinfo(host, None)}
+        addresses = list(dict.fromkeys(info[4][0] for info in socket.getaddrinfo(host, None)))
     except (socket.gaierror, UnicodeError):
-        return None  # can't resolve now: delivery reports it; nothing reachable to protect
+        return [], f"{host} can't be resolved from the flow engine" if require else None
     for address in addresses:
         try:
             ip = ipaddress.ip_address(address.split("%")[0])
         except ValueError:
             continue
-        if ip.is_link_local or ip.is_multicast or ip.is_unspecified:
-            return f"{host} resolves to {ip}, a link-local, multicast or unspecified address, which webhooks can't use"
-    return None
+        problem = _address_problem(ip)
+        if problem:
+            return addresses, f"{host} resolves to {problem}"
+    return addresses, None
+
+
+def blocked_address(host, require_resolvable=False):
+    """Why a webhook host is refused, or None.
+
+    Link-local addresses (169.254.0.0/16 and fe80::/10, where cloud metadata services live), other known metadata
+    addresses, multicast and unspecified addresses are refused. Private networks and localhost are allowed:
+    on-premises ops networks run their chat and paging services there (DECISIONS D21).
+    """
+    return checked_addresses(host, require_resolvable)[1]
+
+
+def _post_pinned(parsed, payload):
+    """POST to the address that was checked, not to whatever the name resolves to a moment later.
+
+    Resolving twice (once to check, once to connect) lets a DNS server answer the check with a harmless address
+    and the connection with a forbidden one (DNS rebinding). TLS still checks the certificate for the host name.
+    """
+    import json
+    import ssl
+
+    host = parsed.hostname
+    addresses, problem = checked_addresses(host, require=True)
+    if problem:
+        raise RuntimeError(problem)
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    path = (parsed.path or "/") + (f"?{parsed.query}" if parsed.query else "")
+    headers = {"Content-Type": "application/json", "Host": parsed.netloc.rsplit("@", 1)[-1]}
+    timeout = urllib3.Timeout(connect=TIMEOUT_SECONDS, read=TIMEOUT_SECONDS)
+    if parsed.scheme == "https":
+        pool = urllib3.HTTPSConnectionPool(
+            addresses[0],
+            port,
+            server_hostname=host,
+            assert_hostname=host,
+            ssl_context=ssl.create_default_context(),
+            timeout=timeout,
+            retries=False,
+        )
+    else:
+        pool = urllib3.HTTPConnectionPool(addresses[0], port, timeout=timeout, retries=False)
+    try:
+        response = pool.urlopen(
+            "POST", path, body=json.dumps(payload).encode(), headers=headers, redirect=False, preload_content=True
+        )
+    except urllib3.exceptions.HTTPError as error:
+        raise RuntimeError(f"Couldn't reach {host}: {type(error).__name__}") from None
+    finally:
+        pool.close()
+    return response.status, response.reason

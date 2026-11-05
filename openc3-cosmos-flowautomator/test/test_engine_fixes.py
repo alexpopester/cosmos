@@ -207,3 +207,33 @@ def test_interrupted_runs_are_recovered_at_startup():
     finally:
         second.shutdown()
         first.stop_all()
+
+
+# B30 (R-23): a COSMOS API blip used to set every telemetry ref aside for 30 s, blinding every trigger
+def test_an_api_outage_does_not_quarantine_every_ref(engine):
+    manager = engine.triggers
+    calls = {"down": True}
+
+    def read(refs):
+        if calls["down"]:
+            raise ConnectionError("cmd-tlm-api unavailable")
+        return [(1, None)] * len(refs)
+
+    refs = [("A B C", "CONVERTED"), ("A B D", "CONVERTED")]
+    first = manager._batched(refs, read)
+    assert all(isinstance(v, Exception) for v in first.values())
+    assert manager.bad_refs == {}
+    calls["down"] = False
+    assert all(not isinstance(v, Exception) for v in manager._batched(refs, read).values())
+
+
+def test_a_single_bad_ref_is_still_set_aside(engine):
+    manager = engine.triggers
+
+    def read(refs):
+        if ("BAD X Y", "CONVERTED") in refs:
+            raise KeyError("no such item")
+        return [(1, None)] * len(refs)
+
+    manager._batched([("A B C", "CONVERTED"), ("BAD X Y", "CONVERTED")], read)
+    assert list(manager.bad_refs) == [("BAD X Y", "CONVERTED")]

@@ -365,21 +365,97 @@ def test_webhook_to_link_local_is_refused(engine):
         engine.alerts.save_settings({"webhooks": [{"name": "meta", "url": "http://169.254.169.254/latest"}]})
 
 
-def test_webhook_errors_do_not_echo_the_response(monkeypatch):
+def _local_server(status, headers=None, body=b"SECRET internal page"):
+    import http.server
+    import threading
+
+    seen = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            seen.append((self.path, self.headers.get("Host"), self.rfile.read(int(self.headers["Content-Length"]))))
+            self.send_response(status)
+            for key, value in (headers or {}).items():
+                self.send_header(key, value)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, seen
+
+
+def test_webhook_errors_do_not_echo_the_response():
     import flow_automator.alerts as alerts
 
-    class Response:
-        status_code = 500
-        reason = "Internal Server Error"
-        text = "SECRET internal page"
+    server, seen = _local_server(500)
+    try:
+        with pytest.raises(RuntimeError) as error:
+            alerts.Alerter._post(f"http://127.0.0.1:{server.server_port}/hook?token=x", {"a": 1})
+        assert "SECRET" not in str(error.value) and "500" in str(error.value)
+        assert seen[0][0] == "/hook?token=x" and seen[0][2] == b'{"a": 1}'
+    finally:
+        server.shutdown()
 
-    calls = []
 
-    def fake_post(url, **kwargs):
-        calls.append(kwargs)
-        return Response()
+def test_webhook_redirects_are_not_followed():
+    import flow_automator.alerts as alerts
 
-    monkeypatch.setattr(alerts.requests, "post", fake_post)
-    with pytest.raises(RuntimeError) as error:
-        alerts.Alerter._post("http://10.0.0.5/hook", {})
-    assert "SECRET" not in str(error.value) and calls[0]["allow_redirects"] is False
+    server, seen = _local_server(302, {"Location": "http://169.254.169.254/latest/meta-data/"})
+    try:
+        with pytest.raises(RuntimeError, match="redirected"):
+            alerts.Alerter._post(f"http://127.0.0.1:{server.server_port}/hook", {})
+        assert len(seen) == 1
+    finally:
+        server.shutdown()
+
+
+# B33 (R-24): the name was resolved once to check it and again to connect (DNS rebinding)
+def test_webhook_connects_to_the_address_it_checked(monkeypatch):
+    import socket
+
+    import flow_automator.alerts as alerts
+
+    server, seen = _local_server(204, body=b"")
+    answers = iter(["127.0.0.1", "169.254.169.254", "169.254.169.254"])
+    real = socket.getaddrinfo
+
+    def rebinding(host, *args, **kwargs):
+        if host == "hooks.rebind.test":
+            address = next(answers)
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 0))]
+        return real(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", rebinding)
+    try:
+        alerts.Alerter._post(f"http://hooks.rebind.test:{server.server_port}/hook", {})
+        assert len(seen) == 1 and seen[0][1].startswith("hooks.rebind.test")
+    finally:
+        server.shutdown()
+
+
+@pytest.mark.parametrize("address", ["fd00:ec2::254", "100.100.100.200", "::ffff:169.254.169.254"])
+def test_cloud_metadata_addresses_are_blocked(monkeypatch, address):
+    import socket
+
+    import flow_automator.alerts as alerts
+
+    family = socket.AF_INET6 if ":" in address else socket.AF_INET
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: [(family, socket.SOCK_STREAM, 6, "", (address, 0))])
+    assert alerts.blocked_address("metadata.example")
+
+
+def test_webhook_tests_are_rate_limited(engine):
+    from flow_automator.alerts import Alerter, AlertError
+
+    alerter = Alerter(engine.store, post=lambda url, payload: None, clock=lambda: 1000.0)
+    alerter.settings["webhooks"] = [
+        {"id": "h", "name": "h", "url": "http://10.0.0.5/x", "format": "generic", "events": [], "enabled": True}
+    ]
+    assert alerter.test("h")["ok"] is True
+    with pytest.raises(AlertError, match="between tests"):
+        alerter.test("h")

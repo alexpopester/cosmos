@@ -233,3 +233,17 @@ def test_http_api_errors(server):
     assert status == 400 and body["problems"]
     assert call(f"{server}/flows/missing/run", "POST", {})[0] == 404
     assert call(f"{server}/validate", "POST", {"name": "x", "nodes": [], "edges": []})[1]["problems"]
+
+
+# B31 (E-14): cron details
+def test_cron_star_step_day_of_month_combines_with_weekday_by_and():
+    import datetime
+
+    from flow_automator.cron import Cron
+
+    cron = Cron("0 12 */2 * 1")  # 12:00 on odd days of the month that are Mondays (Vixie cron)
+    monday_odd = datetime.datetime(2026, 11, 9, 12, 0, tzinfo=datetime.timezone.utc)  # Monday the 9th
+    tuesday_odd = datetime.datetime(2026, 11, 3, 12, 0, tzinfo=datetime.timezone.utc)
+    assert monday_odd.weekday() == 0 and tuesday_odd.weekday() == 1
+    assert cron.matches(monday_odd)
+    assert not cron.matches(tuesday_odd)

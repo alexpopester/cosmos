@@ -162,12 +162,18 @@ class TriggerManager:
             for ref in good:
                 self.bad_refs.pop(ref, None)
         except Exception:  # noqa: BLE001 - find which one is bad
+            failed = {}
             for ref in good:
                 try:
                     results[ref] = read([ref])[0]
                     self.bad_refs.pop(ref, None)
                 except Exception as error:  # noqa: BLE001
                     results[ref] = error
+                    failed[ref] = error
+            # Only refs that fail while others read fine are bad: when everything fails, COSMOS is down (or
+            # blipped), and setting them all aside for 30 s would leave every trigger blind after it recovers
+            if len(failed) < len(good):
+                for ref, error in failed.items():
                     self.bad_refs[ref] = (error, now + BAD_REF_RETRY_SECONDS)
         if len(self.bad_refs) > 1000:
             self.bad_refs.clear()
@@ -210,8 +216,15 @@ class TriggerManager:
                     state["minute"] = minute
                     state["cron"] = Cron(data.get("cron"))
                     return False, "", None
-                if minute == state["minute"]:
-                    return False, "", None
+                if minute <= state["minute"]:
+                    return False, "", None  # same minute, or the clock stepped back: never fire a minute twice
+                if minute - state["minute"] > 1:
+                    skipped = minute - state["minute"] - 1
+                    self.engine.log(
+                        "warn",
+                        f"Flow '{flow.get('name')}': cron trigger didn't check {skipped} minute(s) (the engine was "
+                        "busy or the clock jumped); missed times don't run late",
+                    )
                 state["minute"] = minute
                 moment = datetime.datetime.fromtimestamp(minute * 60, tz=datetime.timezone.utc)
                 if state["cron"].matches(moment):

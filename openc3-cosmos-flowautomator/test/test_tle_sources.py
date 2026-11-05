@@ -58,7 +58,10 @@ class FakeService:
 
 
 @pytest.fixture
-def service(engine):
+def service(engine, monkeypatch):
+    from flow_automator import tle_sources
+
+    monkeypatch.setattr(tle_sources, "CELESTRAK_SPACING_SECONDS", 0)
     fake = FakeService()
     engine.planner.fetcher.session_factory = fake
     engine.planner.clock = lambda: EPOCH
@@ -356,3 +359,32 @@ def test_a_failing_source_alerts_once(engine, service):
     planner.fetcher.poll(EPOCH)
     planner.fetcher.poll(EPOCH + 3600)
     assert sent.count("tle_source_failing") == 1
+
+
+# B35 (C-17, R-20, S-8): a huge answer used to be read in full before its size was checked
+def test_a_huge_answer_is_stopped_while_reading(monkeypatch):
+    from flow_automator import tle_sources
+
+    read = []
+
+    class Streaming:
+        status_code = 200
+        encoding = "utf-8"
+
+        def iter_content(self, size):
+            for _ in range(1000):
+                read.append(size)
+                yield b"x" * size
+
+        def close(self):
+            read.append("closed")
+
+    class Session:
+        def get(self, url, **kwargs):
+            assert kwargs["stream"] is True and kwargs["allow_redirects"] is False
+            return Streaming()
+
+    monkeypatch.setattr(tle_sources, "MAX_RESPONSE_BYTES", 256 * 1024)
+    with pytest.raises(tle_sources.FetchError, match="too large"):
+        tle_sources._get(Session(), "https://celestrak.org/x", "CelesTrak")
+    assert read[-1] == "closed" and len(read) < 10

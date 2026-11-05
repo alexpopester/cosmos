@@ -113,8 +113,32 @@ class CosmosBackend:
         return data.decode(errors="replace") if isinstance(data, bytes) else data
 
     def stash_take(self, key):
-        """Read and remove a value a script left in the COSMOS stash (None if there isn't one)."""
+        """Read and remove a value a script left in the COSMOS stash (None if there isn't one).
+
+        Atomic where possible: one MULTI/EXEC transaction reads and deletes the stash entry, so a value written
+        between a read and a delete can't be lost. (COSMOS's Valkey user may not run Lua.) Falls back to get,
+        get again, delete if the stash isn't laid out as expected (another COSMOS version).
+        """
         from openc3.api.stash_api import stash_delete, stash_get
+
+        try:
+            from openc3.models.stash_model import StashModel
+            from openc3.utilities.authorization import authorize
+            from openc3.utilities.store import Store
+
+            authorize(permission="script_run", scope=self.scope)
+            hash_key = f"{self.scope}__{StashModel.PRIMARY_KEY}"
+            with Store.instance().redis_pool.get() as redis:
+                pipe = redis.pipeline(transaction=True)
+                pipe.hget(hash_key, key)
+                pipe.hdel(hash_key, key)
+                raw, _deleted = pipe.execute()
+            if raw is None:
+                return None
+            model = json.loads(raw.decode() if isinstance(raw, bytes) else raw)
+            return json.loads(model["value"])
+        except Exception as error:  # noqa: BLE001 - use the API instead
+            self.logger.debug(f"Atomic stash take unavailable ({type(error).__name__}); using the stash API")
 
         value = stash_get(key, scope=self.scope)
         if value is None:

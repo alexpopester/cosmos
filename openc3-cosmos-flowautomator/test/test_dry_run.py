@@ -248,6 +248,7 @@ def test_repeats_are_dropped_and_test_alerts(engine, alerts):
     assert alerts.test("h1") == {"ok": True, "error": None}
     assert alerts.test() == {"ok": True}
     alerts.post = lambda url, payload: (_ for _ in ()).throw(RuntimeError("HTTP 500"))
+    alerts._tested.clear()  # tests of one webhook are rate-limited (5 s)
     assert alerts.test("h1")["error"] == "HTTP 500"
     assert alerts.settings_json()["webhooks"][0]["status"]["failed"] == 1
 

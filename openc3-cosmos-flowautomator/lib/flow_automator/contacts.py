@@ -588,7 +588,30 @@ class ContactPlanner:
         candidates = [c for c in pair if not c["partial"]]
         return min(candidates, key=lambda c: abs(c["tca"] - old["tca"]), default=None)
 
+    _review_alerts = ()
+
     def _retime(self, now, satellite_id=None):
+        self._review_alerts = []
+        try:
+            self._retime_activities(now, satellite_id)
+        finally:
+            flagged, self._review_alerts = self._review_alerts, ()
+        if len(flagged) == 1:
+            activity, key = flagged[0]
+            self.alert(
+                "activity_needs_review", f"Activity '{activity['label']}' needs review", activity["message"], key=key
+            )
+        elif flagged:
+            # One TLE update can move many passes: one alert listing them, not one per activity
+            names = ", ".join(f"'{a['label']}'" for a, _ in flagged[:5]) + (" ..." if len(flagged) > 5 else "")
+            self.alert(
+                "activity_needs_review",
+                f"{len(flagged)} activities need review",
+                f"Their passes moved or changed: {names}. Open Contacts to accept the new times or move them.",
+                key="review:" + ",".join(sorted(key for _, key in flagged)),
+            )
+
+    def _retime_activities(self, now, satellite_id):
         for activity in self.activities.values():
             if satellite_id is not None and activity["contact"]["satellite_id"] != satellite_id:
                 continue  # only this satellite's passes changed
@@ -649,12 +672,7 @@ class ContactPlanner:
             self.audit(
                 SCHEDULER, "flagged for review", "activity", activity["id"], activity["label"], activity["message"]
             )
-            self.alert(
-                "activity_needs_review",
-                f"Activity '{activity['label']}' needs review",
-                activity["message"],
-                key=f"review:{activity['id']}:{activity.get('suggested_contact_id')}",
-            )
+            self._review_alerts.append((activity, f"review:{activity['id']}:{activity.get('suggested_contact_id')}"))
 
     def _follow(self, activity, old, nearest, shift, now):
         """Keep an activity on its (re-predicted) pass: every time of the pass, not just its TCA."""
@@ -681,12 +699,7 @@ class ContactPlanner:
             else:
                 activity["status"] = "needs_review"
                 activity["message"] = f"{problem}: move or delete the activity"
-                self.alert(
-                    "activity_needs_review",
-                    f"Activity '{activity['label']}' needs review",
-                    activity["message"],
-                    key=f"review:{activity['id']}:window:{activity['contact']['los']}",
-                )
+                self._review_alerts.append((activity, f"review:{activity['id']}:window:{activity['contact']['los']}"))
         self._save("activities", activity)
 
     def _window_problem(self, activity):

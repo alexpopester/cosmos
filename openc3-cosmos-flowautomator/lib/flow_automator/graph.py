@@ -189,8 +189,18 @@ def _shape_problem(flow):
         if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
             return f"'{key}' must be a list of objects"
     for node in flow.get("nodes") or []:
+        for key in ("id", "type"):
+            if not isinstance(node.get(key), str):
+                return f"A node's '{key}' must be text"
         if not isinstance(node.get("data", {}), dict):
             return f"Node '{node.get('id')}': 'data' must be an object"
+    for edge in flow.get("edges") or []:
+        for key in ("source", "target"):
+            if not isinstance(edge.get(key), str):
+                return f"An edge's '{key}' must be a node id (text)"
+        handle = edge.get("sourceHandle")
+        if handle is not None and not isinstance(handle, str):
+            return "An edge's 'sourceHandle' must be text"
     for key in ("variables", "parameters"):
         value = flow.get(key)
         if value is not None and not isinstance(value, dict if key == "variables" else list):

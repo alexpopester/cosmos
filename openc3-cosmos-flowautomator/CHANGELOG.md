@@ -24,6 +24,18 @@ Correctness fixes from the second evaluation (`docs/EVALUATION-2026-11-05.md`,
 section 2.2).
 
 ### Fixed
+- **A COSMOS API blip no longer blinds every telemetry trigger for 30 s.** When
+  every read fails, nothing is set aside as a bad item (B30).
+- **Cron:** a day-of-month like `*/2` combines with the weekday the way cron
+  does (AND), a clock that steps back never fires a minute twice, and minutes
+  the engine didn't get to check are logged (B31).
+- **A node id, type or edge end that isn't text is a 400**, not a 500 (B32).
+- **A script's stash result is taken atomically** (one transaction), so a
+  value written between reading and deleting can't be lost (B34).
+- **One TLE update that moves many passes raises one review alert** listing
+  them, not one per activity (B41).
+- **The TLE jump limit grows with the current TLE's age**, so good updates
+  after a feed outage aren't all held (B41).
 - **One GEO activity no longer blocks its station for the whole day.** A GEO
   day contact uses the antenna only while its activities run, so a GEO
   activity needs a duration; rules without one skip GEO days and say so (B20).
@@ -38,6 +50,11 @@ section 2.2).
   alert, instead of leaving no schedule until a restart (B27).
 
 ### Security
+- **Webhooks connect to the address that was checked** (no DNS rebinding),
+  AWS IPv6 and Alibaba metadata addresses are refused, and **Test** can't be
+  used to probe the network (once every 5 s per webhook) (B33).
+- **TLE answers are read with a size cap** instead of in full, and CelesTrak
+  requests go one a second (B35).
 - **Template parameter patterns can't freeze the scheduler.** Patterns that
   can backtrack for ever (`(a+)+`, `(a|ab)*`) or are over 200 characters are
   refused, and values are checked only up to 1,000 characters (B22).

@@ -45,6 +45,8 @@ import contextlib
 import copy
 import os
 import re
+import time
+import types
 from urllib.parse import urlparse
 
 import requests
@@ -56,6 +58,7 @@ from .tle_inputs import split_tles
 TIMEOUT_SECONDS = 30
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 FIRST_BACKOFF_SECONDS = 600
+CELESTRAK_SPACING_SECONDS = 1.0  # between requests for different catalog numbers
 SPACETRACK_BATCH = 100  # catalog numbers per query (keeps the URL short)
 # Where the Space-Track login is sent: fixed, never a setting a user (or a backup) can change
 SPACETRACK_URL = (os.environ.get("FLOW_SPACETRACK_URL") or "https://www.space-track.org").rstrip("/")
@@ -149,13 +152,26 @@ class ManualSource(TleSource):
 
 
 def _get(session, url, what, **kwargs):
+    """GET with no redirects, reading at most MAX_RESPONSE_BYTES (a huge answer is stopped, not buffered)."""
     try:
-        response = session.get(url, timeout=TIMEOUT_SECONDS, allow_redirects=False, **kwargs)
+        response = session.get(url, timeout=TIMEOUT_SECONDS, allow_redirects=False, stream=True, **kwargs)
+        if not hasattr(response, "iter_content"):
+            body = response.content or b""  # a test double
+        else:
+            chunks, total = [], 0
+            for chunk in response.iter_content(64 * 1024):
+                total += len(chunk)
+                if total > MAX_RESPONSE_BYTES:
+                    response.close()
+                    raise FetchError(f"{what}'s answer was too large")
+                chunks.append(chunk)
+            body = b"".join(chunks)
     except requests.RequestException as error:
         raise FetchError(f"Couldn't reach {what}: {type(error).__name__}") from None
-    if len(response.content or b"") > MAX_RESPONSE_BYTES:
+    if len(body) > MAX_RESPONSE_BYTES:
         raise FetchError(f"{what}'s answer was too large")
-    return response
+    encoding = getattr(response, "encoding", None) or "utf-8"
+    return types.SimpleNamespace(status_code=response.status_code, text=body.decode(encoding, errors="replace"))
 
 
 def _by_catalog(text, wanted):
@@ -179,7 +195,9 @@ class CelestrakSource(TleSource):
         texts, reasons = {}, {}
         base = settings["url"].rstrip("/")
         _check_https_host(base, "CelesTrak")
-        for catalog in catalogs:
+        for index, catalog in enumerate(catalogs):
+            if index:
+                time.sleep(CELESTRAK_SPACING_SECONDS)  # one request at a time, not a burst
             try:
                 response = _get(
                     session,

@@ -251,3 +251,45 @@ def test_accepting_a_held_tle_never_goes_backwards(planner, sats):
     with pytest.raises(TleInputError, match="newer TLE"):
         planner.intake.accept_held(alpha["id"])
     assert planner.satellites[alpha["id"]]["tle"]["epoch"] == pytest.approx(T0 + 3000)
+
+
+# B41 (C-14): the jump limit didn't grow with the current TLE's age, so after a feed outage good updates were held
+@pytest.mark.parametrize("age_days,jump_km,expected", [(0.5, 150, "held"), (6, 450, "applied"), (6, 700, "held")])
+def test_jump_limit_grows_with_the_current_tles_age(planner, sats, monkeypatch, age_days, jump_km, expected):
+    from flow_automator import tle_inputs
+
+    alpha, _ = sats
+    planner.intake.settings["max_jump_km"] = 100.0
+    now = T0 + age_days * 86400
+    planner.clock.now = now
+    newer = tle(90011, now - 600)
+    epoch_of_newer = tle_inputs.parse_tle(newer)["epoch"]
+    monkeypatch.setattr(
+        tle_inputs,
+        "_position_now",
+        lambda t, when: (jump_km, 0.0, 0.0) if abs(t["epoch"] - epoch_of_newer) < 1 else (0.0, 0.0, 0.0),
+    )
+    assert planner.intake.ingest(newer, "celestrak", satellite_id=alpha["id"])["results"][0]["result"] == expected
+
+
+# B41 (C-15): one TLE update that moved many passes raised one alert per activity
+def test_review_alerts_are_batched(engine, planner, sats):
+    from test_contacts import DC
+
+    sent = []
+    engine.alerts.emit = lambda event, title, *a, **k: sent.append((event, title))
+    alpha, _ = sats
+    planner.save_station(DC)
+    flow, _ = engine.save_flow(
+        {
+            "name": "T",
+            "template": True,
+            "nodes": [{"id": "t", "type": "trigger_manual", "position": {"x": 0, "y": 0}, "data": {}}],
+            "edges": [],
+        }
+    )
+    for contact in [c for c in planner.contacts if not c["partial"] and c["aos"] > planner.clock() + 60][:3]:
+        planner.create_activity({"contact_id": contact["id"], "template_id": flow["id"]})
+    planner.set_tle(alpha["id"], tle(90011, T0 + 1800, raan=230.0))  # moves every pass a lot
+    reviews = [title for event, title in sent if event == "activity_needs_review"]
+    assert reviews == ["3 activities need review"], reviews

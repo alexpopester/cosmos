@@ -64,3 +64,26 @@ def test_internal_errors_do_not_leak_details(server, engine, monkeypatch):  # no
     monkeypatch.setattr(engine, "list_flows", boom)
     status, body = call(f"{server}/flows")
     assert status == 500 and "secret" not in body["error"]
+
+
+# B32 (R-21): a node id, type or edge end that isn't text used to be a 500
+@pytest.mark.parametrize(
+    "nodes,edges",
+    [
+        ([{"id": 1, "type": "trigger_manual"}], []),
+        ([{"id": "t", "type": ["trigger_manual"]}], []),
+        ([{"id": "t", "type": "trigger_manual"}], [{"source": {"x": 1}, "target": "t"}]),
+        ([{"id": "t", "type": "trigger_manual"}], [{"source": "t", "target": "t", "sourceHandle": 5}]),
+    ],
+)
+def test_malformed_ids_are_a_400(engine, nodes, edges):
+    import json
+
+    from flow_automator.http_api import FlowApi
+
+    api = FlowApi(engine, lambda token, write: {"username": "u"})
+    body = json.dumps({"name": "x", "nodes": nodes, "edges": edges})
+    status, result = api.handle("POST", "/flow-automator/api/flows", {}, {"Authorization": "t"}, body)
+    assert status == 400, result
+    status, _ = api.handle("POST", "/flow-automator/api/validate", {}, {"Authorization": "t"}, body)
+    assert status in (200, 400)

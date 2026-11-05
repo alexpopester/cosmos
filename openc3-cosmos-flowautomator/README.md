@@ -400,8 +400,11 @@ since they were scheduled (*template v3 → v5*).
   - URLs are shown masked once saved.
   - Set the COSMOS address so links in messages open the tool.
   - Private-network and localhost receivers work.
-  - Link-local addresses (cloud metadata services) are refused.
-  - Redirects aren't followed.
+  - Link-local addresses and other cloud metadata addresses are refused.
+  - The engine connects to the address it checked, so DNS can't swap in
+    another one between the check and the delivery (unless a proxy is set:
+    then the proxy connects).
+  - Redirects aren't followed, and **Test** works once every 5 s per webhook.
   - A failed delivery reports only the HTTP status, not the response body.
 
 Events: approval waiting, run failed or stopped, activity missed, failed,
@@ -506,9 +509,11 @@ then by name. Every TLE from these inputs must pass these checks:
 - the satellite's **preferred source**, if set, wins while its TLE is fresher
   than `stale_tle_days` (others are *skipped*),
 - it doesn't move the satellite more than the **jump limit** (100 km by
-  default) from where the current TLE puts it now: otherwise it's *held* for
-  review, alerting, and waits for **Accept** or **Reject** in the satellite
-  dialog (a maneuver, or a wrong TLE?).
+  default, for each day the current TLE is old) from where the current TLE
+  puts it now: otherwise it's *held* for review, alerting, and waits for
+  **Accept** or **Reject** in the satellite dialog (a maneuver, or a wrong
+  TLE?). One that can't be propagated to now is held too, and one dated more
+  than a day ahead is rejected.
 
 Pasting in the satellite dialog is an operator's decision and applies as is.
 **TLE sources and inputs** (the import button next to Satellites) sets the

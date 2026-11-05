@@ -50,8 +50,9 @@ class Cron:
         parsed = [_parse_field(f, lo, hi, n) for f, (lo, hi), n in zip(fields, _RANGES, _NAMES, strict=True)]
         self.minutes, self.hours, self.days, self.months, weekdays = parsed
         self.weekdays = {0 if day == 7 else day for day in weekdays}
-        self.day_restricted = fields[2] != "*"
-        self.weekday_restricted = fields[4] != "*"
+        # As in Vixie cron: a day field that starts with * (like */2) counts as unrestricted
+        self.day_restricted = not fields[2].startswith("*")
+        self.weekday_restricted = not fields[4].startswith("*")
 
     def matches(self, dt):
         """True if the datetime (to the minute) matches this cron expression."""
