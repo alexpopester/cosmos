@@ -48,6 +48,9 @@ A standalone COSMOS plugin (gem) with two halves:
 - **Values never change commands**: use `render_command` for anything that
   ends up in a command string.
 - **Alerts are for action** (D15). Default new events to `notification`.
+- **Stored shapes are versioned** (D26). Renaming or reshaping a stored
+  field needs a `FORMAT_VERSION` bump and a step in `migrations.py`. See the
+  recipe in `docs/DEVELOPMENT.md`.
 - Don't revisit the agreed design choices in DECISIONS.md unless the owner
   asks. "Go & run rest" still asking for hazardous commands is deliberate.
 
@@ -73,7 +76,7 @@ COSMOS_PASSWORD=... test/ui/run.sh [one_test.mjs]
 
 ## Definition of done for a change
 
-1. pytest passes (167+ tests) and new behaviour has a test.
+1. pytest passes (250+ tests) and new behaviour has a test.
 2. `pnpm lint --max-warnings 0` and ruff are clean.
 3. For UI-visible changes: built, installed on the local COSMOS with a new
    version, checked in the browser (or the relevant `test/ui` script).

@@ -30,6 +30,36 @@ the plugin's `requirements.txt` at load time (numpy comes with COSMOS). An
 air-gapped COSMOS needs a PyPI mirror (Admin → Settings → PyPI URL). Without
 sgp4 flows still work and the Contacts view says why passes are missing.
 
+### Upgrading, uninstalling and moving
+
+Flows, versions, run history, satellites, stations, rules and settings live
+in Valkey (`flow_automator__<scope>__*`), not in the gem. Upgrading the plugin
+keeps them, and records saved by an older version are upgraded as they're
+read. Uninstalling also leaves them, so reinstalling brings everything back.
+To wipe a scope, delete those keys.
+
+Going back to an older version is safe but limited. Anything a newer version
+saved in a format the older one doesn't know is left untouched and not
+loaded, and the engine raises an alert. Reinstall the newer version to get it
+back.
+
+**File → Back Up Everything** downloads one JSON file. It holds the scope's
+flows and their versions, satellites with their TLEs, stations, rules, TLE
+input settings and alert settings. **File → Restore From Backup** merges a
+backup into this or another COSMOS:
+
+- Items with the same id, or the same name, are replaced. Nothing else is
+  deleted.
+- Every restored flow is left **disarmed**.
+- The contact scheduler is **paused** until you resume it.
+- Webhook URLs aren't in backups, because they often hold secrets, so add
+  missing webhooks again.
+- One-off scheduled activities aren't restored, because their passes are
+  predicted again. The result lists them. Rules recreate their own.
+
+`GET /api/backup?history=1` also includes run history and the audit log, for
+the record. Restoring ignores them.
+
 ### Plugin variables
 
 | Variable | Default | Meaning |
@@ -501,8 +531,8 @@ The engine serves `/flow-automator/api/*` (needs an `Authorization` token and
 `scope`): flows (`/flows`, `/flows/<id>/arm|disarm|run`, `/validate`), runs
 (`/runs`, `/runs/<id>/stop|approve`, `/stop_all`), contacts (`/schedule`,
 `/contacts`, `/satellites`, `/satellites/<id>/tle`, `/stations`,
-`/activities`, `/rules`, `/scheduler/pause|resume`), `/audit`, `/whoami`,
-`/status` and `/health`. The full list is at the top of
+`/activities`, `/rules`, `/scheduler/pause|resume`), `/audit`, `/backup`,
+`/restore`, `/whoami`, `/status` and `/health`. The full list is at the top of
 `lib/flow_automator/http_api.py`.
 
 ## Development
@@ -560,6 +590,21 @@ COSMOS_PASSWORD=... test/ui/run.sh rules_test.mjs     # one
 `contacts_test.mjs` makes a TLE with epoch now and puts a station under its
 track, so a real pass starts a few minutes in and the scheduled flows run at
 AOS; it takes about five minutes.
+
+## If Valkey goes away
+
+The engine keeps running flows when Valkey stops taking writes.
+
+- **Kept in memory:** run history, audit entries and the scheduler's own
+  updates. They're written, in order, once Valkey is back.
+- **Warning:** the engine chip turns orange (*storage problem*), and the
+  `storage_unavailable` alert fires.
+- **Lost:** a restart during the outage loses what was waiting, as does
+  more than 5,000 waiting writes (the oldest go, and the count is shown).
+- **Saving a flow fails** with an error instead, so you know it wasn't
+  stored.
+- **At startup:** if Valkey isn't reachable, the engine waits for it and
+  retries every 10 s.
 
 ## Limits
 

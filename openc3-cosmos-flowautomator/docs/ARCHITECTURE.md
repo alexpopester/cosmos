@@ -90,6 +90,7 @@ installed in). Inside it:
 | `flow-tle-inputs` | `ContactPlanner._poll_loop` | TLE inputs and sources every 1 s (stash, bucket files, packets): kept off the scheduler tick so slow reads can't delay activity starts |
 | `flow-predict` | `ContactPlanner._predict_loop` | Predicts queued satellites one at a time |
 | alert worker | `Alerter` | Delivers webhooks with retries |
+| `flow-store` | `FlowEngine._store_loop` | Every 2 s retries writes Valkey refused (`FlowStore.flush`), alerts when storage fails and recovers |
 | `threading.Timer`s | `FlowEngine.on_approval_requested` | Escalate an unanswered approval to an alert after the delay |
 
 Sub-flows do **not** get their own thread: `run_subflow` calls
@@ -124,6 +125,22 @@ memory and are rebuilt (or lost) on restart.
 | `…__active_runs` | hash run id → small record | Runs in progress (flow, trigger, scripts started). Deleted when a run ends; leftovers at startup are runs a crash interrupted: recorded as failed, their scripts stopped |
 | `…__planner_settings` | hash | `settings` (paused, reason), `tle_inputs` |
 | `…__alert_settings` | hash | Alert destinations and event choices |
+| `…__meta` | hash | `format`: the newest storage format written here |
+
+**Formats** (`migrations.py`, DECISIONS D26):
+- Every record is written with `"format": N`. `FlowStore` upgrades it to the
+  current format on read and removes the stamp, so nothing else sees it.
+- A record in a newer format is skipped, listed in `store.unreadable`, and
+  never rewritten.
+- Backups (`backup.py`) carry the same stamp.
+
+**Outages** (D28):
+- These writes go through `FlowStore`'s pending queue, so a refused write is
+  retried instead of lost:
+  - appends: run history, audit, versions;
+  - `save_record(..., defer=True)`: everything `ContactPlanner._save` writes.
+- Flow saves and other API writes raise.
+- `status()["store"]` and `/health` report the queue.
 
 ### Flow
 

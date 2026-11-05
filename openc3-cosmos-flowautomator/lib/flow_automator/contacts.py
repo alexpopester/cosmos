@@ -378,7 +378,9 @@ class ContactPlanner:
     # ---- satellites and stations -------------------------------------------
 
     def _save(self, kind, record):
-        self.store.save_record(kind, record["id"], record)
+        # The planner's memory already holds the change: if Valkey refuses it, retry rather than leave them
+        # disagreeing (the engine alerts while writes are waiting; see store.py)
+        self.store.save_record(kind, record["id"], record, defer=True)
 
     def _satellite_json(self, sat, now):
         result = copy.deepcopy(sat)

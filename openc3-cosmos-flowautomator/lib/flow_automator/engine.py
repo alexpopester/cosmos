@@ -10,6 +10,7 @@ from .alerts import Alerter
 from .audit import AuditLog, user_name
 from .contacts import ContactPlanner
 from .graph import MODES, POLICIES, _shape_problem, is_trigger, validate_flow
+from .migrations import FORMAT_VERSION, NewerFormatError, upgrade
 from .runner import FlowRun
 from .templates import CONTACT_VARIABLES, fill_parameters
 from .triggers import TriggerManager
@@ -23,6 +24,7 @@ MAX_SUBFLOW_DEPTH = 10
 # this bounds what a flow can fan out to, e.g. a sub-flow that calls itself from a Parallel
 MAX_BRANCH_THREADS = 200
 SHUTDOWN_WAIT_SECONDS = 5.0  # all runs together, not each
+STORE_FLUSH_SECONDS = 2.0  # how often writes Valkey refused are retried
 
 
 def less_safe_changes(old, new):
@@ -79,11 +81,15 @@ class FlowEngine:
         self.versions = FlowVersions(store)
         self.alerts = Alerter(store, notify, self.log)
         self.planner = ContactPlanner(self, store, **(planner_options or {}))
+        self._store_stop = threading.Event()
+        self._store_thread = None
+        self._store_failing = False
 
     def start(self, start_triggers=True):
         with self.lock:
             self.flows = self.store.all_flows()
             self._ensure_versions()
+        self._check_format()
         self.alerts.load()
         self._recover_interrupted_runs()
         armed = [flow["name"] for flow in self.flows.values() if flow.get("armed")]
@@ -96,6 +102,9 @@ class FlowEngine:
             self.triggers.start()
             self.planner.start()
             self.alerts.start()
+            self._store_stop.clear()
+            self._store_thread = threading.Thread(target=self._store_loop, name="flow-store", daemon=True)
+            self._store_thread.start()
 
     def shutdown(self):
         # Nothing new starts, then runs stop (recording their history and alerts), then alerts stop
@@ -110,6 +119,61 @@ class FlowEngine:
             if run.thread:
                 run.thread.join(timeout=max(0.0, deadline - time.monotonic()))
         self.alerts.stop()
+        self._store_stop.set()
+        if self._store_thread:
+            self._store_thread.join(timeout=5)
+        self.store.flush()  # one last try at anything Valkey refused
+
+    # ---- storage format and outages ----------------------------------------------
+
+    def _check_format(self):
+        stored = self.store.stored_format()
+        if stored > FORMAT_VERSION:
+            self.alerts.emit(
+                "storage_format",
+                "Flow Automator data is from a newer version",
+                f"This scope's data was written by a Flow Automator that stores format {stored}; this one reads up "
+                f"to {FORMAT_VERSION}. Records in the newer format are left untouched and aren't loaded: install "
+                "the newer plugin again to use them.",
+                key=f"storage_format:{stored}",
+            )
+        else:
+            self.store.note_format()
+        unreadable = self.store.unreadable
+        if unreadable:
+            kinds = collections.Counter(kind for kind, _id in unreadable)
+            summary = ", ".join(f"{count} {kind}{'s' if count > 1 else ''}" for kind, count in sorted(kinds.items()))
+            self.log("error", f"Not loaded, saved by a newer Flow Automator: {summary}")
+
+    def _store_loop(self):
+        while not self._store_stop.wait(STORE_FLUSH_SECONDS):
+            try:
+                self.store.flush()
+            except Exception as error:  # noqa: BLE001 - keep retrying
+                self.log("error", f"Retrying buffered writes failed: {error}")
+            self._note_store_health()
+
+    def _note_store_health(self):
+        health = self.store.health()
+        failing = bool(health["error"])
+        if failing and not self._store_failing:
+            self.log("error", f"Valkey refused a write; keeping it in memory to retry: {health['error']}")
+            self.alerts.emit(
+                "storage_unavailable",
+                "Flow Automator can't write to Valkey",
+                "Run history, audit entries and schedule updates are kept in memory and written when Valkey is "
+                "back. Restarting the engine before then loses them.",
+                key=f"storage_unavailable:{health['failing_since']}",
+            )
+        elif not failing and self._store_failing:
+            self.log("info", "Valkey is reachable again; buffered writes were saved")
+            self.alerts.emit(
+                "storage_recovered",
+                "Flow Automator is writing to Valkey again",
+                f"{health['dropped_writes']} buffered writes were dropped" if health["dropped_writes"] else "",
+                key=f"storage_recovered:{time.time()}",
+            )
+        self._store_failing = failing
 
     # ---- runs interrupted by a crash ----------------------------------------
 
@@ -278,6 +342,10 @@ class FlowEngine:
         """
         if not isinstance(flow, dict):
             raise EngineError("Flow must be a JSON object")
+        try:
+            flow = upgrade("flow", flow)  # an export from an older version (or one with a format stamp)
+        except NewerFormatError as error:
+            raise EngineError(str(error)) from None
         shape = _shape_problem(flow)
         if shape:
             raise EngineError(shape)
@@ -872,6 +940,7 @@ class FlowEngine:
                 "queued": {flow_id: len(queue) for flow_id, queue in self.queues.items() if queue},
                 "triggers": self.triggers.status(),
                 "contacts": contacts,
+                "store": self.store.health(),
                 "time": time.time(),
             }
 

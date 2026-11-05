@@ -78,7 +78,16 @@ class FlowEngineMicroservice(Microservice):
             self.logger.info(message, scope=self.scope, type=Logger.NOTIFICATION, url=url)
 
     def run(self):
-        self.engine.start()
+        # Valkey may still be starting (or briefly away): keep trying rather than exit and lose the flows' triggers
+        while not self.cancel_thread:
+            try:
+                self.engine.start()
+                break
+            except Exception as error:  # noqa: BLE001
+                self.state = f"WAITING FOR VALKEY ({error})"
+                self.logger.error(f"Flow Automator engine couldn't load its flows, retrying in 10 s: {error}")
+                if self.sleeper.sleep(10):
+                    return
         self.http.start()
         self.logger.info(f"Flow Automator engine listening on port {self.port} at {self.prefix}")
         while not self.cancel_thread:

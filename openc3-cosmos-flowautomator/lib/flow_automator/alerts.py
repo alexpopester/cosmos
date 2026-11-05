@@ -54,6 +54,9 @@ EVENTS = {
     "prediction_failed": ("alert", "Pass prediction failed for a satellite"),
     "tle_held": ("alert", "An automated TLE was held for review (big jump, or can't compare)"),
     "flow_notify": ("notification", "A flow's Notify node"),
+    "storage_unavailable": ("alert", "The engine can't write to Valkey (writes are kept to retry)"),
+    "storage_recovered": ("notification", "The engine is writing to Valkey again"),
+    "storage_format": ("alert", "Stored data is from a newer Flow Automator and wasn't loaded"),
 }
 APPROVAL_ESCALATE_AFTER = 30  # seconds an approval waits before it's alerted (someone in the tool answers sooner)
 DEFAULT_COSMOS_EVENTS = [
@@ -67,6 +70,8 @@ DEFAULT_COSMOS_EVENTS = [
     "prediction_failed",
     "tle_held",
     "flow_notify",
+    "storage_unavailable",
+    "storage_format",
 ]
 FORMATS = ("slack", "teams", "generic")
 

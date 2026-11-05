@@ -6,12 +6,16 @@ stripping the prefix. Every route except ``/health`` needs a COSMOS token in the
 good enough (writes need COSMOS's script_run permission) and returns the user,
 which every write records in the audit log.
 
-    GET    <prefix>/api/health
+    GET    <prefix>/api/health                   no token; {"ok", "store": "ok" | "degraded"}
     GET    <prefix>/api/status
     GET    <prefix>/api/whoami                   the user the token belongs to
     POST   <prefix>/api/demo                     reset and load the demo (needs the COSMOS demo plugin's INST)
     DELETE <prefix>/api/demo                     remove the demo
     GET    <prefix>/api/audit?limit=&kind=&user=&target_id=&search=   who did what, newest first
+    GET    <prefix>/api/backup?history=1         everything in this scope as one JSON document (backup.py);
+                                                 history=1 adds run history and the audit log
+    POST   <prefix>/api/restore                  {"backup": ...}: merge a backup in; restored flows are
+                                                 disarmed and the scheduler is paused
     GET    <prefix>/api/flows
     POST   <prefix>/api/flows                 create
     POST   <prefix>/api/validate              check a flow without saving
@@ -84,6 +88,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .alerts import AlertError
 from .audit import user_name
+from .backup import BackupError, make_backup, restore_backup
 from .contacts import PlannerError
 from .engine import EngineError
 from .graph import validate_flow
@@ -91,6 +96,8 @@ from .tle_inputs import TleInputError
 
 
 MAX_BODY_BYTES = 5 * 1024 * 1024
+MAX_RESTORE_BYTES = 25 * 1024 * 1024  # a backup with every version; one restore is read at a time
+_restoring = threading.Semaphore(1)
 MAX_CONCURRENT_REQUESTS = 64
 SOCKET_TIMEOUT_SECONDS = 30
 
@@ -117,6 +124,8 @@ def _routes():
         ("POST", r"/api/demo", "load_demo", True),
         ("DELETE", r"/api/demo", "clear_demo", True),
         ("GET", r"/api/audit", "audit_log", False),
+        ("GET", r"/api/backup", "backup", False),
+        ("POST", r"/api/restore", "restore", True),
         ("GET", r"/api/flows", "list_flows", False),
         ("POST", r"/api/flows", "create_flow", True),
         ("POST", r"/api/validate", "validate", True),  # write: validation is costly, and only editors need it
@@ -214,6 +223,8 @@ class FlowApi:
                 return error.status, {"error": str(error), "problems": []}
             except TleInputError as error:
                 return error.status, {"error": str(error), "problems": []}
+            except BackupError as error:
+                return error.status, {"error": str(error), "problems": []}
             except json.JSONDecodeError as error:
                 return 400, {"error": f"Invalid JSON: {error}"}
         if any(pattern.match(path) for _m, pattern, _h, _w in self.routes):
@@ -230,8 +241,24 @@ class FlowApi:
         flow = self.engine.flows.get(flow_id)
         return flow.get("name") if flow else flow_id
 
+    def backup(self, query, user, **_):
+        history = (query.get("history") or [""])[0] in ("1", "true", "yes")
+        return make_backup(self.engine, include_history=history)
+
+    def restore(self, payload, user, **_):
+        backup = payload.get("backup", payload)
+        result = restore_backup(self.engine, backup, user)
+        counts = ", ".join(
+            f"{sum(len(v) for k, v in result[key].items() if k != 'failed')} {key}"
+            for key in ("flows", "satellites", "stations", "rules")
+        )
+        self._audit(user, "restored", "backup", detail=f"{counts}; scheduler paused")
+        return result
+
     def health(self, **_):
-        return {"ok": True}
+        # No token needed, so only a word: 200 while the engine answers, "store" says whether Valkey takes writes
+        # (/status has the details)
+        return {"ok": True, "store": "ok" if self.engine.store.health()["ok"] else "degraded"}
 
     def status(self, **_):
         return self.engine.status()
@@ -682,7 +709,8 @@ def make_handler(api, logger=None):
                 self.close_connection = True
                 self._send(400, {"error": "Bad Content-Length"})
                 return
-            if length > MAX_BODY_BYTES:
+            restoring = method == "POST" and parsed.path.rstrip("/").endswith("/api/restore")
+            if length > (MAX_RESTORE_BYTES if restoring else MAX_BODY_BYTES):
                 self.close_connection = True
                 self._send(413, {"error": "Request body too large"})
                 return
@@ -691,13 +719,21 @@ def make_handler(api, logger=None):
                 self.close_connection = True
                 self._send(401, {"error": "Token is required"})
                 return
-            body = self.rfile.read(length).decode("utf-8", errors="replace") if length else ""
+            if restoring and not _restoring.acquire(blocking=False):
+                self.close_connection = True
+                self._send(409, {"error": "A restore is already running"})
+                return
             try:
-                status, result = api.handle(method, parsed.path, parse_qs(parsed.query), self.headers, body)
-            except Exception as error:  # noqa: BLE001 - never drop the connection without a response
-                if logger:
-                    logger.error(f"Flow API {method} {parsed.path} failed: {type(error).__name__}: {error}")
-                status, result = 500, {"error": "Internal error in the flow engine (details are in its log)"}
+                body = self.rfile.read(length).decode("utf-8", errors="replace") if length else ""
+                try:
+                    status, result = api.handle(method, parsed.path, parse_qs(parsed.query), self.headers, body)
+                except Exception as error:  # noqa: BLE001 - never drop the connection without a response
+                    if logger:
+                        logger.error(f"Flow API {method} {parsed.path} failed: {type(error).__name__}: {error}")
+                    status, result = 500, {"error": "Internal error in the flow engine (details are in its log)"}
+            finally:
+                if restoring:
+                    _restoring.release()
             self._send(status, result)
 
         def _send(self, status, result):

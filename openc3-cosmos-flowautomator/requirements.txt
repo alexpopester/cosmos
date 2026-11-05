@@ -1,2 +1,3 @@
-# Pass prediction for the contact planner (numpy comes with COSMOS)
-sgp4>=2.23
+# Pass prediction for the contact planner (numpy comes with COSMOS).
+# sgp4 is MIT; capped below 3 so a major release is a deliberate upgrade.
+sgp4>=2.23,<3

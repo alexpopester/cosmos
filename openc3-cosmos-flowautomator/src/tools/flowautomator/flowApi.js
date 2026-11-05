@@ -95,6 +95,8 @@ export default {
   loadDemo: () => post('/demo'),
   clearDemo: () => del('/demo'),
   audit: (params) => get('/audit', params),
+  backup: () => Api.get(`${BASE}/backup`, { headers: handled }).then(unwrap),
+  restore: (backup) => post('/restore', { backup }),
 
   // Contacts: satellites, stations, predicted passes and scheduled activities
   schedule: (start, end) => get('/schedule', { start, end }),

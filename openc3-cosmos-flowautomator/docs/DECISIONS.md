@@ -288,3 +288,44 @@ their scripts kept running unsupervised (ENG-8). Resuming safely needs
 durable step state and an operator decision, which is a larger feature
 (evaluation GAP-2).
 
+## D26. Stored records carry a format version; newer ones are left alone
+
+Everything written to Valkey is stamped `"format": N` (`migrations.py`).
+Reading upgrades older records step by step. A record in a format newer
+than the engine knows (after a downgrade) is skipped, never rewritten, and
+the engine raises an alert.
+
+*Why:* nothing recorded which version wrote a flow, so the first rename of a
+stored field would have broken saved flows silently. Skipping, rather than
+guessing, means a downgrade can't damage data that the newer version can
+still read.
+
+## D27. Restoring a backup never starts anything
+
+Restoring leaves every flow it touches disarmed (with the reason shown) and
+pauses the contact scheduler. Restoring merges rather than replaces: items
+are matched by id, then by name, and nothing absent from the backup is
+deleted. Everything restored goes through the API's own validation.
+
+Webhook URLs and one-off activities aren't restored:
+- **Webhook URLs:** backups can be made by read-only users, so they never
+  contain the URLs.
+- **One-off activities:** their passes are predicted again.
+
+*Why:* a backup may come from another system, or from long ago. Its armed
+triggers and rules must not command a spacecraft before someone has looked
+at them (the same principle as D6).
+
+## D28. A Valkey outage buffers history, but fails operator saves
+
+Some writes are kept in memory, in order, and retried every 2 s: run
+history, audit entries, versions, and the contact planner's own records. Up
+to 5,000 can wait. Saving or arming a flow, and other API writes, fail with
+an error instead.
+
+*Why:* runs and the scheduler keep going during a blip, and their as-run
+record matters more than anything else that was lost before. The planner
+updates its memory before writing, so retrying keeps memory and Valkey in
+step. An operator's save that only lived in memory would look stored, and
+then vanish on restart.
+

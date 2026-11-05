@@ -190,6 +190,22 @@ move the cursor and optionally click, `menu()`, `openFlow()`, `node()`,
 unless they're short. The script turns COSMOS alert toasts off while it runs
 and restores them, the scheduler and the armed temperature watch at the end.
 
+### Change the shape of something stored
+
+Renaming or restructuring a field of a stored flow, run, version or planner
+record breaks data saved by older versions unless it's migrated:
+
+1. Bump `FORMAT_VERSION` in `lib/flow_automator/migrations.py`.
+2. Add `STEPS[kind][old_format]`. It's a pure function that takes a record
+   in the old format and returns it in the new one. It must cope with fields
+   older versions never wrote.
+3. Add a test in `test/test_storage.py` that writes an old-format record
+   straight into `MemoryRedis` and checks it loads.
+4. If the change affects `backup.py`, keep restoring older backups working.
+   It upgrades them with the same steps.
+
+Adding an optional field that defaults sensibly needs none of this.
+
 ### Add an expression function
 
 `_SAFE_FUNCTIONS` in `expressions.py`, its docstring, the README table,

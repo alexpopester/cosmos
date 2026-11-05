@@ -20,6 +20,59 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-11-04
+
+Upgrades, backups and Valkey outages: the gaps the evaluation didn't cover
+(`docs/EVALUATION-2026-11-04.md`, addendum A-1 to A-3 and A-6).
+
+### Added
+- **File → Back Up Everything** downloads one JSON file with the scope's
+  flows and their versions, satellites with their TLEs, stations, rules, TLE
+  input settings and alert settings. Webhook URLs are left out.
+  `GET /api/backup?history=1` adds run history and the audit log.
+- **File → Restore From Backup** merges a backup, into this COSMOS or
+  another one:
+  - Items are matched by id, then by name, and nothing else is deleted.
+  - Restored flows are left disarmed.
+  - The contact scheduler is paused until you resume it.
+  - The result lists anything that wasn't restored, and why.
+- **Storage formats.**
+  - Everything the engine saves is stamped with a format version, and
+    records from older versions are upgraded as they're read.
+  - After a downgrade, records in a newer format are left untouched and an
+    alert says so. A flow file exported by a newer version is refused.
+- **Alert events:**
+  - `storage_unavailable`, on by default: Valkey refused a write.
+  - `storage_recovered`: writes are going through again.
+  - `storage_format`, on by default: stored data is from a newer version.
+
+  Existing installations keep their saved event choices, so turn these on
+  in Alerts.
+
+### Changed
+- **The engine keeps going when Valkey stops taking writes.**
+  - Run history, audit entries and the scheduler's own updates wait in
+    memory, up to 5,000, and are written in order when Valkey is back.
+  - The engine chip turns orange (*storage problem*), and `/health` reports
+    `"store": "degraded"`.
+  - Saving a flow still fails visibly.
+  - At startup the engine waits for Valkey instead of exiting.
+- `sgp4` is capped below 3 in `requirements.txt`.
+
+### Security
+- The tool bundles DOMPurify through `@openc3/vue-common`, and that copy
+  (3.4.8 and 3.4.15) had published XSS advisories. A pnpm override now pins
+  3.4.17, and `pnpm audit --prod` is clean.
+
+### Docs
+- **README:** upgrading, uninstalling and moving, backups, and what happens
+  when Valkey goes away.
+- **DEVELOPMENT:** a recipe for changing the shape of stored data.
+- **DECISIONS:** D26 (formats), D27 (restore never starts anything) and D28
+  (outage buffering).
+- **EVALUATION:** an addendum listing the six areas the original review
+  missed.
+
 ## [1.9.0] - 2026-11-04
 
 Sub-flow pinning, plus the correctness fixes from the evaluation

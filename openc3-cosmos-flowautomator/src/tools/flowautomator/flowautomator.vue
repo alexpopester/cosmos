@@ -214,7 +214,13 @@
               <v-chip
                 v-bind="tip"
                 size="small"
-                :color="engineOnline ? 'success' : 'error'"
+                :color="
+                  engineOnline
+                    ? storeTrouble
+                      ? 'warning'
+                      : 'success'
+                    : 'error'
+                "
                 variant="tonal"
                 class="mr-2 fa-engine-chip"
                 @click="showAllRunning"
@@ -225,6 +231,7 @@
                 <template v-if="engineOnline">
                   {{ engineStatus.armed }} armed ·
                   {{ engineStatus.active_runs.length }} running
+                  <template v-if="storeTrouble">· storage problem</template>
                 </template>
                 <template v-else>Engine offline</template>
               </v-chip>
@@ -235,6 +242,9 @@
               {{ engineStatus.triggers.watching }} ways.
               <span v-if="engineStatus.triggers.error">
                 Last error: {{ engineStatus.triggers.error }}
+              </span>
+              <span v-if="storeTrouble" class="fa-store-trouble">
+                {{ storeTrouble }}
               </span>
             </span>
             <span v-else>
@@ -987,6 +997,13 @@
       style="display: none"
       @change="importFile"
     />
+    <input
+      ref="restoreInput"
+      type="file"
+      accept=".json,application/json"
+      style="display: none"
+      @change="restoreFile"
+    />
   </div>
 </template>
 
@@ -1151,6 +1168,26 @@ export default {
     }
   },
   computed: {
+    storeTrouble() {
+      // Valkey refusing writes (or data from a newer version): the engine runs, but say so
+      const store = this.engineStatus?.store
+      if (!store) return ''
+      const parts = []
+      if (store.error) {
+        parts.push(
+          `Valkey isn't taking writes (${store.error}): ${store.pending_writes} run history, audit and schedule writes are waiting in memory. Restarting the engine now would lose them.`,
+        )
+      }
+      if (store.dropped_writes) {
+        parts.push(`${store.dropped_writes} buffered writes were dropped.`)
+      }
+      if (store.unreadable?.length) {
+        parts.push(
+          `${store.unreadable.length} saved records are from a newer Flow Automator and weren't loaded.`,
+        )
+      }
+      return parts.join(' ')
+    },
     menus() {
       return [
         {
@@ -1184,6 +1221,16 @@ export default {
               label: 'Export JSON',
               icon: 'mdi-export',
               command: this.exportFile,
+            },
+            {
+              label: 'Back Up Everything',
+              icon: 'mdi-database-export',
+              command: this.downloadBackup,
+            },
+            {
+              label: 'Restore From Backup...',
+              icon: 'mdi-database-import',
+              command: () => this.$refs.restoreInput.click(),
             },
             { divider: true },
             {
@@ -1750,6 +1797,87 @@ export default {
             })
           }
         })
+      })
+    },
+    async downloadBackup() {
+      try {
+        const backup = await flowApi.backup()
+        const blob = new Blob([JSON.stringify(backup, null, 2)], {
+          type: 'application/json',
+        })
+        const stamp = new Date()
+          .toISOString()
+          .slice(0, 16)
+          .replace(/[:T]/g, '-')
+        const link = document.createElement('a')
+        link.href = URL.createObjectURL(blob)
+        link.download = `flow-automator-backup-${backup.scope || ''}-${stamp}.json`
+        link.click()
+        setTimeout(() => URL.revokeObjectURL(link.href), 10000)
+        this.$notify.normal({
+          title: 'Backup downloaded',
+          body: `${backup.flows.length} flows, ${backup.satellites.length} satellites, ${backup.stations.length} stations, ${backup.rules.length} rules. Webhook URLs aren't included.`,
+        })
+      } catch (error) {
+        this.$notify.serious({
+          title: 'Backup failed',
+          body: errorInfo(error).message,
+        })
+      }
+    },
+    restoreFile(event) {
+      const file = event.target.files[0]
+      event.target.value = ''
+      if (!file) return
+      file.text().then(async (text) => {
+        let backup
+        try {
+          backup = JSON.parse(text)
+        } catch (error) {
+          this.$notify.serious({
+            title: 'Restore failed',
+            body: `Not valid JSON: ${error.message}`,
+          })
+          return
+        }
+        const flows = Array.isArray(backup?.flows) ? backup.flows.length : 0
+        if (
+          !window.confirm(
+            `Restore ${flows} flows and the satellites, stations and rules in this backup? Items with the same id or name are replaced; nothing else is deleted. Restored flows are left disarmed, and the contact scheduler is paused until you resume it.`,
+          )
+        )
+          return
+        try {
+          const result = await flowApi.restore(backup)
+          const count = (part) =>
+            (part.created?.length || 0) +
+            (part.updated?.length || 0) +
+            (part.unchanged?.length || 0)
+          const failed = ['flows', 'satellites', 'stations', 'rules'].flatMap(
+            (key) =>
+              (result[key].failed || []).map((f) => `${f.name}: ${f.error}`),
+          )
+          const body = [
+            `${count(result.flows)} flows, ${count(result.satellites)} satellites, ${count(result.stations)} stations, ${count(result.rules)} rules restored. Flows are disarmed and the scheduler is paused.`,
+            ...failed.map((f) => `Not restored: ${f}`),
+            ...result.skipped,
+          ].join(' ')
+          const notify = failed.length
+            ? this.$notify.caution
+            : this.$notify.normal
+          notify({ title: 'Backup restored', body })
+          await this.refreshFlows()
+          if (this.flowId && !this.dirty) {
+            // Show the restored version of the open flow (unsaved edits are left alone)
+            const { flow } = await flowApi.getFlow(this.flowId)
+            this.loadFlow(flow)
+          }
+        } catch (error) {
+          this.$notify.serious({
+            title: 'Restore failed',
+            body: errorInfo(error).message,
+          })
+        }
       })
     },
     beforeUnload(event) {

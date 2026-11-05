@@ -415,6 +415,25 @@ Add CI (TOOL-1) in the same pass, with a regression test for every repro.
 
 ---
 
+## Addendum: what the six reviews didn't cover (added in 1.10.0)
+
+A gap check after 1.9.0 found six areas no reviewer had looked at. The first
+three, and the dependency part of the sixth, are fixed in 1.10.0.
+
+| ID | Gap | Status |
+|---|---|---|
+| A-1 | **Upgrades.** Stored records had no format version and there was no migration path, so the first rename of a stored field would break saved flows. Nothing handled a downgrade. | Fixed: format stamps, `migrations.py`, and newer records left alone (D26) |
+| A-2 | **Uninstall, backup and restore.** Nothing said what uninstalling does to the data, and there was no way to back up or move a whole scope. | Fixed: README section, File → Back Up Everything / Restore From Backup (D27) |
+| A-3 | **Valkey outages.** Run history and audit writes were dropped. The planner's memory and Valkey drifted apart. The engine exited if Valkey wasn't up at start. | Fixed: buffered retries, a storage alert, an orange engine chip, and startup that waits for Valkey (D28) |
+| A-4 | **Real measurements.** The performance findings (ENG-9/19, UX-10, CON-14) come from reading the code, not from load tests. | Open: measure before optimising |
+| A-5 | **COSMOS Enterprise.** The plugin has only run on Core. Keycloak auth, real usernames and multi-scope are untested. | Open: needs an Enterprise install |
+| A-6 | **Dependencies.** Nothing was checked for pinning, advisories or licences. | Mostly fixed: `sgp4` capped below 3. `pnpm audit --prod` found 13 DOMPurify advisories (up to critical) in the copy bundled through `@openc3/vue-common`; an override now pins 3.4.17, with no advisories left. Licences are all permissive (MIT, Apache-2.0, BSD, ISC, MPL/Apache), plus the OpenC3 Builder's License for the two `@openc3` packages, the same as every generated COSMOS tool plugin. Open: `LICENSE.md` still says `<COPYRIGHT HOLDER>`, and the gemspec author is a placeholder |
+
+The fixes for 2.1 and 2.2 (1.8.0 and 1.9.0, about 3,500 changed lines) have
+tests, but no independent review has looked at them yet.
+
+---
+
 ## Appendix: repro scripts
 
 The reviewers' scratch scripts are in the session scratchpad. They are

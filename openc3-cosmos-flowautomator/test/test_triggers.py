@@ -194,7 +194,7 @@ def call(url, method="GET", body=None, token="good"):  # noqa: S107 - test token
 
 
 def test_http_api_round_trip(server, backend, engine):
-    assert call(f"{server}/health", token=None) == (200, {"ok": True})
+    assert call(f"{server}/health", token=None) == (200, {"ok": True, "store": "ok"})
     assert call(f"{server}/flows", token=None)[0] == 401
 
     flow = make_flow([node("t", "trigger_manual"), node("c", "send_cmd", command="INST X")], [edge("t", "c")])
