@@ -30,6 +30,10 @@ versions follow [Semantic Versioning](https://semver.org/).
   stations), none of 13,436 decoded frames arrived while we predicted the
   satellite was below the horizon, and AOS/LOS agree to within 1.7 s / 1.2 s
   (95th percentile).
+- **Real-pass soak tooling** (`realdata/soak.sh`): sets up real SatNOGS
+  stations and CelesTrak-tracked satellites with one rule, records every
+  prediction and activity change, and scores the soak against what SatNOGS
+  stations heard.
 
 ## [1.13.0] - 2026-11-05
 

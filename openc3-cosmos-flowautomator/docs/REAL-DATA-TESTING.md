@@ -52,7 +52,7 @@ and don't book observations on other people's stations at scale.
 | # | Step | What it proves | Status |
 |---|---|---|---|
 | 1 | Predictions vs SatNOGS observations | `orbit.py` pass geometry against real passes and real frame times | Done 2026-11-05 (see Results) |
-| 2 | Real-pass scheduling soak | Planner, rules, retiming and capacity on live passes over real stations | Not started |
+| 2 | Real-pass scheduling soak | Planner, rules, retiming and capacity on live passes over real stations | Tooling built 2026-11-05; waiting to start |
 | 3 | Real telemetry into COSMOS + replay | Flows acting on real values; recorded passes as a regression set | Not started |
 | 4 | NOS3 command loop | Contact flows commanding real cFS on a real orbit | Not started |
 
@@ -90,17 +90,54 @@ disagreement has either a fix or a DECISIONS entry explaining it.
 
 ### Step 2: real-pass scheduling soak
 
-- Import a set of SatNOGS stations (location and `min_horizon`) as Flow
-  Automator stations, and use CelesTrak TLEs for 10–20 satellites with
-  frequent good observations.
-- Rules and templates that schedule an activity on every pass (dry run or
-  harmless commands to the demo INST target).
-- Run for at least a week. Afterwards, compare our planned contacts with the
-  observations SatNOGS actually recorded over the same period: a pass they
-  heard that we didn't plan (or the reverse), and AOS/LOS drift as TLEs age
-  and get replaced.
-- Watch for: retiming on TLE updates (D12), rule pre-emption (D23), station
-  capacity warnings (D14), activity pruning, memory and Valkey growth.
+What's set up (`realdata/soak_setup.py`; everything is named `Soak: ...`):
+
+- **18 real satellites** (`soak_common.SATELLITES`): the most-heard named
+  satellites from the step 1 sample, plus KNACKSAT-2 (fast decay), METEOR
+  M2-3 (higher orbit) and the ISS. TLEs come from CelesTrak through the
+  engine's own fetcher (D29), so TLE ageing and updates are the real thing.
+- **13 real SatNOGS stations** (`soak_common.STATIONS`): busy, online,
+  spread over six continents (41° S to 65° N), at their real position and
+  `min_horizon`, capacity 1.
+- **Template "Soak: Pass log"**: log before AOS, wait for AOS, read INST
+  HEALTH_STATUS, wait for TCA, check the time left, wait for LOS − 5 s, log.
+  It sends nothing, but each run stays open for the whole pass, so many run
+  at once.
+- **One rule**: that template into every pass of those satellites over those
+  stations, AOS − 60 s, run mode, stop at LOS, priority 20, skipping
+  stations already at capacity.
+
+The recorder (`realdata/soak_recorder.py`, in a container that restarts
+with Docker) reads the schedule every 5 minutes and appends what changed to
+`realdata/cache/soak/events-*.jsonl`. It logs TLE updates, passes
+predicted, moved or dropped, and activity changes, plus hourly status. It
+pairs a pass the planner re-predicts under a new id (a move of more than 5 s)
+with its earlier prediction, so the drift is measured, not hidden.
+
+The report (`realdata/soak_report.py`) fetches every good SatNOGS observation
+of the soak satellites since the start (any station) and reports:
+
+1. Operational accuracy: frames and windows against our prediction from the
+   TLE we actually held at the time, by TLE age.
+2. Coverage at the soak stations: SatNOGS-heard passes we predicted,
+   scheduled and ran.
+3. Scheduler behaviour: outcomes, start lateness, retimes and drift, misses,
+   failures and cancellations, recorder errors.
+4. Prediction churn: how far AOS moved between the first prediction and the
+   pass, by lead time.
+
+```bash
+cd openc3-cosmos-flowautomator
+COSMOS_PASSWORD=... realdata/soak.sh setup   # create it; stores a session token (not the password)
+realdata/soak.sh start                       # recorder container
+realdata/soak.sh status
+realdata/soak.sh report                      # any time; the final one after at least a week
+realdata/soak.sh stop                        # end; COSMOS_PASSWORD=... realdata/soak.sh clear removes it
+```
+
+Watch for: retiming on TLE updates (D12), rule pre-emption (D23), station
+capacity (D14), activity pruning, engine memory and Valkey growth, alerts
+noise.
 
 ### Step 3: real telemetry and replay
 
