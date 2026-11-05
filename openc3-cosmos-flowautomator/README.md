@@ -565,10 +565,17 @@ predicted: chosen satellites and stations (empty means all), passes above a
 maximum elevation and at least a duration, with the same start, mode and
 parameters as an activity.
 
-Saving a change that affects which passes a rule takes re-plans that rule
-and every lower-priority rule, highest first. That way a higher **priority**
-rule claims station capacity before lower ones, even when it's added later.
-Renaming a rule keeps its activities.
+Saving a change that affects which passes a rule takes re-plans that rule's
+own activities. Other rules' activities keep their ids and snapshots. A
+higher-**priority** rule that finds a station busy takes it from
+lower-priority rule activities, even when it's added later. Each one it
+replaces is in the audit log as *pre-empted*. Nothing starting within 10
+minutes is ever removed or pre-empted, and neither is an activity you've
+edited by hand. Renaming a rule keeps its activities.
+
+A crawl or walk rule (or one whose template asks the operator) skips passes
+where approvals would close before its activities start. A rule anchored at
+LOS inside the approval margin is refused.
 
 A rule activity you edit by hand is *detached*: saving the rule leaves it as
 you set it. Deleting one of its activities cancels it, and the rule won't put

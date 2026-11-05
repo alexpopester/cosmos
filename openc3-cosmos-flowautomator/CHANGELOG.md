@@ -21,7 +21,7 @@ versions follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 Fixes from the second evaluation (`docs/EVALUATION-2026-11-05.md`, backlog
-B1–B14; owner's answers to Q1–Q4; D6, D22, D28 and D29 amended).
+B1–B17 and B19; owner's answers to Q1–Q4; D6, D22, D23, D24, D28 and D29 amended).
 
 ### Changed
 - **The approved command is sent exactly as approved.** It used to be
@@ -34,6 +34,26 @@ B1–B14; owner's answers to Q1–Q4; D6, D22, D28 and D29 amended).
   now also sees parameter defaults and state names in any case.
 
 ### Fixed
+- **Saving a rule no longer deletes other rules' activities.** It used to
+  remove every lower-priority rule activity (even one due in seconds) and
+  re-create them with new ids and fresh snapshots. Now only that rule's own
+  activities are re-planned, and a higher-priority rule pre-empts
+  lower-priority ones one at a time, audited, never within 10 minutes of
+  their start or once edited by hand (B15).
+- **Rule priority holds when passes are predicted in batches** (window roll,
+  restart, Recompute); the low-priority rule used to win (B19).
+- **Rules skip passes too short for their approvals**, and a rule anchored at
+  LOS inside the approval margin is refused (B15).
+- **A GEO activity is no longer cancelled by the next recompute on its own
+  day**: today's day contact starts at 00:00 (B15).
+- **Bad TLEs no longer get through the safeguards.** An automated TLE dated
+  more than a day ahead is rejected, a future-dated current TLE no longer
+  blocks real updates, a TLE that can't be propagated to now is held instead
+  of applied, and accepting a held TLE can't replace a newer one (B16).
+- **Internet TLE fetching stays polite across restarts and failures.** Fetch
+  times and back-off are kept in Valkey, Fetch now waits out a refusal (403,
+  429), a failure part way through keeps what was fetched, and a failing
+  source raises the new `tle_source_failing` alert once (B17).
 - **A station edit no longer leaves activities on the old AOS and LOS.** They
   follow every time of the re-predicted pass, are flagged for review when the
   time they're anchored to moves too far, and are re-checked against LOS and

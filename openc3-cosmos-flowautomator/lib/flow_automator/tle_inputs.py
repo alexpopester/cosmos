@@ -81,11 +81,13 @@ def split_tles(text):
     return entries, problems
 
 
-def _distance_now_km(old, new, now):
-    """How far apart two TLEs put the satellite now."""
-    a = Propagator(old["line1"], old["line2"]).ecef([now])[0][0]
-    b = Propagator(new["line1"], new["line2"]).ecef([now])[0][0]
-    return math.dist(a, b)
+FUTURE_EPOCH_DAYS = 1.0  # an automated TLE dated further ahead than this is refused
+
+
+def _position_now(tle, now):
+    """Where a TLE puts the satellite now, or None if it can't be propagated that far (decayed, bad elements)."""
+    position = Propagator(tle["line1"], tle["line2"]).ecef([now])[0][0]
+    return position if all(math.isfinite(x) for x in position) else None
 
 
 class TleIntake:
@@ -247,18 +249,31 @@ class TleIntake:
             return "unchanged", "Same TLE as the current one"
         if manual:
             return "applied", "Pasted"
-        if current and tle["epoch"] <= current["epoch"]:
+        ahead = (tle["epoch"] - now) / 86400
+        if ahead > FUTURE_EPOCH_DAYS:
+            return "rejected", f"Its epoch is {ahead:.1f} days in the future: a wrong TLE (or a wrong clock)"
+        # A current TLE dated in the future (accepted by hand, or a clock error) mustn't block every real update
+        current_trusted = current is not None and current["epoch"] <= now + FUTURE_EPOCH_DAYS * 86400
+        if current_trusted and tle["epoch"] <= current["epoch"]:
             return "skipped", "Not newer than the current TLE"
         preferred = sat.get("preferred_source")
         if preferred and source != preferred and current and current.get("source") == preferred:
             age_days = (now - current["epoch"]) / 86400
             if age_days <= self.planner.stale_tle_days:
                 return "skipped", f"The preferred source ({preferred}) has a fresh TLE ({age_days:.1f} days old)"
+        if current and not current_trusted:
+            return "applied", "The current TLE is dated in the future, so it can't be trusted to compare with"
         if current:
             try:
-                jump = _distance_now_km(current, tle, now)
+                new_position = _position_now(tle, now)
+                old_position = _position_now(current, now)
             except Exception as error:  # noqa: BLE001 - can't compare: let an operator look
                 return "held", f"Couldn't compare with the current TLE: {error}"
+            if new_position is None:
+                return "held", "It can't be propagated to now (decayed, or bad elements)"
+            if old_position is None:
+                return "applied", "The current TLE can't be propagated to now any more"
+            jump = math.dist(old_position, new_position)
             if jump > float(self.settings["max_jump_km"]):
                 return "held", (
                     f"It moves the satellite {jump:.0f} km from where the current TLE has it "
@@ -272,6 +287,11 @@ class TleIntake:
             sat = planner.satellites.get(sat_id)
             if sat is None or not sat.get("held_tle"):
                 raise TleInputError("This satellite has no held TLE")
+            current = sat.get("tle")
+            if current and float(sat["held_tle"].get("epoch") or 0) <= current["epoch"]:
+                sat.pop("held_tle")
+                planner._save("satellites", sat)
+                raise TleInputError("A newer TLE is already in use: the held one was dropped instead")
             held = sat.pop("held_tle")
             planner._apply_tle(sat, held["text"], held["source"], user)
             planner._save("satellites", sat)

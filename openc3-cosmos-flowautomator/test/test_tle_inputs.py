@@ -206,3 +206,48 @@ def test_http_hooks(engine, planner, sats):
     assert call("POST", f"/satellites/{sats[0]['id']}/tle/reject", {})[0] == 400  # nothing held now
     assert call("PUT", "/tle_inputs", {"max_jump_km": -5})[0] == 400
     assert call("GET", "/tle_inputs")[1]["stash_key"] == "flow_automator_tles"
+
+
+# B16 (C-6, CON-18): a future-dated TLE was accepted, then every real update was skipped as "not newer"
+def test_future_epoch_tle_is_rejected(planner, sats):
+    alpha, _ = sats
+    out = planner.intake.ingest(tle(90011, T0 + 30 * 86400), "celestrak", satellite_id=alpha["id"])
+    assert out["results"][0]["result"] == "rejected"
+    assert "future" in out["results"][0]["reason"]
+
+
+def test_a_future_current_tle_does_not_block_real_updates(planner, sats):
+    alpha, _ = sats
+    planner.set_tle(alpha["id"], tle(90011, T0 + 30 * 86400))  # pasted by hand, wrongly dated
+    out = planner.intake.ingest(tle(90011, T0 + 3000), "celestrak", satellite_id=alpha["id"])
+    assert out["results"][0]["result"] == "applied", out["results"][0]
+
+
+# B16 (C-7): a TLE that can't be propagated to now gave a NaN distance, which passed the jump check
+def test_tle_that_cannot_reach_now_is_held(planner, sats):
+    alpha, _ = sats
+    newer = tle(90011, T0 + 1800)
+    lines = newer.split("\n")
+    line1 = lines[-2][:53] + " 99999-0" + lines[-2][61:68]
+    from flow_automator.orbit import _checksum
+
+    line1 += str(_checksum(line1 + "0"))
+    planner.clock.now = T0 + 60 * 86400  # long after: the high-drag elements have decayed by now
+    out = planner.intake.ingest(f"{line1}\n{lines[-1]}", "celestrak", satellite_id=alpha["id"])
+    assert out["results"][0]["result"] == "held", out["results"][0]
+    assert planner.satellites[alpha["id"]]["tle"]["epoch"] == pytest.approx(T0)
+
+
+# B16 (C-12): accepting a held TLE after pasting a newer one used to go back to the older TLE
+def test_accepting_a_held_tle_never_goes_backwards(planner, sats):
+    from flow_automator.tle_inputs import TleInputError
+
+    alpha, _ = sats
+    far = tle(90011, T0 + 1800, raan=300.0)  # a big jump: held
+    assert planner.intake.ingest(far, "celestrak", satellite_id=alpha["id"])["results"][0]["result"] == "held"
+    planner.set_tle(alpha["id"], tle(90011, T0 + 3000))  # an operator pastes a newer one
+    assert not planner.satellites[alpha["id"]].get("held_tle")
+    planner.satellites[alpha["id"]]["held_tle"] = {**planner.satellites[alpha["id"]]["tle"], "epoch": T0 + 1800}
+    with pytest.raises(TleInputError, match="newer TLE"):
+        planner.intake.accept_held(alpha["id"])
+    assert planner.satellites[alpha["id"]]["tle"]["epoch"] == pytest.approx(T0 + 3000)

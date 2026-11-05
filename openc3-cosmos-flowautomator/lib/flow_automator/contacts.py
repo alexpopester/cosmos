@@ -56,6 +56,9 @@ FINISHED = ("done", "failed", "stopped", "missed", "cancelled")
 TLE_HISTORY = 5
 SCHEDULER = "scheduler"
 RULE_LEAD_SECONDS = 10  # a rule doesn't create activities that would start sooner than this
+# Re-planning rules never removes or pre-empts an activity starting sooner than this: operators may be
+# getting ready for it, and a replacement would get no review
+PROTECT_SECONDS = 600
 DEFAULTS = {
     "late_tolerance": 30.0,
     "approval_margin": 30.0,
@@ -493,6 +496,9 @@ class ContactPlanner:
         if old:
             sat["tle_history"] = ([old] + list(sat.get("tle_history") or []))[:TLE_HISTORY]
         sat["tle"] = tle
+        held = sat.get("held_tle")
+        if held and float(held.get("epoch") or 0) <= tle["epoch"]:
+            sat.pop("held_tle")  # a newer TLE is in use: accepting the held one later would go backwards
         self.engine.log("info", f"Satellite '{sat['name']}' TLE updated from {source} (catalog {tle['norad_id']})")
 
     def delete_satellite(self, sat_id):
@@ -1064,6 +1070,12 @@ class ContactPlanner:
             self._check_timing(rule)
             self._check_mode_floor(rule, template)
             self._check_template(template, rule["params"])
+            asks = rule["mode"] in ("crawl", "walk") or any(n.get("type") == "ask" for n in template.get("nodes") or [])
+            if asks and rule["anchor"] == "los" and rule["offset"] >= -rule["approval_margin"]:
+                raise PlannerError(
+                    f"Approvals close {rule['approval_margin']:g}s before LOS, which is before these activities "
+                    "would start: start earlier, lower the approval margin, or use run mode"
+                )
             rule["updated_at"] = self.clock()
             rule["updated_by"] = user_name(user)
             rule["last_error"] = None
@@ -1078,14 +1090,12 @@ class ContactPlanner:
                         activity["label"] = rule["name"]
                         self._save("activities", activity)
                 return {"rule": copy.deepcopy(rule), "removed": 0, "created": 0}
-            # Re-plan this rule and every lower-priority rule, highest priority first, so a higher-priority
-            # rule takes station capacity that lower ones had (their hand-edited activities stay)
-            priority = rule["priority"]
-            affected = [
-                r["id"] for r in self.rules.values() if r["id"] == rule["id"] or int(r.get("priority") or 0) < priority
-            ]
-            removed = sum(self._remove_rule_activities(rule_id) for rule_id in affected)
-            created = self._apply_rules(self.clock())
+            # Re-plan only this rule's own activities (it changed); other rules' activities stay, with their
+            # snapshots and ids. A higher-priority rule takes station capacity by pre-empting lower-priority
+            # rule activities in _apply_rules, one by one and audited. Imminent activities are never touched.
+            now = self.clock()
+            removed = self._remove_rule_activities(rule["id"], protect_after=now + PROTECT_SECONDS)
+            created = self._apply_rules(now)
             return {"rule": copy.deepcopy(rule), "removed": removed, "created": created}
 
     def delete_rule(self, rule_id):
@@ -1097,11 +1107,20 @@ class ContactPlanner:
             removed = self._remove_rule_activities(rule_id, keep_cancelled=False)
             return rule, removed
 
-    def _remove_rule_activities(self, rule_id, keep_cancelled=True):
-        """Delete a rule's activities that haven't started. Cancelled ones stay (unless asked) to block re-creation."""
+    def _remove_rule_activities(self, rule_id, keep_cancelled=True, protect_after=None):
+        """Delete a rule's activities that haven't started. Cancelled ones stay (unless asked) to block re-creation.
+
+        With ``protect_after``, activities starting before then are kept (they're about to run).
+        """
         removed = 0
         for activity in list(self.activities.values()):
             if activity.get("rule_id") != rule_id:
+                continue
+            if (
+                protect_after is not None
+                and activity["status"] == "scheduled"
+                and activity_start(activity) < protect_after
+            ):
                 continue
             if activity.get("detached") and activity["status"] in WAITING:
                 if not keep_cancelled:  # the rule is being deleted: the edited activity stays, as a manual one
@@ -1124,7 +1143,10 @@ class ContactPlanner:
         if contact["max_elevation"] < rule["min_elevation"] or contact["duration"] < rule["min_duration"]:
             return False
         start = contact[rule["anchor"]] + rule["offset"]
-        return now + RULE_LEAD_SECONDS < start < contact["los"]
+        if not now + RULE_LEAD_SECONDS < start < contact["los"]:
+            return False
+        # A rule whose activities ask the operator skips passes where approvals would close before the start
+        return not (rule.get("_asks") and start >= contact["los"] - rule["approval_margin"])
 
     def _apply_rules(self, now, only=None):
         """Create activities for every enabled rule's matching contacts that don't have one yet."""
@@ -1164,11 +1186,18 @@ class ContactPlanner:
                 rule["last_error"] = str(error)
                 continue
             rule["last_error"] = None
+            rule["_asks"] = rule["mode"] in ("crawl", "walk") or any(
+                n.get("type") == "ask" for n in template.get("nodes") or []
+            )
             skipped_full = 0
             for contact in self.contacts:
                 if already_taken(rule["id"], contact) or not self._rule_matches(rule, contact, now):
                     continue
-                if rule.get("skip_full_stations", True) and self._station_full(contact, used):
+                if (
+                    rule.get("skip_full_stations", True)
+                    and self._station_full(contact, used)
+                    and not self._preempt(rule, contact, used, now)
+                ):
                     skipped_full += 1
                     continue
                 activity = self._new_activity(self.engine.snapshot_flow(template["id"]), now, f"rule:{rule['name']}")
@@ -1184,9 +1213,68 @@ class ContactPlanner:
                 used[contact["id"]] = activity["contact"]
                 created += 1
             rule["skipped_full"] = skipped_full
+            rule.pop("_asks", None)
         if created:
             self.audit(SCHEDULER, "scheduled from rules", "activity", detail=f"{created} new activities")
         return created
+
+    def _preempt(self, rule, contact, used, now):
+        """Make room at a full station for a higher-priority rule by removing lower-priority rule activities.
+
+        Only activities a lower-priority rule created, not hand-edited, still scheduled and not starting within
+        PROTECT_SECONDS. Returns True if the station has room now.
+        """
+        priority = int(rule.get("priority") or 0)
+        station_id = contact["station_id"]
+        candidates = []
+        for activity in self.activities.values():
+            ref = activity["contact"]
+            other = self.rules.get(activity.get("rule_id")) if activity.get("rule_id") else None
+            if (
+                other is None
+                or ref["station_id"] != station_id
+                or not _overlap(ref, contact)
+                or activity["status"] != "scheduled"
+                or activity.get("detached")
+                or int(other.get("priority") or 0) >= priority
+                or activity_start(activity) < now + PROTECT_SECONDS
+            ):
+                continue
+            candidates.append((int(other.get("priority") or 0), activity_start(activity), activity))
+        if not candidates:
+            return False
+        trial = dict(used)
+        chosen = []
+        for _priority, _start, activity in sorted(candidates, key=lambda c: (c[0], -c[1])):
+            others_there = [
+                a
+                for a in self.activities.values()
+                if a is not activity
+                and a["contact"]["id"] == activity["contact"]["id"]
+                and a not in chosen
+                and (a["status"] in WAITING or a["status"] == "running")
+            ]
+            chosen.append(activity)
+            if not others_there:
+                trial.pop(activity["contact"]["id"], None)
+            if not self._station_full(contact, trial):
+                break
+        else:
+            return False
+        for activity in chosen:
+            del self.activities[activity["id"]]
+            self.store.delete_record("activities", activity["id"])
+            self.audit(
+                SCHEDULER,
+                "pre-empted",
+                "activity",
+                activity["id"],
+                activity["label"],
+                f"rule '{rule['name']}' (priority {priority}) needs {contact['station']} at that time",
+            )
+        used.clear()
+        used.update(trial)
+        return True
 
     def rule_json(self, rule):
         result = copy.deepcopy(rule)
@@ -1632,7 +1720,10 @@ def _split_continuous(passes, start, end):
             continue
         day = (start // CONTINUOUS_WINDOW) * CONTINUOUS_WINDOW
         while day < end:
-            aos, los = max(day, start), min(day + CONTINUOUS_WINDOW, end)
+            # Today's contact starts at 00:00 even when the window starts later in the day: the satellite was
+            # in view then too, and a contact that changed shape with every window roll would keep cancelling
+            # its own activities
+            aos, los = day, min(day + CONTINUOUS_WINDOW, end)
             if los > aos:
                 result.append(
                     {
@@ -1641,7 +1732,7 @@ def _split_continuous(passes, start, end):
                         "los": los,
                         "tca": (aos + los) / 2,
                         "duration": los - aos,
-                        "partial": aos > day or los < day + CONTINUOUS_WINDOW,
+                        "partial": los < day + CONTINUOUS_WINDOW,
                         "continuous": True,
                     }
                 )

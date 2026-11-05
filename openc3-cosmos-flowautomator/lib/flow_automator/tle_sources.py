@@ -25,8 +25,16 @@ Politeness (both services block clients that ask too often):
   never more often than ``min_hours`` (CelesTrak 2, Space-Track 1), even when
   someone presses Fetch now;
 * a failure of the whole source (network, login, refused) backs off from 10
-  minutes, doubling up to ``hours``;
+  minutes, doubling up to ``hours``. When a service refused (403, 429, rate
+  limit), Fetch now waits for the back-off too;
+* when each catalog number was fetched, and the back-off, are kept in Valkey,
+  so restarting the engine doesn't fetch everything again;
+* a request that fails part way through a batch keeps what was fetched
+  before it;
 * no redirects are followed, and responses are size-limited.
+
+A source that starts failing raises the ``tle_source_failing`` alert once,
+until it works again.
 
 To add a source: subclass ``TleSource``, implement ``fetch`` and register it
 in ``SOURCES``. The planner's TLE input thread calls ``TleFetcher.poll`` every
@@ -67,7 +75,16 @@ DEFAULT_SETTINGS = {
 
 
 class FetchError(Exception):
-    """The whole source failed (network, login, refused): back off and try again later."""
+    """The whole source failed (network, login, refused): back off and try again later.
+
+    ``refused``: the service itself refused (a ban or rate limit), so not even Fetch now may retry early.
+    ``partial``: (texts, reasons) fetched before the failure, which still count.
+    """
+
+    def __init__(self, message, refused=False, partial=None):
+        super().__init__(message)
+        self.refused = refused
+        self.partial = partial
 
 
 class TleSourceError(Exception):
@@ -163,19 +180,24 @@ class CelestrakSource(TleSource):
         base = settings["url"].rstrip("/")
         _check_https_host(base, "CelesTrak")
         for catalog in catalogs:
-            response = _get(
-                session,
-                f"{base}/NORAD/elements/gp.php",
-                "CelesTrak",
-                params={"CATNR": str(catalog_number(catalog)), "FORMAT": "TLE"},
-            )
-            if response.status_code == 403:
+            try:
+                response = _get(
+                    session,
+                    f"{base}/NORAD/elements/gp.php",
+                    "CelesTrak",
+                    params={"CATNR": str(catalog_number(catalog)), "FORMAT": "TLE"},
+                )
+            except FetchError as error:
+                raise FetchError(str(error), partial=(texts, reasons)) from None
+            if response.status_code in (403, 429):
                 raise FetchError(
-                    "CelesTrak refused the request (403). It blocks clients that fetch the same data too often; "
-                    "the engine waits before trying again"
+                    f"CelesTrak refused the request ({response.status_code}). It blocks clients that fetch the same "
+                    "data too often; the engine waits before trying again",
+                    refused=True,
+                    partial=(texts, reasons),
                 )
             if response.status_code != 200:
-                raise FetchError(f"CelesTrak answered {response.status_code}")
+                raise FetchError(f"CelesTrak answered {response.status_code}", partial=(texts, reasons))
             found = _by_catalog(response.text, {catalog})
             if catalog in found:
                 texts[catalog] = found[catalog]
@@ -217,7 +239,10 @@ class SpacetrackSource(TleSource):
         except requests.RequestException as error:
             raise FetchError(f"Couldn't reach Space-Track: {type(error).__name__}") from None
         if login.status_code != 200 or "failed" in (login.text or "").lower():
-            raise FetchError(f"Space-Track login failed ({login.status_code}): check the COSMOS secrets")
+            raise FetchError(
+                f"Space-Track login failed ({login.status_code}): check the COSMOS secrets",
+                refused=login.status_code in (401, 403, 429),
+            )
         texts, reasons = {}, {}
         try:
             ordered = sorted(catalogs)
@@ -225,11 +250,22 @@ class SpacetrackSource(TleSource):
                 batch = ordered[start : start + SPACETRACK_BATCH]
                 numbers = ",".join(str(catalog_number(c)) for c in batch)
                 url = f"{base}/basicspacedata/query/class/gp/NORAD_CAT_ID/{numbers}/orderby/NORAD_CAT_ID/format/3le"
-                response = _get(session, url, "Space-Track")
+                try:
+                    response = _get(session, url, "Space-Track")
+                except FetchError as error:
+                    raise FetchError(str(error), partial=(texts, reasons)) from None
                 if response.status_code == 429 or "rate limit" in (response.text or "").lower():
-                    raise FetchError("Space-Track says the query rate limit was exceeded; the engine waits")
+                    raise FetchError(
+                        "Space-Track says the query rate limit was exceeded; the engine waits",
+                        refused=True,
+                        partial=(texts, reasons),
+                    )
                 if response.status_code != 200:
-                    raise FetchError(f"Space-Track answered {response.status_code}")
+                    raise FetchError(
+                        f"Space-Track answered {response.status_code}",
+                        refused=response.status_code in (401, 403),
+                        partial=(texts, reasons),
+                    )
                 texts.update(_by_catalog(response.text, set(batch)))
         finally:
             with contextlib.suppress(Exception):  # logging out is a courtesy
@@ -266,7 +302,9 @@ class TleFetcher:
     # ---- settings ----------------------------------------------------------------
 
     def load(self):
-        saved = self.planner.store.records("planner_settings").get("tle_sources") or {}
+        records = self.planner.store.records("planner_settings")
+        self._load_state(records.get("tle_fetch_state") or {})
+        saved = records.get("tle_sources") or {}
         for kind, defaults in DEFAULT_SETTINGS.items():
             self.settings[kind] = {**defaults, **(saved.get(kind) or {})}
         # Whatever was stored (an older version, a restored backup): Space-Track's address is the fixed one,
@@ -276,6 +314,37 @@ class TleFetcher:
         for key in ("username_secret", "password_secret"):
             if not str(spacetrack.get(key) or "").startswith(SECRET_PREFIX):
                 spacetrack[key] = DEFAULT_SETTINGS["spacetrack"][key]
+
+    def _load_state(self, state):
+        """When each catalog number was fetched, and each source's back-off, as saved before a restart."""
+        for key, when in (state.get("fetched") or {}).items():
+            kind, _, catalog = str(key).partition(":")
+            if kind in DEFAULT_SETTINGS and catalog and isinstance(when, (int, float)):
+                self.fetched[(kind, catalog)] = float(when)
+        for kind, saved in (state.get("sources") or {}).items():
+            if kind in DEFAULT_SETTINGS and isinstance(saved, dict):
+                for key in ("retry_at", "refused", "error", "last_attempt", "last_fetch"):
+                    if saved.get(key) is not None:
+                        self.status[kind][key] = saved[key]
+                if isinstance(saved.get("backoff"), (int, float)):
+                    self.backoff[kind] = float(saved["backoff"])
+
+    def _save_state(self):
+        state = {
+            "fetched": {f"{kind}:{catalog}": when for (kind, catalog), when in self.fetched.items()},
+            "sources": {
+                kind: {
+                    **{
+                        k: self.status[kind].get(k)
+                        for k in ("retry_at", "refused", "error", "last_attempt", "last_fetch")
+                    },
+                    "backoff": self.backoff.get(kind),
+                }
+                for kind in DEFAULT_SETTINGS
+            },
+        }
+        # Deferred: polite fetching must survive a restart, but a Valkey hiccup mustn't stop fetching
+        self.planner.store.save_record("planner_settings", "tle_fetch_state", state, defer=True)
 
     def settings_json(self):
         result = copy.deepcopy(self.settings)
@@ -364,7 +433,17 @@ class TleFetcher:
         result = {}
         for name in kinds:
             self.forced.add(name)
-            self.status[name].pop("retry_at", None)
+            status = self.status[name]
+            if status.get("refused") and status.get("retry_at") and now < status["retry_at"]:
+                # The service refused us: asking again early is what gets a client banned
+                result[name] = {
+                    "catalogs": len(self._wanted(name)),
+                    "now": 0,
+                    "waiting_until": {},
+                    "refused_until": status["retry_at"],
+                }
+                continue
+            status.pop("retry_at", None)
             self.backoff.pop(name, None)
             catalogs = self._wanted(name)
             waiting = {
@@ -414,21 +493,43 @@ class TleFetcher:
     def _fetch(self, kind, source, settings, due, wanted, backend, now):
         status = self.status[kind]
         session = self.session_factory()
+        failure = None
         try:
             texts, reasons = source.fetch(due, settings, backend, session)
         except FetchError as error:
-            delay = min(self.backoff.get(kind, FIRST_BACKOFF_SECONDS / 2) * 2, settings["hours"] * 3600)
-            self.backoff[kind] = delay
-            status.update(error=str(error), retry_at=now + delay, last_attempt=now)
-            self.planner.engine.log("warn", f"TLE fetch from {source.label} failed: {error}")
-            return
+            failure = error
+            texts, reasons = error.partial or ({}, {})
         finally:
             close = getattr(session, "close", None)
             if close:
                 close()
+        if failure is not None:
+            # What arrived before the failure still counts (and isn't asked for again before its time)
+            done = [c for c in due if c in texts or c in reasons]
+            self._record(kind, done, texts, reasons, wanted, now)
+            delay = min(self.backoff.get(kind, FIRST_BACKOFF_SECONDS / 2) * 2, settings["hours"] * 3600)
+            self.backoff[kind] = delay
+            first = not status.get("error")
+            status.update(error=str(failure), refused=failure.refused, retry_at=now + delay, last_attempt=now)
+            self.planner.engine.log("warn", f"TLE fetch from {source.label} failed: {failure}")
+            if first:
+                self.planner.alert(
+                    "tle_source_failing",
+                    f"Can't fetch TLEs from {source.label}",
+                    f"{failure}. Trying again in {delay / 60:.0f} minutes; satellites keep their current TLEs.",
+                    key=f"tle_source_failing:{kind}:{now}",
+                )
+            self._save_state()
+            return
         self.backoff.pop(kind, None)
+        counts = self._record(kind, due, texts, reasons, wanted, now)
+        status.update(error=None, refused=False, retry_at=None, last_fetch=now, last_attempt=now, counts=counts)
+        self._save_state()
+
+    def _record(self, kind, catalogs, texts, reasons, wanted, now):
+        """Ingest what was fetched for these catalog numbers and note when each was fetched."""
         counts = {}
-        for catalog in due:
+        for catalog in catalogs:
             self.fetched[(kind, catalog)] = now
             for sat_id in wanted[catalog]:
                 if catalog in texts:
@@ -441,4 +542,4 @@ class TleFetcher:
                     entry = {"result": "missing", "reason": reasons.get(catalog, "No TLE in the answer")}
                 self.sat_status[sat_id] = {"source": kind, "time": now, **entry}
                 counts[entry["result"]] = counts.get(entry["result"], 0) + 1
-        status.update(error=None, retry_at=None, last_fetch=now, last_attempt=now, counts=counts)
+        return counts

@@ -297,3 +297,62 @@ def test_alpha5_catalogs_are_queried_by_number():
     assert catalog_number("A0001") == 100001
     assert catalog_number("Z9999") == 339999
     assert catalog_number("05544") == 5544
+
+
+# B17 (C-10, R-12, DOC-9): rate limits that didn't survive restarts, refusals or a failure mid-batch
+def test_rate_limit_survives_restart(engine, service):
+    from flow_automator.tle_sources import TleFetcher
+
+    planner = engine.planner
+    add_sat(planner, "celestrak")
+    planner.fetcher.poll(EPOCH)
+    assert len(service.calls) == 1
+    restarted = TleFetcher(planner, session_factory=service)
+    restarted.load()
+    restarted.poll(EPOCH + 60)
+    assert len(service.calls) == 1  # still fetched an hour ago as far as the new engine knows
+
+
+def test_fetch_now_waits_out_a_refusal(engine, service):
+    planner = engine.planner
+    add_sat(planner, "celestrak")
+    service.celestrak_status = 403
+    planner.fetcher.poll(EPOCH)
+    assert len(service.calls) == 1 and planner.fetcher.status["celestrak"]["refused"] is True
+    for _ in range(5):
+        result = planner.fetcher.fetch_now("celestrak")
+        planner.fetcher.poll(EPOCH + 60)
+    assert len(service.calls) == 1
+    assert result["celestrak"]["refused_until"] > EPOCH + 60
+
+
+def test_a_failure_part_way_keeps_what_was_fetched(engine, service):
+    planner = engine.planner
+    service.celestrak["43013"] = f"OTHER\n{OTHER_1}\n{OTHER_2}\n"
+    add_sat(planner, "celestrak")
+    add_sat(planner, "celestrak", catalog="43013", name="OTHER")
+    real_get = service.get
+
+    def get(url, params=None, **kwargs):
+        if params and params.get("CATNR") == "43013":
+            raise requests.ConnectionError("reset")
+        return real_get(url, params, **kwargs)
+
+    import requests
+
+    service.get = get
+    planner.fetcher.poll(EPOCH)
+    fetched = planner.fetcher.fetched
+    assert ("celestrak", "25544") in fetched and ("celestrak", "43013") not in fetched
+    assert planner.fetcher.status["celestrak"]["error"]
+
+
+def test_a_failing_source_alerts_once(engine, service):
+    sent = []
+    engine.alerts.emit = lambda event, *a, **k: sent.append(event)
+    planner = engine.planner
+    add_sat(planner, "celestrak")
+    service.celestrak_status = 500
+    planner.fetcher.poll(EPOCH)
+    planner.fetcher.poll(EPOCH + 3600)
+    assert sent.count("tle_source_failing") == 1

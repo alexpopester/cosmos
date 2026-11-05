@@ -299,11 +299,27 @@ scheduled nothing. Re-planning on every save threw away operators' edits. A
 routine TLE update changed contact ids and brought cancelled passes back
 (CON-1, CON-6, CON-17).
 
+*Amended 2026-11-05 (1.12.0):* re-planning everything below a saved rule
+deleted imminent activities and re-snapshotted others (C-8, R-17). Priority
+also inverted whenever passes were predicted one satellite at a time
+(C-2). Now:
+
+- saving a rule re-plans only that rule's own activities;
+- a higher-priority rule *pre-empts* lower-priority rule activities one at a
+  time when a station is full, wherever it is applied;
+- pre-emption never touches detached activities or anything starting within
+  10 minutes (`PROTECT_SECONDS`), and each one is audited.
+
 ## D24. A satellite that never sets gets one contact per UTC day
 
 If a pass covers the whole prediction window, it's split into UTC days
 (`continuous: true`, AOS 00:00, LOS 24:00). Days cut by the window's edges
 stay partial. Partial contacts can't be scheduled.
+
+*Amended 2026-11-05 (1.12.0):* today's contact starts at 00:00 even when the
+prediction window starts later in the day. Before, it changed shape with every
+window roll, so it was partial and its activities were cancelled (R-4).
+Counting a day contact as 24 h of antenna use is still open (B20).
 
 *Why:* a single window-long partial contact could never be scheduled, so GEO
 satellites couldn't be used at all (CON-5). Daily windows let activities
