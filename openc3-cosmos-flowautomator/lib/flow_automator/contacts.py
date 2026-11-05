@@ -758,8 +758,21 @@ class ContactPlanner:
         if record["mode"] not in MODES:
             raise PlannerError(f"Mode must be one of {', '.join(MODES)}")
 
+    @staticmethod
+    def _check_mode_floor(record, template):
+        """An activity or rule can't run its flow less cautiously than the flow's own mode (D6)."""
+        from .graph import MODES
+
+        floor = template.get("mode") if template.get("mode") in MODES else "run"
+        if MODES.index(record["mode"]) > MODES.index(floor):
+            raise PlannerError(
+                f"'{template.get('name')}' is a {floor} flow: schedule it in {floor} or a more cautious mode, "
+                f"not {record['mode']}. Change the flow's mode to run it with fewer approvals."
+            )
+
     def _check_activity(self, activity, template, now, require_future=True):
         self._check_timing(activity)
+        self._check_mode_floor(activity, template)
         start = activity_start(activity)
         if start >= activity["contact"]["los"]:
             raise PlannerError("The activity would start after LOS")
@@ -998,6 +1011,7 @@ class ContactPlanner:
             self._apply_fields(rule, payload, None, template)
             rule.pop("label", None)  # its activities are labelled with the rule's name
             self._check_timing(rule)
+            self._check_mode_floor(rule, template)
             self._check_template(template, rule["params"])
             rule["updated_at"] = self.clock()
             rule["updated_by"] = user_name(user)

@@ -135,7 +135,9 @@ def test_engine_answers_while_valkey_hangs(fengine, flaky):
 
 
 # R-2: STOP ALL while an approved step re-renders used to still send the command
-def test_stop_all_during_approved_step_sends_nothing(engine, backend):
+def test_stop_all_during_approved_step_sends_nothing(engine, backend, monkeypatch):
+    from flow_automator.runner import FlowRun
+
     backend.values["INST HEALTH_STATUS MODE"] = "FIRE"
     flow = make_flow(
         [
@@ -145,20 +147,19 @@ def test_stop_all_during_approved_step_sends_nothing(engine, backend):
         [edge("t", "c")],
         mode="walk",
     )
+    real = FlowRun._wait_for_approval
+
+    def approved_then_stop_all(self, *args, **kwargs):
+        result = real(self, *args, **kwargs)
+        engine.stop_all("bob")  # lands just after the approval, before the command goes out
+        return result
+
+    monkeypatch.setattr(FlowRun, "_wait_for_approval", approved_then_stop_all)
     saved, _ = engine.save_flow(flow)
     run_id = engine.trigger(saved["id"], manual=True)["run"]["id"]
     assert wait_until(lambda: engine.runs[run_id].pending_approvals())
     approval = engine.runs[run_id].pending_approvals()[0]
-    real = backend.tlm
-
-    def slow(item, value_type="CONVERTED"):
-        time.sleep(0.3)  # a COSMOS API round trip under load
-        return real(item, value_type)
-
-    backend.tlm = slow
     engine.approve(run_id, approval["id"], "go", "alice")
-    time.sleep(0.1)
-    engine.stop_all("bob")
     assert wait_until(lambda: run_id not in engine.runs)
     assert backend.commands == []
     assert engine.get_run(run_id)["status"] == "stopped"

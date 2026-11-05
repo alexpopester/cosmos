@@ -20,8 +20,18 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Safety fixes from the second evaluation (`docs/EVALUATION-2026-11-05.md`,
-backlog B1, B2, B3, B12).
+Fixes from the second evaluation (`docs/EVALUATION-2026-11-05.md`, backlog
+B1–B7 and B12; owner's answers to Q1–Q4; D6 and D28 amended).
+
+### Changed
+- **The approved command is sent exactly as approved.** It used to be
+  rendered again and refused if it differed, so a command using `now()` or
+  changing telemetry could never be sent after approval.
+- **In crawl and walk, *Allow hazardous* no longer skips the approval.** Only
+  an operator acknowledges a hazardous command; the flag counts in run mode.
+- **If COSMOS refuses a command as hazardous that the plugin's check passed,**
+  crawl and walk ask for approval then, showing the exact command. The check
+  now also sees parameter defaults and state names in any case.
 
 ### Fixed
 - **Loops in parallel branches no longer reset each other.** Two branches each
@@ -56,13 +66,32 @@ backlog B1, B2, B3, B12).
   before its active-run record is cleared, so a crash can't lose it.
 - Startup stops interrupted runs' scripts all at once instead of one at a
   time.
+- **Scheduled activities and rules can no longer run a flow below its mode.**
+  A crawl template scheduled in run mode used to run with no approvals. The
+  planner refuses it, and every real run is held to its flow's mode (B5).
+- **An operator is never asked to approve a command that can't be shown.**
+  The step fails instead; it used to approve the node's label and send
+  whatever rendered later (B6).
+- **A failed hazard lookup counts as hazardous**, not safe (B6).
+- **More saves now disarm an armed flow:** turning dry run off, adding a node
+  that acts, and changing what a node with *Allow hazardous* or *Allow raw
+  values* sends or runs. Relaxing a sub-flow disarms the armed flows that call
+  it (B4).
 
 ### Security
 - A node's environment can no longer set `FLOW_RESULT_KEY`, which let a flow
   read and delete any stash key (S-14).
+- **A flow can no longer carry hidden sub-flow content.** `subflow_snapshots`
+  is stripped from saved, imported and restored flows; only the planner's
+  activity snapshots pin sub-flows (B7).
+- Version history restored from a backup is marked `from_backup` with who
+  restored it, since its authors come from an editable file (S-5).
+- Approvals carry a `hazardous` flag; the tool uses it instead of matching
+  text in the reason (U-20).
 
 ### Docs
-- README: Parallel/Join rule, Stop all during outages; D28 amended.
+- README: Parallel/Join rule, Stop all during outages, modes and approvals, what
+  disarms a flow; D6 and D28 amended; *Allow hazardous* hint corrected (DOC-6).
 
 ## [1.11.0] - 2026-11-04
 

@@ -66,13 +66,14 @@ class CosmosBackend:
         if packet.get("hazardous") is not None:
             return True
         for item in packet["items"]:
-            if item["name"] not in params or not item.get("states"):
+            if not item.get("states"):
                 continue
-            value = params[item["name"]]
+            # A parameter left out takes its default, which may itself be a hazardous state (as in cmd())
+            value = params[item["name"]] if item["name"] in params else item.get("default")
             if isinstance(value, str):
-                value = value.replace('"', "").replace("'", "")
+                value = value.replace('"', "").replace("'", "").upper()
             for state_name, state in item["states"].items():
-                if state.get("hazardous") is not None and value in (state_name, state.get("value")):
+                if state.get("hazardous") is not None and value in (state_name.upper(), state.get("value")):
                     return True
         return False
 
@@ -164,12 +165,15 @@ class CosmosBackend:
         from openc3.api.cmd_api import cmd, cmd_no_hazardous_check
         from openc3.top_level import HazardousError
 
+        from .runner import HazardousCommandError
+
         try:
             cmd(command, scope=self.scope)
         except HazardousError as error:
             if not allow_hazardous:
-                raise RuntimeError(
-                    f"Hazardous command blocked: {command}. Turn on 'Allow hazardous' on this node to send it."
+                raise HazardousCommandError(
+                    f"Hazardous command blocked: {command}. In run mode, turn on 'Allow hazardous' on this node "
+                    "to send it; in crawl and walk an operator approves it."
                 ) from error
             self.logger.warn(f"Flow Automator sending hazardous command: {command}")
             cmd_no_hazardous_check(command, scope=self.scope)

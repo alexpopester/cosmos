@@ -45,17 +45,12 @@
       v-show="!minimized"
       :key="a.id"
       class="fa-approval mb-2"
-      :class="{ 'fa-approval-hazardous': a.reason.includes('HAZARDOUS') }"
+      :class="{ 'fa-approval-hazardous': hazardous(a) }"
       elevation="8"
     >
       <div class="d-flex align-center px-3 pt-2">
-        <v-icon
-          class="mr-2"
-          :color="a.reason.includes('HAZARDOUS') ? 'error' : 'warning'"
-        >
-          {{
-            a.reason.includes('HAZARDOUS') ? 'mdi-alert' : 'mdi-hand-back-right'
-          }}
+        <v-icon class="mr-2" :color="hazardous(a) ? 'error' : 'warning'">
+          {{ hazardous(a) ? 'mdi-alert' : 'mdi-hand-back-right' }}
         </v-icon>
         <span class="text-subtitle-2">
           {{ a.ask ? 'Question' : 'Waiting for approval' }}:
@@ -270,7 +265,8 @@ export default {
   },
   methods: {
     hazardous(approval) {
-      return approval.reason.includes('HAZARDOUS')
+      // The engine flags it; older engines only said so in the reason text
+      return approval.hazardous ?? approval.reason.includes('HAZARDOUS')
     },
     go(approval, decision) {
       if (this.fresh.includes(approval.id)) return

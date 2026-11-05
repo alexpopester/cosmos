@@ -39,6 +39,10 @@ class RunEndedError(Exception):
     """An End node finished the run successfully."""
 
 
+class HazardousCommandError(RuntimeError):
+    """COSMOS refused a command as hazardous (backends raise this when it wasn't acknowledged)."""
+
+
 class InputTimeoutError(Exception):
     """Nobody answered an Ask operator node in time."""
 
@@ -70,12 +74,18 @@ class FlowRun:
         trigger_info=None,
         dry_run=False,
         skip_waits=False,
+        pinned_subflows=None,
     ):
         self.engine = engine
         self.flow = copy.deepcopy(flow)
-        # Sub-flows pinned by a scheduled activity's snapshot (None: sub-flows run their current version)
-        snapshots = self.flow.pop("subflow_snapshots", None)
-        self.pinned_subflows = snapshots if snapshots is not None else (parent.pinned_subflows if parent else None)
+        # Sub-flows pinned by a scheduled activity's snapshot (None: sub-flows run their current version).
+        # Only the planner passes them in: a snapshot carried inside a flow's own JSON is never trusted, or a
+        # saved flow could run hidden sub-flow content.
+        self.flow.pop("subflow_snapshots", None)
+        if pinned_subflows is not None:
+            self.pinned_subflows = copy.deepcopy(pinned_subflows)
+        else:
+            self.pinned_subflows = parent.pinned_subflows if parent else None
         self.graph = Graph(self.flow)
         self.id = uuid.uuid4().hex[:12]
         self.trigger_node_id = trigger_node_id
@@ -114,9 +124,14 @@ class FlowRun:
         # the loops' bookkeeping), so loops in sibling branches can't reset each other
         self._loops = _LoopState()
         self._step_lock = threading.Lock()
-        # Execution mode: an explicit override for this run, else the flow's own.
+        # Execution mode: an explicit override for this run, else the flow's own. The flow's mode is a floor
+        # for every real run, whatever started it (triggers, activities, rules, sub-flows): only a dry run,
+        # which sends nothing, may use a less cautious mode.
         # A sub-flow runs at least as cautiously as the run that called it.
-        self.mode = mode if mode in MODES else self.flow.get("mode", "run")
+        flow_mode = self.flow.get("mode") if self.flow.get("mode") in MODES else "run"
+        self.mode = mode if mode in MODES else flow_mode
+        if not self.dry_run:
+            self.mode = strictest_mode(self.mode, flow_mode)
         if parent is not None:
             self.mode = strictest_mode(self.mode, parent.mode)
         self.approval_timeout = float(self.flow.get("approval_timeout") or 0)
@@ -341,13 +356,17 @@ class FlowRun:
         data = node.get("data") or {}
         hazardous = False
         preview = ""
+        render_error = None
         if node["type"] == "send_cmd":
-            # Rendering or the hazard lookup may fail; the executor reports that
             try:
                 preview = render_command(self, data.get("command"), bool(data.get("allow_raw_values")))
-                hazardous = self.mode != "run" and bool(self.engine.backend.cmd_hazardous(preview))
-            except Exception:  # noqa: BLE001
-                hazardous = False
+            except Exception as error:  # noqa: BLE001 - reported below if someone must approve it
+                render_error = error
+            if preview and self.mode != "run":
+                try:
+                    hazardous = bool(self.engine.backend.cmd_hazardous(preview))
+                except Exception:  # noqa: BLE001 - can't tell: treat it as hazardous, never as safe
+                    hazardous = True
         reasons = []
         if self.auto_approve:
             pass
@@ -359,11 +378,14 @@ class FlowRun:
             reasons.append("HAZARDOUS command")
         if not reasons:
             return
+        if render_error is not None:
+            # Never ask an operator to approve a command they can't see (it would be sent unseen)
+            raise RuntimeError(f"Couldn't work out the command to show for approval: {render_error}")
         decision, _approval = self._wait_for_approval(
-            node, step, "; ".join(reasons), preview or _preview(self, node, data)
+            node, step, "; ".join(reasons), preview or _preview(self, node, data), hazardous=hazardous
         )
         if preview:
-            # The operator approved this exact command; the executor refuses to send anything else
+            # The operator approved this exact command: the executor sends exactly it (D6)
             step["approved_command"] = preview
         if hazardous:
             # The operator's approval is the hazardous acknowledgement (for the approved command only)
@@ -372,9 +394,10 @@ class FlowRun:
             self.auto_approve = True
             self.log("info", "operator chose to run the rest (hazardous commands still ask)")
 
-    def _wait_for_approval(self, node, step, reason, preview, ask=None, timeout=0):
+    def _wait_for_approval(self, node, step, reason, preview, ask=None, timeout=0, hazardous=False):
         """Wait for an operator. Returns (decision, approval). ``ask`` asks for a value (approval["value"])."""
         approval = {
+            "hazardous": bool(hazardous),
             "id": uuid.uuid4().hex[:8],
             "run_id": self.id,
             "flow_id": self.flow.get("id"),
@@ -895,11 +918,13 @@ def render_command(run, template, allow_raw=False):
 
 
 def exec_send_cmd(run, node, data, step):
-    command = render_command(run, data.get("command"), bool(data.get("allow_raw_values")))
+    # An approved command is sent exactly as the operator saw it, never rendered again (D6)
     approved = step.get("approved_command")
-    if approved is not None and command != approved:
-        # A value changed while the operator was deciding: don't send something they didn't see
-        raise RuntimeError(f"Command changed after it was approved (approved {approved!r}, now {command!r}); not sent")
+    command = (
+        approved
+        if approved is not None
+        else render_command(run, data.get("command"), bool(data.get("allow_raw_values")))
+    )
     step["message"] = command
     if run.dry_run:
         problems = run.engine.backend.check_cmd(command)
@@ -909,10 +934,28 @@ def exec_send_cmd(run, node, data, step):
         step["dry_run"] = True
         run.variables["last_command"] = command
         return "out"
-    allow = bool(data.get("allow_hazardous")) or bool(step.get("approved_hazardous"))
+    if run.mode == "run":
+        allow = bool(data.get("allow_hazardous"))
+    else:
+        # Crawl and walk: only an operator's approval acknowledges a hazardous command, never the node's flag
+        allow = bool(step.get("approved_hazardous"))
     if run.cancelled():
         raise RunStoppedError()  # rendering read telemetry: STOP ALL may have come in meanwhile
-    run.engine.backend.send_cmd(command, allow_hazardous=allow)
+    try:
+        run.engine.backend.send_cmd(command, allow_hazardous=allow)
+    except HazardousCommandError:
+        if run.mode == "run" or allow:
+            raise
+        # COSMOS says it's hazardous though the check before approval didn't (defaults, case): ask now, with
+        # exactly what goes out. "Go & run the rest" doesn't cover this.
+        run._wait_for_approval(
+            node, step, "HAZARDOUS command (COSMOS refused it unacknowledged)", command, hazardous=True
+        )
+        step["approved_command"] = command
+        step["approved_hazardous"] = True
+        if run.cancelled():
+            raise RunStoppedError() from None
+        run.engine.backend.send_cmd(command, allow_hazardous=True)
     run.variables["last_command"] = command
     return "out"
 

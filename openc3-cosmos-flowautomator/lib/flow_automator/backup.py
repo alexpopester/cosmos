@@ -211,11 +211,13 @@ def _restore_flow(engine, flow, versions, found, user, result):
                 # Bring its history along (oldest first, so the newest ends up on top)
                 for entry in reversed([v for v in versions if isinstance(v, dict)][: engine.versions.limit]):
                     try:
-                        engine.store.add_version(
-                            flow_id,
-                            upgrade("version", entry, found if "format" not in entry else None),
-                            engine.versions.limit,
-                        )
+                        entry = upgrade("version", entry, found if "format" not in entry else None)
+                        # Who saved it comes from a file anyone could have edited: keep it, but say so
+                        entry["restored_by"] = user_name(user)
+                        entry["from_backup"] = True
+                        if isinstance(entry.get("flow"), dict):
+                            entry["flow"].pop("subflow_snapshots", None)
+                        engine.store.add_version(flow_id, entry, engine.versions.limit)
                     except NewerFormatError:
                         continue
             saved, _problems = engine._recreate(flow_id, body, user, note, None)

@@ -367,7 +367,7 @@ export const NODE_TYPES = {
         label: 'Allow hazardous',
         type: 'boolean',
         default: false,
-        hint: 'Hazardous commands are blocked unless this is on',
+        hint: 'Run mode: a hazardous command fails unless this is on. Crawl and walk ignore it: an operator approves every hazardous command. Turning it on disarms an armed flow.',
       },
       {
         key: 'allow_raw_values',

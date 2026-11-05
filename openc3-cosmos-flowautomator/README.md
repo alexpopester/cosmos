@@ -143,9 +143,13 @@ New and imported flows start **disarmed**. Saving keeps a flow armed,
 except in two cases, which disarm it:
 
 - the saved version has problems;
-- the save relaxes its safety settings: a less cautious mode, or *Allow
-  hazardous* or *Allow raw values* turned on. Arm it again to accept the
-  change, so a relaxed flow never fires unreviewed.
+- the save relaxes its safety settings: a less cautious mode; dry run
+  turned off; *Allow hazardous* or *Allow raw values* turned on; a new Send
+  command, Run script, Set telemetry or Sub-flow node; or a different
+  command, script, item or sub-flow on a node that has *Allow hazardous* or
+  *Allow raw values*. Arm it again to accept the change, so a relaxed flow
+  never fires unreviewed. Relaxing a sub-flow this way disarms every armed
+  flow that calls it.
 
 Arm a flow to let its triggers fire; **Run now** works either way. With unsaved
 edits, Run now and Arm ask first. You can save them as a new version, use the
@@ -202,6 +206,10 @@ dialog stays open with **Retry**.
 | Walk | Before hazardous commands and steps marked *Ask operator first* |
 | Run | Never. A hazardous command fails unless its node has *Allow hazardous* |
 
+In crawl and walk, *Allow hazardous* on a node makes no difference: a
+hazardous command always waits for an operator. If COSMOS refuses a command
+as hazardous that the check before it missed, the run asks then.
+
 Approvals show on the canvas and in the toolbar. The choices are:
 
 - **Go**;
@@ -212,16 +220,21 @@ Approvals show on the canvas and in the toolbar. The choices are:
 A hazardous command's button is red, **Send hazardous…**. It asks once more,
 showing exactly the command that goes out.
 
-What you approve is what is sent. If a value in the command changes while
-the approval waits, the step fails instead of sending something else.
+What you approve is what is sent, exactly. The command isn't worked out
+again after you approve it, so a value that changes while the approval waits
+doesn't change it. If the command can't be worked out to show you (say, a
+telemetry read fails), the step fails instead of asking.
 
 A card that has just appeared ignores clicks for a moment. That way a quick
 second click meant for the previous card can't approve the next step.
 
 A flow's *Approval timeout* fails the step if nobody answers.
 
-A flow's mode is the least cautious a real run can use. **Run…** can pick a
-more cautious mode, or any mode for a dry run, which sends nothing. To run
+A flow's mode is the least cautious a real run can use, however it starts:
+Run now, a trigger, a scheduled activity, a rule or a sub-flow call. A run
+can pick a more cautious mode, or any mode for a dry run, which sends
+nothing. Scheduling an activity or rule in a less cautious mode than its
+flow is refused. To run
 with fewer approvals, change the flow's mode: that is a saved, versioned
 change. A sub-flow runs at least as cautiously as the run that called it.
 

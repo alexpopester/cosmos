@@ -85,6 +85,33 @@ in a server-side, always-on engine that sends commands is unacceptable.
   hazardous*; in crawl/walk the operator's approval is the acknowledgement.
 - Re-trigger policy defaults to *skip*.
 
+*Amended 2026-11-05 (1.12.0, owner's answers Q1–Q4 in EVALUATION-2026-11-05):*
+
+- **The mode floor applies to every real run.** That includes scheduled
+  activities, rules and sub-flows, not only Run now and triggers. It is
+  enforced in `FlowRun` itself, and the planner refuses an activity or rule
+  in a less cautious mode than its flow.
+- **The approved command is sent verbatim.** It is never rendered again, so
+  a command using `now()` or changing telemetry works. It used to be
+  re-rendered and refused if it differed. If the command can't be rendered
+  to show, the step fails rather than ask the operator to approve something
+  they can't see.
+- **In crawl and walk, only an operator's approval acknowledges a hazardous
+  command.** The node's *Allow hazardous* flag counts in run mode only. If
+  the hazard lookup fails, the command is treated as hazardous.
+- **COSMOS has the last word on hazards.** If `cmd()` refuses a command
+  that the plugin's check passed (a hazardous default, a state name in
+  another case), crawl and walk ask then, showing the exact command. "Go &
+  run rest" doesn't cover it.
+- **More saves disarm an armed flow:** turning dry run off; adding a node that
+  acts (Send command, Run script, Set telemetry, Sub-flow); changing the
+  command, script, item or sub-flow of a node that has *Allow hazardous* or
+  *Allow raw values*; changing which flow a Sub-flow node calls. Relaxing a
+  sub-flow disarms every armed flow that calls it, at any depth.
+- **`subflow_snapshots` comes only from the planner.** It is stripped from
+  saved, imported and restored flows. A run ignores one inside a flow's
+  JSON, so a flow can't carry hidden sub-flow content.
+
 *Why:* agreed with the owner up front as v1 scope.
 *Deliberate choice:* "Go & run rest" still asks for hazardous commands. The
 owner was told; making it skip everything is a one-line change in

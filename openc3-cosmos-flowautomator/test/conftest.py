@@ -9,6 +9,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 from flow_automator.engine import FlowEngine  # noqa: E402
+from flow_automator.runner import HazardousCommandError  # noqa: E402
 from flow_automator.store import FlowStore, MemoryRedis  # noqa: E402
 
 
@@ -21,6 +22,8 @@ class FakeBackend:
         self.counts = {}  # (TGT, PKT) -> received count
         self.commands = []
         self.hazardous = set()  # command names that are hazardous
+        # Hazardous to COSMOS's cmd() but missed by cmd_hazardous (a hazardous default, a lowercase state)
+        self.cosmos_only_hazardous = set()
         self.fail_commands = set()
         self.scripts = {}  # id -> list of states to report, last one sticks
         self.started_scripts = []
@@ -79,8 +82,8 @@ class FakeBackend:
         name = command.split()[1] if len(command.split()) > 1 else command
         if name in self.fail_commands:
             raise RuntimeError(f"Command {name} failed")
-        if name in self.hazardous and not allow_hazardous:
-            raise RuntimeError(f"Hazardous command blocked: {command}")
+        if name in (self.hazardous | self.cosmos_only_hazardous) and not allow_hazardous:
+            raise HazardousCommandError(f"Hazardous command blocked: {command}")
         with self.lock:
             self.commands.append(command)
 

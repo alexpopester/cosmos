@@ -21,8 +21,9 @@ def _approve_first(engine, run_id, before_go=None):
     return approval, engine.get_run(run_id)
 
 
-# ENG-1 / SEC-2: the command sent is the one the operator approved
-def test_command_that_changes_after_approval_is_not_sent(engine, backend):
+# ENG-1 / SEC-2, amended by B6 (R-7): the command sent is exactly the one the operator approved, even if the
+# telemetry it was rendered from changed meanwhile (it is never rendered again)
+def test_command_is_sent_exactly_as_approved(engine, backend):
     backend.hazardous = {"FIRE", "SELFDESTRUCT"}
     backend.values["INST HEALTH_STATUS MODE"] = "FIRE"
     saved, _ = engine.save_flow(_walk_flow("INST {{ INST HEALTH_STATUS MODE }}"))
@@ -32,9 +33,9 @@ def test_command_that_changes_after_approval_is_not_sent(engine, backend):
         backend.values["INST HEALTH_STATUS MODE"] = "SELFDESTRUCT"
 
     approval, record = _approve_first(engine, run_id, change)
-    assert approval["preview"] == "INST FIRE"
-    assert backend.commands == []
-    assert record["status"] == "failed" and "changed after it was approved" in record["message"]
+    assert approval["preview"] == "INST FIRE" and approval["hazardous"] is True
+    assert backend.commands == ["INST FIRE"]
+    assert record["status"] == "success"
 
 
 def test_approved_hazardous_command_is_sent_when_unchanged(engine, backend):

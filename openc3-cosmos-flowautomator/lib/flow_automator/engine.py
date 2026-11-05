@@ -31,18 +31,42 @@ MAX_DETACHED_SCRIPTS = 1000
 RECENTLY_FINISHED = 50  # finished runs kept in memory until their history is surely in Valkey
 
 
+# Nodes that act on the system: adding one to an armed flow is a change someone should arm knowingly
+ACTING_NODE_TYPES = ("send_cmd", "run_script", "set_tlm", "subflow")
+# What each acting node does, by data key: changing it on a node allowed to bypass checks needs a re-arm
+ACTION_KEYS = {"send_cmd": "command", "run_script": "filename", "set_tlm": "item", "subflow": "flow_id"}
+# Flow keys only the engine (or the planner) sets: never taken from a client
+SERVER_KEYS = ("subflow_snapshots", "created_by", "disarmed_reason")
+
+
 def less_safe_changes(old, new):
-    """What a save makes less safe, for an armed flow: a less cautious mode, or a send_cmd that now allows more."""
+    """What a save makes less safe, for an armed flow.
+
+    A less cautious mode; dry run turned off; *Allow hazardous* or *Allow raw values* turned on; a new node
+    that acts on the system; or a different action on a node allowed to bypass checks.
+    """
     changes = []
     if MODES.index(new.get("mode", "run")) > MODES.index(old.get("mode", "run") if old.get("mode") in MODES else "run"):
         changes.append(f"mode {old.get('mode', 'run')} -> {new.get('mode')}")
+    if old.get("dry_run") and not new.get("dry_run"):
+        changes.append("dry run turned off")
     old_nodes = {n.get("id"): n for n in old.get("nodes") or []}
     for node in new.get("nodes") or []:
         data = node.get("data") or {}
-        before = (old_nodes.get(node.get("id")) or {}).get("data") or {}
-        for key, label in (("allow_hazardous", "Allow hazardous"), ("allow_raw_values", "Allow raw values")):
+        label = data.get("label") or node.get("id")
+        previous = old_nodes.get(node.get("id"))
+        before = (previous or {}).get("data") or {}
+        kind = node.get("type")
+        if kind in ACTING_NODE_TYPES and (previous is None or previous.get("type") != kind):
+            changes.append(f"new {kind} node '{label}'")
+            continue
+        for key, name in (("allow_hazardous", "Allow hazardous"), ("allow_raw_values", "Allow raw values")):
             if data.get(key) and not before.get(key):
-                changes.append(f"{label} on '{data.get('label') or node.get('id')}'")
+                changes.append(f"{name} on '{label}'")
+        action = ACTION_KEYS.get(kind)
+        bypasses = data.get("allow_hazardous") or data.get("allow_raw_values")
+        if action and (bypasses or kind == "subflow") and data.get(action) != before.get(action):
+            changes.append(f"{action} changed on '{label}'")
     return changes
 
 
@@ -377,6 +401,8 @@ class FlowEngine:
         if shape:
             raise EngineError(shape)
         flow = copy.deepcopy(flow)
+        for key in SERVER_KEYS:
+            flow.pop(key, None)
         with self.lock:
             existing = None
             if flow_id is not None:
@@ -428,6 +454,9 @@ class FlowEngine:
                 flow["armed"] = False
                 flow["disarmed_reason"] = f"Safety settings were relaxed ({changes})"
                 self.log("warn", f"Flow '{flow['name']}' was disarmed: {flow['disarmed_reason']}")
+            if existing is not None and less_safe_changes(existing, flow):
+                # Armed flows that call this one (directly or not) would run the relaxed version unreviewed
+                self._disarm_callers(flow["id"], flow["name"], "; ".join(less_safe_changes(existing, flow)))
             if existing is not None and content(existing) == content(flow):
                 existing["armed"] = flow["armed"]
                 existing.pop("disarmed_reason", None)
@@ -446,6 +475,30 @@ class FlowEngine:
             )
             self.store.delete_record("deleted_flows", flow["id"])
             return copy.deepcopy(flow), problems
+
+    def _disarm_callers(self, flow_id, name, changes):
+        """Disarm every armed flow whose sub-flows include flow_id (at any depth). Caller holds the lock."""
+        for caller in self.flows.values():
+            if caller.get("id") == flow_id or not caller.get("armed"):
+                continue
+            if flow_id in self._subflow_closure(caller):
+                caller["armed"] = False
+                caller["disarmed_reason"] = f"Its sub-flow '{name}' was relaxed ({changes})"
+                self.store.save_flow(caller, defer=True)
+                self.log("warn", f"Flow '{caller.get('name')}' was disarmed: {caller['disarmed_reason']}")
+
+    def _subflow_closure(self, flow):
+        seen = set()
+        stack = list(subflow_ids(flow))
+        while stack:
+            current = stack.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            child = self.flows.get(current)
+            if child is not None:
+                stack.extend(subflow_ids(child))
+        return seen
 
     def _ensure_versions(self):
         """Flows saved before version history get their current state as version 1."""
@@ -675,7 +728,13 @@ class FlowEngine:
         dry_run=False,
         skip_waits=False,
     ):
-        """Start a run of a flow snapshot for a scheduled activity (or a rehearsal). Policies don't apply."""
+        """Start a run of a flow snapshot for a scheduled activity (or a rehearsal). Policies don't apply.
+
+        ``flow`` is the activity's snapshot; its ``subflow_snapshots`` (added by snapshot_flow) pin the
+        sub-flows it calls.
+        """
+        flow = dict(flow)
+        pinned_subflows = flow.pop("subflow_snapshots", None)
         problems = validate_flow(flow)
         if problems:
             raise EngineError(f"The flow has problems: {problems[0]['message']}")
@@ -707,6 +766,8 @@ class FlowEngine:
                 trigger_info=info,
                 dry_run=dry_run,
                 skip_waits=skip_waits,
+                # The activity's snapshot of its sub-flows, taken by the planner (never from the flow itself)
+                pinned_subflows=pinned_subflows,
             )
             run.approval_deadline = approval_deadline
             run.activity_id = activity_id
