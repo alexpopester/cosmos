@@ -20,6 +20,17 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Docs
+- **Real-data testing plan** (`docs/REAL-DATA-TESTING.md`): how contact
+  scheduling gets proven against real satellites (SatNOGS) and real flight
+  software (NOS3), in four steps.
+- **Pass predictions checked against real passes.** New developer tool
+  `realdata/satnogs_check.py` (not part of the gem) compares our predictions
+  with SatNOGS observations. Over 750 real passes (172 satellites, 182
+  stations), none of 13,436 decoded frames arrived while we predicted the
+  satellite was below the horizon, and AOS/LOS agree to within 1.7 s / 1.2 s
+  (95th percentile).
+
 ## [1.13.0] - 2026-11-05
 
 Correctness fixes from the second evaluation (`docs/EVALUATION-2026-11-05.md`,

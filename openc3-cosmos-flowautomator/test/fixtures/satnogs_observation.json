@@ -1,0 +1,55 @@
+{
+ "observation": {
+  "id": 15081982,
+  "start": "2026-09-30T21:42:52Z",
+  "end": "2026-09-30T21:49:17Z",
+  "ground_station": 5096,
+  "norad_cat_id": 98395,
+  "station_name": "Groundstation OM4ATC",
+  "station_lat": 49.1998,
+  "station_lng": 18.12,
+  "station_alt": 480,
+  "status": "good",
+  "rise_azimuth": 30.0,
+  "set_azimuth": 167.0,
+  "max_altitude": 43.0,
+  "tle0": "0 KOSTKA",
+  "tle1": "1 69935U 26156BU  26273.21225365  .00001686  00000-0  16846-3 0  9997",
+  "tle2": "2 69935  97.7387 172.2869 0008526 226.9113 133.1394 14.92772795 12667",
+  "tle_source": "Space-Track.org",
+  "demoddata": [
+   {
+    "payload_demod": "https://s3.eu-central-1.wasabisys.com/satnogs-network/data_obs/2026/9/30/21/15081982/data_15081982_2026-09-30T21-46-11"
+   },
+   {
+    "payload_demod": "https://s3.eu-central-1.wasabisys.com/satnogs-network/data_obs/2026/9/30/21/15081982/data_15081982_2026-09-30T21-46-06"
+   },
+   {
+    "payload_demod": "https://s3.eu-central-1.wasabisys.com/satnogs-network/data_obs/2026/9/30/21/15081982/data_15081982_2026-09-30T21-45-40"
+   },
+   {
+    "payload_demod": "https://s3.eu-central-1.wasabisys.com/satnogs-network/data_obs/2026/9/30/21/15081982/data_15081982_2026-09-30T21-47-40"
+   },
+   {
+    "payload_demod": "https://s3.eu-central-1.wasabisys.com/satnogs-network/data_obs/2026/9/30/21/15081982/data_15081982_2026-09-30T21-47-36"
+   },
+   {
+    "payload_demod": "https://s3.eu-central-1.wasabisys.com/satnogs-network/data_obs/2026/9/30/21/15081982/data_15081982_2026-09-30T21-47-10"
+   },
+   {
+    "payload_demod": "https://s3.eu-central-1.wasabisys.com/satnogs-network/data_obs/2026/9/30/21/15081982/data_15081982_2026-09-30T21-47-06"
+   },
+   {
+    "payload_demod": "https://s3.eu-central-1.wasabisys.com/satnogs-network/data_obs/2026/9/30/21/15081982/data_15081982_2026-09-30T21-47-00"
+   }
+  ]
+ },
+ "station": {
+  "id": 5096,
+  "name": "Groundstation OM4ATC",
+  "min_horizon": 15,
+  "lat": 49.1998,
+  "lng": 18.12,
+  "altitude": 480
+ }
+}

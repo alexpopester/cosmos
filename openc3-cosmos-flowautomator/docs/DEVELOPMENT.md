@@ -118,6 +118,22 @@ log height) in `localStorage` under `openc3.flowautomator.layout`. Tests run
 in a fresh browser so they get the defaults (Edit, both panels, split);
 `layout_test.mjs` covers the layout and clears the key when it's done.
 
+### Real-data checks (internet, no COSMOS needed)
+
+`realdata/` holds checks against real satellites (plan and results in
+[REAL-DATA-TESTING.md](REAL-DATA-TESTING.md)). It isn't packaged into the
+gem. Rerun the pass-prediction check after any change to `orbit.py`:
+
+```bash
+docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/p" -w /p python:3.12-slim \
+  sh -c 'pip install -q --user requests sgp4 numpy && python realdata/satnogs_check.py --pages 10'
+# --offline re-checks what's cached in realdata/cache/ without touching the network
+```
+
+It exits non-zero if any decoded frame arrived while we predicted the
+satellite was below the horizon. `test/test_satnogs_check.py` covers the
+checker itself, including one real observation saved in `test/fixtures/`.
+
 ## Recipes
 
 ### Add a node type
