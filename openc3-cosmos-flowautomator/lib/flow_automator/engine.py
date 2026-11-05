@@ -1097,6 +1097,7 @@ class FlowEngine:
             return {
                 "flows": len(self.flows),
                 "armed": sum(1 for flow in self.flows.values() if flow.get("armed")),
+                "armed_ids": sorted(flow_id for flow_id, flow in self.flows.items() if flow.get("armed")),
                 "active_runs": [run.as_json(include_steps=False) for run in self.runs.values()],
                 "approvals": [a for run in self.runs.values() for a in run.pending_approvals()],
                 "queued": {flow_id: len(queue) for flow_id, queue in self.queues.items() if queue},

@@ -8,7 +8,11 @@ Each satellite has a ``tle_source``:
   satellite, logged in with COSMOS secrets (Admin Console → Secrets; the names
   are settings, defaulting to ``SPACETRACK_USERNAME`` and ``SPACETRACK_PASSWORD``).
   The credentials are read from COSMOS when needed: they're never stored by the
-  engine, shown by the API or put in backups.
+  engine, shown by the API or put in backups. They're only ever sent to
+  Space-Track itself: its address is fixed (an admin can point it at another
+  https host with the ``FLOW_SPACETRACK_URL`` environment variable, never
+  through the API or a backup), and secret names must start with
+  ``SPACETRACK_``, so the setting can't name another COSMOS secret.
 
 Internet sources fetch by the satellite's catalog number. A fetched TLE is
 never applied directly: it goes through ``TleIntake.ingest`` with the source's
@@ -31,6 +35,8 @@ second; network calls happen outside the planner's lock.
 
 import contextlib
 import copy
+import os
+import re
 from urllib.parse import urlparse
 
 import requests
@@ -43,10 +49,16 @@ TIMEOUT_SECONDS = 30
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 FIRST_BACKOFF_SECONDS = 600
 SPACETRACK_BATCH = 100  # catalog numbers per query (keeps the URL short)
+# Where the Space-Track login is sent: fixed, never a setting a user (or a backup) can change
+SPACETRACK_URL = (os.environ.get("FLOW_SPACETRACK_URL") or "https://www.space-track.org").rstrip("/")
+SECRET_PREFIX = "SPACETRACK_"
+# A catalog number: up to 9 digits, or Alpha-5 (a letter other than I or O, then 4 digits)
+_CATALOG_RE = re.compile(r"^(\d{1,9}|[A-HJ-NP-Z]\d{4})$")
+_ALPHA5 = "ABCDEFGHJKLMNPQRSTUVWXYZ"
 DEFAULT_SETTINGS = {
     "celestrak": {"url": "https://celestrak.org", "hours": 4.0},
     "spacetrack": {
-        "url": "https://www.space-track.org",
+        "url": SPACETRACK_URL,
         "hours": 4.0,
         "username_secret": "SPACETRACK_USERNAME",
         "password_secret": "SPACETRACK_PASSWORD",
@@ -70,6 +82,30 @@ def catalog_key(value):
 
 def _tle_catalog(line1):
     return catalog_key(line1[2:7])
+
+
+def valid_catalog(value):
+    """True for a catalog number the internet sources can be asked for (digits, or Alpha-5)."""
+    return bool(_CATALOG_RE.match(str(value or "").strip().upper()))
+
+
+def catalog_number(key):
+    """The integer catalog number for a query: Alpha-5 "A0001" is 100001 (A=10, skipping I and O)."""
+    text = str(key).strip().upper()
+    if text.isdigit():
+        return int(text)
+    return (_ALPHA5.index(text[0]) + 10) * 10000 + int(text[1:])
+
+
+def _check_https_host(url, label):
+    """Refuse an address the login or a request mustn't go to (checked again at every fetch)."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise FetchError(f"{label}'s address isn't a web address")
+    blocked = blocked_address(parsed.hostname)
+    if blocked:
+        raise FetchError(f"{label} address: {blocked}")
+    return parsed
 
 
 class TleSource:
@@ -125,9 +161,13 @@ class CelestrakSource(TleSource):
     def fetch(self, catalogs, settings, backend, session):
         texts, reasons = {}, {}
         base = settings["url"].rstrip("/")
+        _check_https_host(base, "CelesTrak")
         for catalog in catalogs:
             response = _get(
-                session, f"{base}/NORAD/elements/gp.php", "CelesTrak", params={"CATNR": catalog, "FORMAT": "TLE"}
+                session,
+                f"{base}/NORAD/elements/gp.php",
+                "CelesTrak",
+                params={"CATNR": str(catalog_number(catalog)), "FORMAT": "TLE"},
             )
             if response.status_code == 403:
                 raise FetchError(
@@ -153,6 +193,13 @@ class SpacetrackSource(TleSource):
     min_hours = 1  # Space-Track asks for GP data to be fetched at most once an hour
 
     def fetch(self, catalogs, settings, backend, session):
+        for key in ("username_secret", "password_secret"):
+            if not str(settings.get(key) or "").startswith(SECRET_PREFIX):
+                raise FetchError(f"Space-Track secret names must start with {SECRET_PREFIX}")
+        # The login only ever goes to the fixed Space-Track address, over https
+        base = SPACETRACK_URL
+        if _check_https_host(base, "Space-Track").scheme != "https":
+            raise FetchError("Space-Track's address must use https: the login is sent to it")
         username = backend.get_secret(settings["username_secret"])
         password = backend.get_secret(settings["password_secret"])
         if not username or not password:
@@ -160,7 +207,6 @@ class SpacetrackSource(TleSource):
                 f"Set the COSMOS secrets {settings['username_secret']} and {settings['password_secret']} "
                 "(Admin Console → Secrets) to your Space-Track login"
             )
-        base = settings["url"].rstrip("/")
         try:
             login = session.post(
                 f"{base}/ajaxauth/login",
@@ -177,10 +223,8 @@ class SpacetrackSource(TleSource):
             ordered = sorted(catalogs)
             for start in range(0, len(ordered), SPACETRACK_BATCH):
                 batch = ordered[start : start + SPACETRACK_BATCH]
-                url = (
-                    f"{base}/basicspacedata/query/class/gp/NORAD_CAT_ID/{','.join(batch)}"
-                    "/orderby/NORAD_CAT_ID/format/3le"
-                )
+                numbers = ",".join(str(catalog_number(c)) for c in batch)
+                url = f"{base}/basicspacedata/query/class/gp/NORAD_CAT_ID/{numbers}/orderby/NORAD_CAT_ID/format/3le"
                 response = _get(session, url, "Space-Track")
                 if response.status_code == 429 or "rate limit" in (response.text or "").lower():
                     raise FetchError("Space-Track says the query rate limit was exceeded; the engine waits")
@@ -225,6 +269,13 @@ class TleFetcher:
         saved = self.planner.store.records("planner_settings").get("tle_sources") or {}
         for kind, defaults in DEFAULT_SETTINGS.items():
             self.settings[kind] = {**defaults, **(saved.get(kind) or {})}
+        # Whatever was stored (an older version, a restored backup): Space-Track's address is the fixed one,
+        # and its secret names must be Space-Track's
+        spacetrack = self.settings["spacetrack"]
+        spacetrack["url"] = SPACETRACK_URL
+        for key in ("username_secret", "password_secret"):
+            if not str(spacetrack.get(key) or "").startswith(SECRET_PREFIX):
+                spacetrack[key] = DEFAULT_SETTINGS["spacetrack"][key]
 
     def settings_json(self):
         result = copy.deepcopy(self.settings)
@@ -256,7 +307,13 @@ class TleFetcher:
                 raise TleSourceError(f"'{kind}' settings must be an object")
             label = SOURCES[kind].label
             current = settings[kind]
-            if "url" in changes:
+            if kind == "spacetrack" and "url" in changes:
+                if str(changes["url"] or "").strip().rstrip("/") != SPACETRACK_URL:
+                    raise TleSourceError(
+                        "Space-Track's address can't be changed here: it receives your login. An admin can set "
+                        "the engine's FLOW_SPACETRACK_URL environment variable"
+                    )
+            elif "url" in changes:
                 url = str(changes["url"] or "").strip().rstrip("/")
                 parsed = urlparse(url)
                 if parsed.scheme not in ("http", "https") or not parsed.netloc:
@@ -281,6 +338,11 @@ class TleFetcher:
                     name = str(changes[key] or "").strip()
                     if not name or len(name) > 100 or any(c.isspace() for c in name):
                         raise TleSourceError("Secret names must be non-empty, without spaces")
+                    if not name.startswith(SECRET_PREFIX):
+                        raise TleSourceError(
+                            f"Space-Track secret names must start with {SECRET_PREFIX} (so this setting can't "
+                            "send another COSMOS secret anywhere)"
+                        )
                     current[key] = name
         self.planner.store.save_record("planner_settings", "tle_sources", settings)
         self.settings = settings
@@ -321,12 +383,12 @@ class TleFetcher:
                 if (sat.get("tle_source") or {}).get("kind") != kind or sat.get("enabled") is False:
                     continue
                 catalog = catalog_key(sat.get("catalog") or (sat.get("tle") or {}).get("norad_id"))
-                if not catalog:
+                if not catalog or not valid_catalog(catalog):
                     self.sat_status[sat["id"]] = {
                         "source": kind,
                         "time": None,
                         "result": "rejected",
-                        "reason": "Needs a catalog number",
+                        "reason": "Needs a catalog number" if not catalog else f"'{catalog}' isn't a catalog number",
                     }
                     continue
                 wanted.setdefault(catalog, []).append(sat["id"])

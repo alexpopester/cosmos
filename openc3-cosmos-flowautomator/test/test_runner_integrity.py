@@ -227,3 +227,16 @@ def test_flow_result_key_is_not_a_nodes_choice(engine, backend, fast_poll):
     env = backend.started_scripts[0][1]
     assert env["FLOW_RESULT_KEY"] != "someone_elses_key"
     assert env["FLOW_RESULT_KEY"].startswith("flow_automator__")
+
+
+# B9: one Set variable node used to OOM the operator container
+def test_set_variable_refuses_a_run_too_big_to_keep(engine):
+    more = {f"v{i}": "x" for i in range(1, 30)}
+    flow = make_flow(
+        [node("t", "trigger_manual"), node("s", "set_var", name="x", expression="'a' * 90000", more=more)],
+        [edge("t", "s")],
+    )
+    record = run_to_end(engine, flow)
+    assert record["status"] == "failed"
+    assert "too large to keep" in record["message"]
+    assert len(record["steps"][-1]["message"]) < 3000

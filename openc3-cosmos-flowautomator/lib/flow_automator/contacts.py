@@ -47,7 +47,7 @@ from .orbit import (
 )
 from .templates import fill_parameters
 from .tle_inputs import TleIntake
-from .tle_sources import TleFetcher, get_source
+from .tle_sources import TleFetcher, get_source, valid_catalog
 
 
 ANCHORS = ("aos", "tca", "los")
@@ -419,7 +419,11 @@ class ContactPlanner:
             sat["name"] = name
             sat["target"] = str(payload.get("target", sat.get("target")) or "").strip().upper()
             sat["enabled"] = bool(payload.get("enabled", sat.get("enabled", True)))
-            catalog = str(payload.get("catalog", sat.get("catalog")) or "").strip()
+            catalog = str(payload.get("catalog", sat.get("catalog")) or "").strip().upper()
+            if catalog and not valid_catalog(catalog):
+                raise PlannerError(
+                    "Catalog number must be digits (like 25544) or Alpha-5 (a letter, then 4 digits, like A0001)"
+                )
             sat["catalog"] = int(catalog) if catalog.isdigit() else (catalog or None)
             sat["preferred_source"] = (
                 str(payload.get("preferred_source", sat.get("preferred_source")) or "").strip() or None
@@ -590,18 +594,15 @@ class ContactPlanner:
             nearest = self._nearest_contact(activity)
             shift = None if nearest is None else nearest["tca"] - old["tca"]
             if nearest is not None and abs(shift) <= self.retime_tolerance:
-                moved = abs(shift) >= 0.5
-                if moved or nearest["id"] != old["id"] or activity["status"] == "needs_review":
-                    activity["contact"] = self._contact_ref(nearest)
-                    activity["suggested_contact_id"] = None
-                    if activity["status"] == "needs_review":
-                        activity["status"] = "scheduled"
-                        activity["message"] = "Contact predicted again"
-                    if moved:
-                        activity["drift"] = float(activity.get("drift") or 0) + shift
-                        activity["message"] = f"Re-timed {shift:+.1f}s to follow the updated prediction"
-                    self._save("activities", activity)
-                continue
+                # The pass is the same one, but its AOS or LOS may have moved more than its TCA (a station's
+                # mask or altitude changed): the activity follows its own anchor, so judge by that
+                anchor = activity.get("anchor", "aos")
+                anchor_shift = nearest[anchor] - old[anchor]
+                if abs(anchor_shift) <= self.retime_tolerance:
+                    self._follow(activity, old, nearest, anchor_shift, now)
+                    continue
+                shift = anchor_shift
+                nearest = dict(nearest)  # flagged below, like a pass that moved too far
             if activity.get("rule_id"):
                 # The rule schedules whatever pass is predicted now; this one is gone
                 why = "contact no longer predicted" if nearest is None else f"contact moved {shift:+.0f}s"
@@ -632,6 +633,56 @@ class ContactPlanner:
                 activity["message"],
                 key=f"review:{activity['id']}:{activity.get('suggested_contact_id')}",
             )
+
+    def _follow(self, activity, old, nearest, shift, now):
+        """Keep an activity on its (re-predicted) pass: every time of the pass, not just its TCA."""
+        changed = (
+            nearest["id"] != old["id"]
+            or any(abs(nearest[k] - old[k]) >= 0.5 for k in ("aos", "tca", "los"))
+            or abs(nearest["max_elevation"] - old["max_elevation"]) >= 0.01
+        )
+        if not (changed or activity["status"] == "needs_review"):
+            return
+        activity["contact"] = self._contact_ref(nearest)
+        activity["suggested_contact_id"] = None
+        if activity["status"] == "needs_review":
+            activity["status"] = "scheduled"
+            activity["message"] = "Contact predicted again"
+        if abs(shift) >= 0.5:
+            activity["drift"] = float(activity.get("drift") or 0) + shift
+            activity["message"] = f"Re-timed {shift:+.1f}s to follow the updated prediction"
+        problem = self._window_problem(activity)
+        if problem:
+            if activity.get("rule_id"):
+                self._finish(activity, "cancelled", f"Cancelled: {problem}; the rule schedules the new prediction", now)
+                activity["superseded"] = True
+            else:
+                activity["status"] = "needs_review"
+                activity["message"] = f"{problem}: move or delete the activity"
+                self.alert(
+                    "activity_needs_review",
+                    f"Activity '{activity['label']}' needs review",
+                    activity["message"],
+                    key=f"review:{activity['id']}:window:{activity['contact']['los']}",
+                )
+        self._save("activities", activity)
+
+    def _window_problem(self, activity):
+        """Why an activity no longer fits its (re-predicted) pass, or None."""
+        contact = activity["contact"]
+        start = activity_start(activity)
+        if start >= contact["los"]:
+            return "the pass now ends before the activity starts"
+        flow = activity.get("flow") or {}
+        asks = activity["mode"] in ("crawl", "walk") or any(n.get("type") == "ask" for n in flow.get("nodes") or [])
+        if asks and start >= contact["los"] - activity["approval_margin"]:
+            return "approvals for the shorter pass would close before the activity starts"
+        rule = self.rules.get(activity.get("rule_id")) if activity.get("rule_id") else None
+        if rule is not None and (
+            contact["max_elevation"] < rule["min_elevation"] or contact["duration"] < rule["min_duration"]
+        ):
+            return "the pass no longer meets the rule's elevation or duration"
+        return None
 
     @staticmethod
     def _is_tombstone(activity):

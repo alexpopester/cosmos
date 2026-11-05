@@ -10,14 +10,18 @@ node (or ends), then carries on from that join.
 import contextlib
 import copy
 import re
+import reprlib
 import threading
 import time
 import uuid
 
-from .expressions import _TEMPLATE_RE, Evaluator, normalize_item
+from .expressions import _TEMPLATE_RE, Evaluator, ExpressionError, normalize_item, size_of
 from .graph import ERROR_HANDLE, MODES, NODE_TYPES, Graph, is_trigger
 
 
+# All of a run's variables together, as size_of counts them (each value is capped by the expression limits)
+MAX_VARIABLES_SIZE = 1_000_000
+_REPR = reprlib.Repr(maxstring=200, maxother=200, maxlist=20, maxdict=20, maxlevel=3)
 MAX_STEPS_RECORDED = 1000
 DEFAULT_MAX_STEPS = 100_000
 HARD_MAX_STEPS = 1_000_000  # a flow's own max_steps can't go above this
@@ -25,6 +29,9 @@ SCRIPT_DONE_STATES = ("completed", "completed_errors", "stopped", "crashed", "ki
 SCRIPT_POLL_SECONDS = 1.0
 SCRIPT_POLL_FAILURES = 5  # consecutive Script Runner errors before a waiting step gives up (and stops the script)
 APPROVAL_DECISIONS = ("go", "run", "abort")
+
+
+_MISSING = object()
 
 
 class RunStoppedError(Exception):
@@ -155,6 +162,18 @@ class FlowRun:
     @variables.setter
     def variables(self, value):
         self._variables = value
+
+    def set_variable(self, name, value):
+        """Set a run variable, refusing one that would make the run's variables too big to keep or show."""
+        variables = self.variables
+        previous = variables.get(name, _MISSING)
+        variables[name] = value
+        if size_of(variables, MAX_VARIABLES_SIZE) > MAX_VARIABLES_SIZE:
+            if previous is _MISSING:
+                variables.pop(name, None)
+            else:
+                variables[name] = previous
+            raise ExpressionError(f"'{name}' would make this run's variables too large to keep")
 
     @property
     def loops(self):
@@ -641,9 +660,9 @@ def exec_switch(run, node, data, step):
     value = evaluator.evaluate(data.get("expression"))
     for index, case in enumerate(data.get("cases") or []):
         if evaluator.evaluate(str(case)) == value:
-            step["message"] = f"{value!r} matched case {case}"
+            step["message"] = f"{_REPR.repr(value)} matched case {case}"
             return f"case_{index}"
-    step["message"] = f"{value!r} matched no case"
+    step["message"] = f"{_REPR.repr(value)} matched no case"
     return "default"
 
 
@@ -708,13 +727,13 @@ def exec_passthrough(run, node, data, step):
 
 def exec_set_var(run, node, data, step):
     value = run.evaluator().evaluate(data.get("expression"))
-    run.variables[data["name"]] = value
-    parts = [f"{data['name']} = {value!r}"]
+    run.set_variable(data["name"], value)
+    parts = [f"{data['name']} = {_REPR.repr(value)}"]
     # More assignments, in order; each can use the ones before it
     for name, expression in (data.get("more") or {}).items():
         value = run.evaluator().evaluate(str(expression))
-        run.variables[name] = value
-        parts.append(f"{name} = {value!r}")
+        run.set_variable(name, value)
+        parts.append(f"{name} = {_REPR.repr(value)}")
     step["message"] = "; ".join(parts)[:2000]
     return "out"
 
@@ -725,7 +744,7 @@ def exec_read_packet(run, node, data, step):
     value_type = (data.get("value_type") or "CONVERTED").upper()
     values = run.engine.backend.tlm_packet(target, packet, value_type)
     name = data.get("variable") or "packet"
-    run.variables[name] = values
+    run.set_variable(name, values)
     step["message"] = f"{name} = {target} {packet} ({len(values)} items)"
     return "out"
 
@@ -1037,13 +1056,13 @@ def exec_set_tlm(run, node, data, step):
     value = run.render_value(data.get("value"))
     value_type = (data.get("value_type") or "CONVERTED").upper()
     if run.dry_run:
-        step["message"] = f"DRY RUN: would set {item} = {value!r} ({value_type})"
+        step["message"] = f"DRY RUN: would set {item} = {_REPR.repr(value)} ({value_type})"
         step["dry_run"] = True
         return "out"
     if run.cancelled():
         raise RunStoppedError()
     run.engine.backend.set_tlm(item, value, value_type)
-    step["message"] = f"{item} = {value!r} ({value_type})"
+    step["message"] = f"{item} = {_REPR.repr(value)} ({value_type})"
     return "out"
 
 

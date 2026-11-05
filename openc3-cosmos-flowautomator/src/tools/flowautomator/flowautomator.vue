@@ -637,6 +637,7 @@
               selectedNode ? flowContext.nodeProblems[selectedNode.id] : []
             "
             @changed="onInspectorChange"
+            @list-removed="onListRemoved"
             @delete-node="deleteSelected"
           />
         </div>
@@ -1133,6 +1134,7 @@ export default {
       flowSearch: '',
       flowId: null,
       armed: false,
+      arming: false,
       flowSettings: blankSettings(),
       nodes: [],
       edges: [],
@@ -1904,6 +1906,7 @@ export default {
     },
     async setArmed(value) {
       if (value && !(await this.ensureSaved('arm'))) return
+      this.arming = true
       try {
         const { flow } = value
           ? await flowApi.arm(this.flowId)
@@ -1912,10 +1915,32 @@ export default {
         this.refreshFlows()
       } catch (error) {
         const info = errorInfo(error)
+        if (!value) {
+          // A failed disarm leaves the flow armed: never show it as safe when it isn't
+          this.armed = true
+          this.$notify.serious({
+            title: 'Still armed',
+            body: `Disarming failed: ${info.message}. Use Stop all if it must not fire.`,
+          })
+          return
+        }
         this.armed = false
         this.applyProblems(info.problems.length ? info.problems : this.problems)
         this.$refs.runPanel.show('problems')
         this.$notify.caution({ title: 'Not armed', body: info.message })
+      } finally {
+        this.arming = false
+      }
+    },
+    syncArmed(armedIds) {
+      // Another operator, tab, Stop all or restore may have armed or disarmed flows: follow the engine
+      if (!Array.isArray(armedIds) || this.arming) return
+      const armed = new Set(armedIds)
+      if (this.flowId && armed.has(this.flowId) !== this.armed) {
+        this.armed = armed.has(this.flowId)
+      }
+      if (this.flows.some((f) => Boolean(f.armed) !== armed.has(f.id))) {
+        this.refreshFlows()
       }
     },
     async runNow(triggerNode, variables = null, options = null) {
@@ -2095,6 +2120,7 @@ export default {
         }
         // Someone else added or deleted a flow: keep the selector current
         if (status.flows !== this.flows.length) this.refreshFlows()
+        this.syncArmed(status.armed_ids)
         this.engineOnline = true
         const active = status.active_runs.filter(
           (r) => r.flow_id === this.flowId && !r.parent_id,
@@ -2396,6 +2422,21 @@ export default {
     },
     onEdgesChange(changes) {
       if (changes.some((c) => c.type === 'remove')) this.changed()
+    },
+    onListRemoved({ key, index }) {
+      // A Switch's outputs are case_0, case_1 ... by position: removing a case must drop its own wire and
+      // move the later cases' wires down one, or a later case would take over the removed case's target
+      const node = this.selectedNode
+      if (!node || node.data.kind !== 'switch' || key !== 'cases') return
+      this.edges = this.edges.flatMap((e) => {
+        const match =
+          e.source === node.id && /^case_(\d+)$/.exec(e.sourceHandle || '')
+        if (!match) return [e]
+        const position = Number(match[1])
+        if (position === index) return []
+        if (position < index) return [e]
+        return [{ ...e, sourceHandle: `case_${position - 1}` }]
+      })
     },
     onInspectorChange() {
       // Switch cases change a node's outputs: drop wires from outputs that are gone

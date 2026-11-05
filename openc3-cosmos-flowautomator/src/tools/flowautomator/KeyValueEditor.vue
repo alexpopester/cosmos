@@ -5,7 +5,7 @@
 -->
 
 <template>
-  <div>
+  <div @focusin="focused = true" @focusout="focused = false">
     <div class="text-caption mb-1">{{ label }}</div>
     <div v-for="(row, i) in rows" :key="i" class="d-flex align-center mb-1">
       <v-text-field
@@ -52,19 +52,23 @@ export default {
   },
   emits: ['update:modelValue'],
   data() {
-    return { rows: [] }
+    return { rows: [], focused: false }
   },
   watch: {
     modelValue: {
       immediate: true,
       handler(value) {
-        // Only rebuild rows when the object changed from outside
-        if (value !== this.lastEmitted) {
-          this.rows = Object.entries(value || {}).map(([key, v]) => ({
-            key,
-            value: this.parseValues ? this.format(v) : String(v),
-          }))
+        // Rebuild rows only when the object really changed from outside. The parent stores what we emit in
+        // reactive state, so it comes back as a different (proxy) object: compare contents, not identity.
+        // Never rebuild while someone is typing here: rows keep exactly what was typed ('1.' on the way to
+        // 1.5, a row with a value but no name yet).
+        if (this.focused || JSON.stringify(value || {}) === this.lastEmitted) {
+          return
         }
+        this.rows = Object.entries(value || {}).map(([key, v]) => ({
+          key,
+          value: this.parseValues ? this.format(v) : String(v),
+        }))
       },
     },
   },
@@ -92,7 +96,7 @@ export default {
           result[row.key] = this.parseValues ? this.parse(row.value) : row.value
         }
       }
-      this.lastEmitted = result
+      this.lastEmitted = JSON.stringify(result)
       this.$emit('update:modelValue', result)
     },
     add() {

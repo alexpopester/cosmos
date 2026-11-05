@@ -84,7 +84,22 @@ def _mask(url):
     parsed = urlparse(url or "")
     if not parsed.netloc:
         return ""
-    return f"{parsed.scheme}://{parsed.netloc}/…"
+    return f"{parsed.scheme}://{parsed.hostname or ''}{f':{parsed.port}' if parsed.port else ''}/…"
+
+
+def scrub(text, url):
+    """An error message with a webhook URL's secret parts (path, query, login) taken out.
+
+    Webhook URLs often carry their token in the path (Slack, Teams): error text from requests repeats the
+    URL, and these errors are shown to anyone who can read the alert settings, and logged.
+    """
+    text = str(text)
+    parsed = urlparse(url or "")
+    secrets = [url, parsed.path + (f"?{parsed.query}" if parsed.query else ""), parsed.query, parsed.path]
+    secrets += [parsed.username, parsed.password]
+    for secret in sorted({x for x in secrets if x and len(x) > 1}, key=len, reverse=True):
+        text = text.replace(secret, "/…")
+    return text[:300]
 
 
 class Alerter:
@@ -320,7 +335,7 @@ class Alerter:
                 error = None
                 break
             except Exception as failure:  # noqa: BLE001 - recorded on the hook
-                error = str(failure)
+                error = scrub(failure, hook["url"])
                 if attempt + 1 < retries:
                     time.sleep(2 * (attempt + 1))
         with self.lock:

@@ -456,10 +456,19 @@ Both services block clients that ask too often, so:
   dialog.
 
 **Space-Track login:** add two secrets in **Admin Console → Secrets**:
-`SPACETRACK_USERNAME` and `SPACETRACK_PASSWORD`. You can use other names and
-set them in TLE sources and inputs. The engine reads them from COSMOS each
-time it logs in. They're never stored by the plugin, shown by its API, or
-put in backups. A change takes effect at the next fetch, without a restart.
+`SPACETRACK_USERNAME` and `SPACETRACK_PASSWORD`. You can use other names that
+start with `SPACETRACK_` and set them in TLE sources and inputs. The engine
+reads them from COSMOS each time it logs in. They're never stored by the
+plugin, shown by its API, or put in backups. A change takes effect at the
+next fetch, without a restart.
+
+The login is only ever sent to `https://www.space-track.org`. The address
+can't be changed in the tool, through the API or by restoring a backup. An
+admin can point it at another https host by setting `FLOW_SPACETRACK_URL` in
+the engine's environment.
+
+Catalog numbers are digits (`25544`) or Alpha-5 (`A0001`, a letter other
+than I or O, then four digits).
 
 **Network:** the engine fetches from the operator container, so that
 container needs to reach `celestrak.org` or `www.space-track.org`. It uses
@@ -541,10 +550,13 @@ from when it was scheduled, so what was reviewed is what runs. If the template
 or one of those sub-flows is edited later, the activity says *template
 changed* or *sub-flow changed*. **Update** copies the current versions.
 
-When a new TLE moves a pass, its activities move with it (up to
-`retime_tolerance`). A pass that moves further, or disappears, leaves its
-activities *needing review*: **Accept new time** or move them. They don't run
-until then.
+When a new TLE or a station edit (a new mask or altitude) moves a pass, its
+activities move with it: AOS, TCA and LOS all follow the new prediction (up
+to `retime_tolerance`, measured at the time the activity is anchored to). A
+pass that moves further, or disappears, leaves its activities *needing
+review*: **Accept new time** or move them. They don't run until then. The
+same happens when a pass gets too short for an activity: it would start after
+LOS, or after approvals close.
 
 ### Rules
 

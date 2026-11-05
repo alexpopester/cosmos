@@ -277,6 +277,14 @@ interface (SEC-1, SEC-4, ENG-5).
 *Consequences:* new safe functions must be bounded in the same way. Check
 the size before building the result, not after.
 
+*Amended 2026-11-05 (1.12.0):* list, tuple and dict literals count toward the
+result size, since `[v, v]` doubles a value without calling anything. A
+template's whole output is capped too. Computing one expression may take
+0.25 s; time waiting on telemetry reads doesn't count. A run's variables
+together are capped at 1,000,000 (as `size_of` counts them), and step
+messages show values shortened. Before this, one Set variable node could run
+the operator container out of memory (B9).
+
 ## D23. Rule priority pre-empts; hand-edited rule activities are detached
 
 Saving a rule that changes which passes it takes re-plans that rule and every
@@ -385,6 +393,12 @@ source wins, and a big jump is held for review.
 - **Failures:** a failure of the whole source backs off from 10 minutes,
   doubling.
 - **Requests:** no redirects are followed.
+- **Where the login goes (amended 2026-11-05):** only to the fixed
+  Space-Track address over https. An admin can change it with the
+  `FLOW_SPACETRACK_URL` environment variable, never through the API or a
+  backup. Secret names must start with `SPACETRACK_`. Catalog numbers are
+  validated before they go into a query. Before this, any write user could
+  send any COSMOS secret to any host (B8).
 
 *Why:*
 - **Safeguards:** a public catalog can carry a wrong or post-maneuver

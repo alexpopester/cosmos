@@ -294,3 +294,72 @@ def test_clear_demo_keeps_user_stations(engine, planner):
     old_demo = planner.save_station({**DC5, "name": "Svalbard"}, user="demo")
     clear_demo(engine)
     assert mine["id"] in planner.stations and old_demo["id"] not in planner.stations
+
+
+# B10 (S-2): a failing webhook's error text used to show its secret URL path to read-only users
+def test_webhook_errors_never_show_the_url_secret(engine, monkeypatch):
+    from flow_automator import alerts as alerts_module
+
+    monkeypatch.setattr(alerts_module, "RETRIES", 1)
+    secret_url = "https://hooks.example.com/services/T000/B000/XXXXsecretXXXX?token=abc123"
+
+    def post(url, payload):
+        raise ConnectionError(
+            f"HTTPSConnectionPool(host='hooks.example.com', port=443): Max retries exceeded with url: "
+            f"/services/T000/B000/XXXXsecretXXXX?token=abc123 (Caused by NameResolutionError({url}))"
+        )
+
+    logged = []
+    alerter = alerts_module.Alerter(engine.store, post=post, clock=lambda: 1000.0, log=lambda *a: logged.append(a))
+    alerter.settings["webhooks"] = [
+        {"id": "h", "name": "slack", "url": secret_url, "format": "generic", "events": ["run_failed"], "enabled": True}
+    ]
+    alerter.emit("run_failed", "failed", "", key="k")
+    shown = repr(alerter.settings_json()) + repr(logged)
+    assert "XXXXsecretXXXX" not in shown and "abc123" not in shown
+    assert "hooks.example.com" in alerter.settings_json()["webhooks"][0]["status"]["last_error"]
+
+
+# B11 (C-1): a station edit used to leave activities on the old AOS/LOS (approvals open past the real LOS)
+def _best_future_contact(planner, clock):
+    return max(
+        (c for c in planner.contacts if not c["partial"] and c["aos"] > clock() + 600),
+        key=lambda c: c["max_elevation"],
+    )
+
+
+def _nearest(planner, contact):
+    return min(
+        (x for x in planner.contacts if x["satellite_id"] == contact["satellite_id"]),
+        key=lambda x: abs(x["tca"] - contact["tca"]),
+    )
+
+
+def test_station_mask_change_moves_activities_to_the_new_window(engine, planner, clock):
+    station = planner.save_station({**DC, "min_elevation": 0})
+    planner.save_satellite({"name": "ISS", "tle": f"ISS\n{ISS_1}\n{ISS_2}"})
+    contact = _best_future_contact(planner, clock)
+    activity = planner.create_activity(
+        {"contact_id": contact["id"], "template_id": template(engine)["id"], "anchor": "tca", "offset": 0}
+    )
+    planner.save_station({"min_elevation": 10}, station_id=station["id"])
+    new = _nearest(planner, contact)
+    assert new["aos"] > contact["aos"] + 30  # the higher mask shortened the pass
+    stored = planner.activities[activity["id"]]
+    assert stored["contact"]["aos"] == new["aos"] and stored["contact"]["los"] == new["los"]
+    assert stored["status"] == "scheduled"
+
+
+def test_activity_anchored_at_aos_is_flagged_when_aos_moves_too_far(engine, planner, clock):
+    station = planner.save_station({**DC, "min_elevation": 0})
+    planner.save_satellite({"name": "ISS", "tle": f"ISS\n{ISS_1}\n{ISS_2}"})
+    contact = _best_future_contact(planner, clock)
+    activity = planner.create_activity(
+        {"contact_id": contact["id"], "template_id": template(engine)["id"], "anchor": "aos", "offset": 0}
+    )
+    planner.save_station({"min_elevation": 25}, station_id=station["id"])
+    new = _nearest(planner, contact)
+    assert new["aos"] - contact["aos"] > planner.retime_tolerance
+    stored = planner.activities[activity["id"]]
+    assert stored["status"] == "needs_review"
+    assert stored["suggested_contact_id"] == new["id"]

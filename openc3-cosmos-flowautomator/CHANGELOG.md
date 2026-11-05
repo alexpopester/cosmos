@@ -21,7 +21,7 @@ versions follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 Fixes from the second evaluation (`docs/EVALUATION-2026-11-05.md`, backlog
-B1–B7 and B12; owner's answers to Q1–Q4; D6 and D28 amended).
+B1–B14; owner's answers to Q1–Q4; D6, D22, D28 and D29 amended).
 
 ### Changed
 - **The approved command is sent exactly as approved.** It used to be
@@ -34,6 +34,16 @@ B1–B7 and B12; owner's answers to Q1–Q4; D6 and D28 amended).
   now also sees parameter defaults and state names in any case.
 
 ### Fixed
+- **A station edit no longer leaves activities on the old AOS and LOS.** They
+  follow every time of the re-predicted pass, are flagged for review when the
+  time they're anchored to moves too far, and are re-checked against LOS and
+  the approval cut-off (B11).
+- **Deleting a Switch case no longer re-routes another case** to the deleted
+  case's target: later cases' wires move down with them (B13).
+- **Starting variables are no longer corrupted while typing** (`1.5` saved as
+  `15`, extra quotes around text) (B13).
+- **The Armed switch follows the engine** (another operator, Stop all, a
+  restore), and **a failed disarm shows *Still armed***, never Disarmed (B14).
 - **Loops in parallel branches no longer reset each other.** Two branches each
   running a loop could send their commands extra times (a regression in
   1.9.0). Each branch now counts its own loops (B1).
@@ -79,6 +89,18 @@ B1–B7 and B12; owner's answers to Q1–Q4; D6 and D28 amended).
   it (B4).
 
 ### Security
+- **Any write user could send any COSMOS secret to any host** through the
+  Space-Track settings. The login now only goes to Space-Track's fixed https
+  address (`FLOW_SPACETRACK_URL` for an admin), secret names must start with
+  `SPACETRACK_`, and stored or restored settings can't override either (B8).
+- Catalog numbers are validated, so one can't change a Space-Track query;
+  Alpha-5 numbers are converted for the query (B8).
+- **One dry run could run the operator container out of memory.** List and
+  dict literals now count toward the expression size limits, templates are
+  capped, an expression may compute for 0.25 s, and a run's variables are
+  capped together (B9).
+- **Webhook URL secrets no longer leak to read-only users** through error
+  text in the alert settings or the log (B10, S-2).
 - A node's environment can no longer set `FLOW_RESULT_KEY`, which let a flow
   read and delete any stash key (S-14).
 - **A flow can no longer carry hidden sub-flow content.** `subflow_snapshots`

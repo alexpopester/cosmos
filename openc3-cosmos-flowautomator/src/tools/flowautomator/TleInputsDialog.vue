@@ -44,6 +44,12 @@
             <v-text-field
               v-model="sources[src.kind].url"
               :label="`${src.label} address`"
+              :readonly="src.kind === 'spacetrack'"
+              :title="
+                src.kind === 'spacetrack'
+                  ? 'Fixed: your login is sent here. An admin can change it with the engine\'s FLOW_SPACETRACK_URL variable.'
+                  : ''
+              "
               density="compact"
               variant="outlined"
               hide-details
@@ -359,7 +365,6 @@ print(stash_get("${key}_result"))`
       return {
         celestrak: { url: s.celestrak.url, hours: Number(s.celestrak.hours) },
         spacetrack: {
-          url: s.spacetrack.url,
           hours: Number(s.spacetrack.hours),
           username_secret: s.spacetrack.username_secret,
           password_secret: s.spacetrack.password_secret,

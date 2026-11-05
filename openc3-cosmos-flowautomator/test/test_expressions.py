@@ -97,3 +97,57 @@ def test_cron():
     assert check_cron("* * *") is not None
     assert check_cron("61 * * * *") is not None
     assert check_cron("0 12 1 * *") is None
+
+
+# B9 (E-5, S-3, R-19): container literals, templates and long computations used to escape the limits
+def test_doubling_lists_are_refused():
+    import time
+
+    from flow_automator.expressions import Evaluator, ExpressionError
+
+    variables = {"v0": "x" * 1000}
+    evaluator = Evaluator(variables)
+    started = time.monotonic()
+    with pytest.raises(ExpressionError, match="too large"):
+        for level in range(1, 40):
+            variables[f"v{level}"] = evaluator.evaluate(f"[v{level - 1}, v{level - 1}]")
+    assert time.monotonic() - started < 1
+
+
+def test_dict_literals_count_too():
+    from flow_automator.expressions import Evaluator, ExpressionError
+
+    with pytest.raises(ExpressionError, match="too large"):
+        Evaluator({"x": "a" * 60_000}).evaluate("{'a': x, 'b': x}")
+
+
+def test_template_output_is_capped():
+    from flow_automator.expressions import Evaluator, ExpressionError
+
+    template = "{{ x }}" * 20
+    with pytest.raises(ExpressionError, match="too large"):
+        Evaluator({"x": "a" * 60_000}).render(template)
+
+
+def test_long_computations_are_stopped():
+    import time
+
+    from flow_automator.expressions import Evaluator, ExpressionError
+
+    source = "+".join(["len(join(',', range(10000)))"] * 150)
+    started = time.monotonic()
+    with pytest.raises(ExpressionError, match="took too long"):
+        Evaluator({}).evaluate(source)
+    assert time.monotonic() - started < 1
+
+
+def test_waiting_on_telemetry_does_not_count_as_computing():
+    import time
+
+    from flow_automator.expressions import Evaluator
+
+    def slow(item, value_type):
+        time.sleep(0.2)
+        return 1
+
+    assert Evaluator({}, slow).evaluate("tlm('A B C') + tlm('A B D')") == 2

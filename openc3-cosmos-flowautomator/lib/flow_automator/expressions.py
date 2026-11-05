@@ -44,6 +44,7 @@ MAX_SOURCE_LENGTH = 10_000  # characters in one expression
 MAX_AST_NODES = 2_000  # syntax tree nodes in one expression
 MAX_FORMAT_WIDTH = 200  # widths and precisions in format() specs
 MAX_ROUND_DIGITS = 100
+MAX_EVAL_SECONDS = 0.25  # computing one expression (time waiting on telemetry reads doesn't count)
 _CACHE_SOURCE_LENGTH = 1_000  # only short expressions are cached
 _CACHE_ENTRIES = 5_000
 
@@ -367,12 +368,20 @@ class Evaluator:
     def __init__(self, variables=None, tlm_lookup=None):
         self.variables = variables if variables is not None else {}
         self.tlm_lookup = tlm_lookup
+        self._deadline = None
 
     def evaluate(self, source):
+        tree = parse(source)
+        outer = self._deadline is None
+        if outer:
+            self._deadline = time.monotonic() + MAX_EVAL_SECONDS
         try:
-            return self._eval(parse(source).body)
+            return self._eval(tree.body)
         except (RecursionError, MemoryError):
             raise ExpressionError(f"Expression too large to evaluate: '{_short(source)}'") from None
+        finally:
+            if outer:
+                self._deadline = None
 
     def truthy(self, source):
         return bool(self.evaluate(source))
@@ -382,13 +391,21 @@ class Evaluator:
         if not isinstance(template, str) or "{{" not in template:
             return template
 
+        total = [len(template)]
+
         def replace(match):
             value = self.evaluate(match.group(1))
-            return "" if value is None else str(value)
+            text = "" if value is None else str(value)
+            total[0] += len(text)
+            if total[0] > MAX_RESULT_LENGTH:
+                raise ExpressionError("Result too large")
+            return text
 
         return _TEMPLATE_RE.sub(replace, template)
 
     def _eval(self, node):
+        if self._deadline is not None and time.monotonic() > self._deadline:
+            raise ExpressionError(f"Expression took too long (over {MAX_EVAL_SECONDS:g}s of computing)")
         if isinstance(node, ast.Constant):
             return node.value
         if isinstance(node, ast.Name):
@@ -433,10 +450,11 @@ class Evaluator:
         if isinstance(node, ast.IfExp):
             return self._eval(node.body) if self._eval(node.test) else self._eval(node.orelse)
         if isinstance(node, (ast.List, ast.Tuple)):
+            # Literals count too: [v, v] of a big v doubles its size without any function call
             values = [self._eval(element) for element in node.elts]
-            return values if isinstance(node, ast.List) else tuple(values)
+            return _too_big(values if isinstance(node, ast.List) else tuple(values))
         if isinstance(node, ast.Dict):
-            return {self._eval(k): self._eval(v) for k, v in zip(node.keys, node.values, strict=True)}
+            return _too_big({self._eval(k): self._eval(v) for k, v in zip(node.keys, node.values, strict=True)})
         if isinstance(node, ast.Subscript):
             container = self._eval(node.value)
             index = self._eval(node.slice) if not isinstance(node.slice, ast.Slice) else self._slice(node.slice)
@@ -464,7 +482,12 @@ class Evaluator:
             if len(args) not in (1, 2):
                 raise ExpressionError(f"{name}() takes 'TARGET PACKET ITEM' and an optional type")
             value_type = TLM_FUNCTIONS[name] if len(args) == 1 else str(args[1]).upper()
-            return self.tlm_lookup(normalize_item(args[0]), value_type)
+            started = time.monotonic()
+            try:
+                return self.tlm_lookup(normalize_item(args[0]), value_type)
+            finally:
+                if self._deadline is not None:
+                    self._deadline += time.monotonic() - started  # waiting on COSMOS isn't computing
         if name in CONTACT_FUNCTIONS:
             if args:
                 raise ExpressionError(f"{name}() takes no arguments")

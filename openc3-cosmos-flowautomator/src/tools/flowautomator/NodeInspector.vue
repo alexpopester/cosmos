@@ -389,7 +389,7 @@ export default {
     scripts: { type: Array, default: () => [] },
     problems: { type: Array, default: () => [] },
   },
-  emits: ['changed', 'delete-node'],
+  emits: ['changed', 'delete-node', 'list-removed'],
   data() {
     return {
       carets: {}, // field key -> cursor position when it last lost focus
@@ -501,6 +501,8 @@ export default {
     },
     removeItem(key, index) {
       this.config[key].splice(index, 1)
+      // Before 'changed': the editor renumbers wires that follow list positions (a Switch's case_N outputs)
+      this.$emit('list-removed', { key, index })
       this.changed()
     },
   },

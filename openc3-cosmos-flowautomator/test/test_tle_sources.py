@@ -193,7 +193,7 @@ def test_settings_are_checked(engine):
     with pytest.raises(TleSourceError, match="link-local"):
         fetcher.save_settings({"celestrak": {"url": "http://169.254.169.254"}})
     with pytest.raises(TleSourceError, match="https"):
-        fetcher.save_settings({"spacetrack": {"url": "ftp://example.com"}})
+        fetcher.save_settings({"celestrak": {"url": "ftp://example.com"}})
     saved = fetcher.save_settings({"celestrak": {"url": "https://mirror.example.com/", "hours": 6}})
     assert saved["celestrak"]["url"] == "https://mirror.example.com" and saved["celestrak"]["hours"] == 6
     assert engine.store.records("planner_settings")["tle_sources"]["celestrak"]["hours"] == 6
@@ -230,11 +230,70 @@ def test_catalog_numbers_compare_without_leading_zeros():
 
 
 def test_restoring_a_backup_keeps_tle_source_settings(engine):
-    engine.planner.fetcher.save_settings({"spacetrack": {"hours": 8, "username_secret": "ST_USER"}})
+    engine.planner.fetcher.save_settings({"spacetrack": {"hours": 8, "username_secret": "SPACETRACK_OPS_USER"}})
     backup = make_backup(engine)
     engine.planner.fetcher.save_settings({"spacetrack": {"hours": 2, "username_secret": "SPACETRACK_USERNAME"}})
     from flow_automator.backup import restore_backup
 
     result = restore_backup(engine, backup)
     assert "TLE sources" in result["settings"]
-    assert engine.planner.fetcher.settings["spacetrack"]["username_secret"] == "ST_USER"
+    assert engine.planner.fetcher.settings["spacetrack"]["username_secret"] == "SPACETRACK_OPS_USER"
+
+
+# B8 (S-1, C-5, R-3, R-13): the Space-Track login used to go wherever a write user pointed it
+@pytest.mark.parametrize(
+    "url", ["http://attacker.invalid", "https://attacker.example.com", "http://www.space-track.org"]
+)
+def test_spacetrack_address_cannot_be_changed(engine, url):
+    with pytest.raises(TleSourceError, match="can't be changed"):
+        engine.planner.fetcher.save_settings({"spacetrack": {"url": url}})
+
+
+@pytest.mark.parametrize("name", ["OTHER_DB_PASSWORD", "AWS_SECRET", "spacetrack_user"])
+def test_spacetrack_secret_names_must_be_spacetracks(engine, name):
+    with pytest.raises(TleSourceError, match="must start with SPACETRACK_"):
+        engine.planner.fetcher.save_settings({"spacetrack": {"password_secret": name}})
+
+
+def test_stored_spacetrack_settings_cannot_redirect_the_login(engine, service):
+    # As a restored backup or an older version could have left them
+    engine.store.save_record(
+        "planner_settings",
+        "tle_sources",
+        {"spacetrack": {"url": "http://attacker.invalid", "password_secret": "OTHER_DB_PASSWORD", "hours": 4}},
+    )
+    fetcher = engine.planner.fetcher
+    fetcher.load()
+    assert fetcher.settings["spacetrack"]["url"] == "https://www.space-track.org"
+    assert fetcher.settings["spacetrack"]["password_secret"] == "SPACETRACK_PASSWORD"
+
+
+def test_spacetrack_login_only_goes_to_space_track(engine, service):
+    from flow_automator.tle_sources import SpacetrackSource
+
+    engine.backend.secrets = {"SPACETRACK_USERNAME": "u", "SPACETRACK_PASSWORD": "p", "OTHER": "s3cr3t"}
+    settings = {"url": "http://attacker.invalid", "username_secret": "SPACETRACK_USERNAME", "password_secret": "OTHER"}
+    with pytest.raises(Exception, match="SPACETRACK_"):
+        SpacetrackSource().fetch(["25544"], settings, engine.backend, service)
+    assert service.calls == []
+    settings["password_secret"] = "SPACETRACK_PASSWORD"
+    SpacetrackSource().fetch(["25544"], settings, engine.backend, service)
+    urls = [url for _m, url, _d in service.calls]
+    assert urls and all(url.startswith("https://www.space-track.org/") for url in urls), urls
+
+
+@pytest.mark.parametrize("catalog", [">0/limit/100000", "25544,1", "I0001", "12345678901"])
+def test_catalog_numbers_are_checked(engine, catalog):
+    from flow_automator.contacts import PlannerError
+
+    with pytest.raises(PlannerError, match="Catalog number"):
+        engine.planner.save_satellite({"name": "Sat", "catalog": catalog})
+
+
+def test_alpha5_catalogs_are_queried_by_number():
+    from flow_automator.tle_sources import catalog_number, valid_catalog
+
+    assert valid_catalog("A0001") and valid_catalog("25544") and not valid_catalog("O0001")
+    assert catalog_number("A0001") == 100001
+    assert catalog_number("Z9999") == 339999
+    assert catalog_number("05544") == 5544
