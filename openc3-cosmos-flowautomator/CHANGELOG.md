@@ -20,6 +20,19 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.13.2] - 2026-11-05
+
+Found by the real-pass soak (`docs/REAL-DATA-TESTING.md` step 2).
+
+### Fixed
+- **A satellite added for a recently fetched catalog number gets its TLE at
+  once.** The engine keeps CelesTrak's and Space-Track's last answer for
+  each catalog number, so deleting and re-adding a satellite (or adding a
+  second one for the same object) no longer leaves it without a TLE until
+  the next fetch, up to 4 hours later. No extra request is made.
+- **A satellite waiting for its next fetch says so**, with the time, in the
+  Contacts view, instead of showing nothing.
+
 ## [1.13.1] - 2026-11-05
 
 Found by the real-pass soak (`docs/REAL-DATA-TESTING.md` step 2).

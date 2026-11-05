@@ -185,6 +185,10 @@ def _by_catalog(text, wanted):
     return found
 
 
+def _utc(t):
+    return time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(t))
+
+
 class RetrySoon(str):
     """A per-satellite reason that was the server's fault (a 5xx): try that catalog again after
     FIRST_BACKOFF_SECONDS instead of waiting the source's whole interval."""
@@ -340,6 +344,9 @@ class TleFetcher:
         self.session_factory = session_factory
         self.settings = copy.deepcopy(DEFAULT_SETTINGS)
         self.fetched = {}  # (kind, catalog) -> when it was last fetched
+        # (kind, catalog) -> (when, TLE text) of the last answer, so a satellite added for a catalog number that
+        # was fetched recently gets that TLE at once instead of waiting the whole interval for the next fetch
+        self.texts = {}
         self.status = {kind: {} for kind in DEFAULT_SETTINGS}  # last_fetch, error, retry_at, counts
         self.backoff = {}
         self.forced = set()  # kinds someone asked to fetch now
@@ -367,6 +374,10 @@ class TleFetcher:
             kind, _, catalog = str(key).partition(":")
             if kind in DEFAULT_SETTINGS and catalog and isinstance(when, (int, float)):
                 self.fetched[(kind, catalog)] = float(when)
+        for key, entry in (state.get("texts") or {}).items():
+            kind, _, catalog = str(key).partition(":")
+            if kind in DEFAULT_SETTINGS and catalog and isinstance(entry, list) and len(entry) == 2:
+                self.texts[(kind, catalog)] = (float(entry[0]), str(entry[1]))
         for kind, saved in (state.get("sources") or {}).items():
             if kind in DEFAULT_SETTINGS and isinstance(saved, dict):
                 for key in ("retry_at", "refused", "error", "last_attempt", "last_fetch"):
@@ -378,6 +389,7 @@ class TleFetcher:
     def _save_state(self):
         state = {
             "fetched": {f"{kind}:{catalog}": when for (kind, catalog), when in self.fetched.items()},
+            "texts": {f"{kind}:{catalog}": [when, text] for (kind, catalog), (when, text) in self.texts.items()},
             "sources": {
                 kind: {
                     **{
@@ -532,9 +544,46 @@ class TleFetcher:
             wanted = self._wanted(kind)
             due = [c for c in wanted if now - self.fetched.get((kind, c), -1e18) >= interval]
             self.forced.discard(kind)
+            self._fill_new_satellites(kind, source, wanted, due, settings, now)
             if not due:
                 continue
             self._fetch(kind, source, settings, due, wanted, backend, now)
+
+    def _fill_new_satellites(self, kind, source, wanted, due, settings, now):
+        """Satellites with no TLE whose catalog number isn't due: give them the last answer for it, if
+        there is one, or say when it will be fetched (deleting and re-adding a satellite used to leave it
+        with no TLE and no reason for up to the whole interval)."""
+        for catalog, sat_ids in wanted.items():
+            if catalog in due:
+                continue
+            for sat_id in sat_ids:
+                sat = self.planner.satellites.get(sat_id)
+                if sat is None or sat.get("tle"):
+                    continue
+                cached = self.texts.get((kind, catalog))
+                if cached is not None and self.sat_status.get(sat_id, {}).get("result") != "rejected":
+                    when, text = cached
+                    outcome = self.planner.intake.ingest(text, kind, satellite_id=sat_id, now=now)
+                    first = (outcome["results"] or [{"result": "rejected", "reason": "; ".join(outcome["problems"])}])[
+                        0
+                    ]
+                    reason = first.get("reason", "") or f"from {source.label}'s answer at {_utc(when)}"
+                    self.sat_status[sat_id] = {
+                        "source": kind,
+                        "time": when,
+                        "result": first["result"],
+                        "reason": reason,
+                        "epoch": first.get("epoch"),
+                    }
+                elif not self.sat_status.get(sat_id):
+                    fetched = self.fetched.get((kind, catalog), now)
+                    self.sat_status[sat_id] = {
+                        "source": kind,
+                        "time": None,
+                        "result": "waiting",
+                        "reason": f"{source.label} is next asked for this catalog number at "
+                        f"{_utc(fetched + settings['hours'] * 3600)} (it was fetched recently)",
+                    }
 
     def _fetch(self, kind, source, settings, due, wanted, backend, now):
         status = self.status[kind]
@@ -577,6 +626,8 @@ class TleFetcher:
         counts = {}
         for catalog in catalogs:
             self.fetched[(kind, catalog)] = now
+            if catalog in texts:
+                self.texts[(kind, catalog)] = (now, texts[catalog])
             if isinstance(reasons.get(catalog), RetrySoon) and catalog not in texts:
                 # Due again FIRST_BACKOFF_SECONDS from now, whatever the source's interval
                 self.fetched[(kind, catalog)] = now - self.settings[kind]["hours"] * 3600 + FIRST_BACKOFF_SECONDS

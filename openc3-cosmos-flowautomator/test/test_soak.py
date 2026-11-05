@@ -234,3 +234,19 @@ def test_setup_pins_the_demo_rule_to_its_own_stations():
     api = FakeApi()
     soak_setup.pin_demo_rules(api)
     assert api.puts == [("/rules/r1", {"station_ids": ["d1"]})]
+
+
+def test_maintenance_windows_are_left_out_of_the_scores():
+    windows = [{"start": 1000.0, "end": 1100.0, "why": "installed 1.13.2"}]
+    base = {"anchor": "aos", "offset": -60, "aos": 500.0, "tca": 700.0, "los": 900.0, "drift": 0}
+    activities = {
+        "before": {**base, "id": "before", "status": "done", "started_at": 441.0},
+        "hit": {**base, "id": "hit", "aos": 1050.0, "los": 1500.0, "status": "failed", "message": "interrupted"},
+        "after": {**base, "id": "after", "aos": 1200.0, "los": 1600.0, "status": "done", "started_at": 1141.0},
+    }
+    assert soak_report.in_maintenance(activities["hit"], windows)
+    assert not soak_report.in_maintenance(activities["before"], windows)
+    assert not soak_report.in_maintenance(activities["after"], windows)  # starts at 1140, after the window
+    behaviour = soak_report.scheduler_behaviour(activities, [], windows)
+    assert behaviour["left_out_for_maintenance"] == 1
+    assert behaviour["statuses"] == {"done": 2} and behaviour["problems"] == {}

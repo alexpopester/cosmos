@@ -256,16 +256,16 @@ activities on TLE updates (D12). Step 2 should measure this drift directly.
   TCA more than 5 s (activities still follow it, by `retime_tolerance`).
   Anything tracking passes by id must pair them up again; the recorder does.
 
-**Found after the fix (open):**
+**Found after the fix:**
 
 - **A re-added satellite can wait hours for its first TLE, with no reason
-  shown.** The fetcher remembers when each catalog number was last fetched,
+  shown** (fixed in 1.13.2: the engine keeps the last answer per catalog
+  number and applies it at once; a satellite still waiting shows when).
+  The fetcher remembers when each catalog number was last fetched,
   even after its satellite is deleted (that's what keeps us within
   CelesTrak's rate rules). Deleting and re-adding FRONTIERSAT and ERNST left
   them with no TLE until their catalog's next normal fetch (up to 4 h), and
-  their fetch status was empty. A satellite with no TLE should at least say
-  when it will be fetched, and could use the 2-hour minimum rather than the
-  normal interval.
+  their fetch status was empty.
 - **Load at realistic scale.** 18 satellites × 13 stations over the 7-day
   horizon is 10,325 contacts and 4,571 scheduled activities. `/schedule` is
   10.8 MB and takes 3 s, and the idle engine uses a steady ~20% of a CPU.
@@ -275,3 +275,10 @@ activities on TLE updates (D12). Step 2 should measure this drift directly.
 
 **Recording since 2026-11-05 20:19 UTC.** First read: 16 TLEs, 7,063
 predicted passes at the soak stations, 4,571 activities.
+
+**Upgrading mid-soak:** `realdata/soak.sh install <gem>` installs a new
+plugin version without reloading the demo and records the engine restart as
+a maintenance window in the manifest. The report leaves activities that
+overlap a window out of the scheduler scores (runs interrupted by a restart
+stop, by design: D25). 1.13.2 was installed this way at 21:07 UTC; the 4
+runs in progress stopped.

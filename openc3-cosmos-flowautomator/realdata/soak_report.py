@@ -196,7 +196,18 @@ def station_coverage(observations, manifest, events, activities):
 # ---- 3. scheduler behaviour -------------------------------------------------------
 
 
-def scheduler_behaviour(activities, events):
+def in_maintenance(activity, windows):
+    """Whether an activity's time (planned start to LOS) overlaps a maintenance window (an engine restart)."""
+    anchor_time = activity.get(activity.get("anchor") or "aos") or activity.get("aos")
+    if anchor_time is None or activity.get("los") is None:
+        return False
+    start = anchor_time + float(activity.get("offset") or 0)
+    return any(start <= w["end"] and activity["los"] >= w["start"] for w in windows)
+
+
+def scheduler_behaviour(activities, events, maintenance=()):
+    affected = {k for k, a in activities.items() if in_maintenance(a, maintenance)}
+    activities = {k: a for k, a in activities.items() if k not in affected}
     statuses = collections.Counter(a["status"] for a in activities.values())
     late = []
     for a in activities.values():
@@ -219,6 +230,7 @@ def scheduler_behaviour(activities, events):
     )
     return {
         "activities": len(activities),
+        "left_out_for_maintenance": len(affected),
         "statuses": dict(statuses),
         "start_lateness_s": stats(late),
         "late_over_5s": sum(1 for x in late if x > 5),
@@ -345,6 +357,7 @@ def markdown(report):
         "",
         f"- Activities: {behaviour['activities']} — "
         + ", ".join(f"{k} {v}" for k, v in sorted(behaviour["statuses"].items())),
+        f"- Left out (during engine restarts for upgrades): {behaviour['left_out_for_maintenance']}",
         f"- Start lateness s (median / p95 / max): {_fmt(behaviour['start_lateness_s'])}; "
         f"over 5 s late: {behaviour['late_over_5s']}",
         f"- Retimes: {behaviour['retime_events']} events; |drift| s: {_fmt(behaviour['abs_drift_s'])}",
@@ -383,7 +396,7 @@ def build_report(manifest, events, observations, stations):
         "accuracy_by_age": accuracy_by_age(checked),
         "worst_frames": worst[:20],
         "coverage": station_coverage(observations, manifest, events, activities),
-        "scheduler": scheduler_behaviour(activities, events),
+        "scheduler": scheduler_behaviour(activities, events, manifest.get("maintenance") or []),
         "churn": prediction_churn(events),
         "accuracy": accuracy,
     }
@@ -393,11 +406,23 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--offline", action="store_true", help="don't fetch from SatNOGS")
     parser.add_argument("--token", default=os.environ.get("SATNOGS_TOKEN"))
+    parser.add_argument(
+        "--maintenance",
+        nargs=3,
+        metavar=("START", "END", "WHY"),
+        help="record a maintenance window (Unix seconds) the scores leave out, and stop",
+    )
     args = parser.parse_args(argv)
 
     manifest = common.load_json(common.MANIFEST)
     if not manifest:
         raise SystemExit(f"No soak manifest at {common.MANIFEST}")
+    if args.maintenance:
+        start, end, why = float(args.maintenance[0]), float(args.maintenance[1]), args.maintenance[2]
+        manifest.setdefault("maintenance", []).append({"start": start, "end": end, "why": why})
+        common.save_json(common.MANIFEST, manifest)
+        print(f"Maintenance {common.now_iso(start)} to {common.now_iso(end)} recorded: {why}")
+        return 0
     events = load_events()
     client = sc.SatnogsClient(token=args.token, offline=args.offline)
     stations = client.stations()

@@ -437,3 +437,41 @@ def test_a_server_error_for_one_catalog_is_retried_soon(engine, service):
     planner.fetcher.poll(EPOCH + 600)  # not the whole 4 hours
     assert len(service.calls) == calls + 1
     assert planner.fetcher.sat_status[broken["id"]]["result"] in ("applied", "rejected", "skipped")
+
+
+# Found by the real-pass soak: deleting and re-adding a satellite left it with no TLE (and no reason) until its
+# catalog number's next fetch, up to the whole interval later
+def test_a_re_added_satellite_gets_the_last_answer_at_once(engine, service):
+    planner = engine.planner
+    first = add_sat(planner, "celestrak")
+    planner.fetcher.poll(EPOCH)
+    calls = len(service.calls)
+    planner.delete_satellite(first["id"])
+    again = add_sat(planner, "celestrak")
+    planner.fetcher.poll(EPOCH + 60)
+    assert len(service.calls) == calls  # no new request: CelesTrak's rate rules still hold
+    assert planner.satellites[again["id"]]["tle"]["line1"] == ISS_1
+    status = planner.fetcher.sat_status[again["id"]]
+    assert status["result"] == "applied" and status["time"] == EPOCH
+
+
+def test_a_satellite_waiting_for_its_catalog_says_when(engine, service):
+    planner = engine.planner
+    planner.fetcher.fetched[("celestrak", "25544")] = EPOCH  # fetched before this version kept the answer
+    sat = add_sat(planner, "celestrak")
+    planner.fetcher.poll(EPOCH + 60)
+    assert service.calls == []
+    status = planner.fetcher.sat_status[sat["id"]]
+    assert status["result"] == "waiting" and "next asked" in status["reason"] and "UTC" in status["reason"]
+    planner.fetcher.poll(EPOCH + 4 * HOUR)  # its turn
+    assert planner.satellites[sat["id"]]["tle"]["line1"] == ISS_1
+
+
+def test_the_last_answers_survive_a_restart(engine, service):
+    planner = engine.planner
+    add_sat(planner, "celestrak")
+    planner.fetcher.poll(EPOCH)
+    saved = planner.store.records("planner_settings")["tle_fetch_state"]
+    fresh = type(planner.fetcher)(planner)
+    fresh._load_state(saved)
+    assert fresh.texts[("celestrak", "25544")][0] == EPOCH and ISS_1 in fresh.texts[("celestrak", "25544")][1]

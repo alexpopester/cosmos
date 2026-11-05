@@ -5,6 +5,7 @@
 #   realdata/soak.sh start                       # start the recorder container (restarts with docker)
 #   realdata/soak.sh status                      # recorder state and the latest events
 #   realdata/soak.sh report                      # fetch SatNOGS data and score the soak so far
+#   realdata/soak.sh install <gem>               # upgrade the plugin mid-soak; the restart is left out of the scores
 #   realdata/soak.sh stop                        # stop the recorder
 #   COSMOS_PASSWORD=... realdata/soak.sh clear   # stop the recorder and remove the soak from COSMOS
 set -euo pipefail
@@ -36,10 +37,30 @@ case "${1:-}" in
     tail -n 3 realdata/cache/soak/events-*.jsonl 2>/dev/null | cut -c1-200 || true
     ;;
   report) run realdata/soak_report.py "${@:2}" ;;
+  install)
+    # Install a Flow Automator gem without reloading the demo (setup_demo.sh would put the demo rule back on
+    # the soak stations), and record the engine restart as a maintenance window the report leaves out
+    GEM=${2:?usage: soak.sh install <gem>}
+    CMD_API=${CMD_API_CONTAINER:-cosmos-openc3-cosmos-cmd-tlm-api-1}
+    START=$(date +%s)
+    SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    docker cp "$GEM" "$CMD_API:/tmp/$(basename "$GEM")" >/dev/null
+    docker exec "$CMD_API" ruby /openc3/bin/openc3cli load "/tmp/$(basename "$GEM")" DEFAULT 2>&1 \
+      | grep -q "Command succeeded" || { echo "Loading $GEM failed"; exit 1; }
+    echo "Loaded $GEM; waiting for the new engine"
+    for _ in $(seq 1 300); do
+      docker logs --since "$SINCE" cosmos-openc3-operator-1 2>&1 | grep "FLOW-ENGINE" \
+        | grep -q "$(basename "$GEM")" && break
+      sleep 1
+    done
+    until curl -sf "${COSMOS_URL:-http://localhost:2900}/flow-automator/api/health" >/dev/null; do sleep 2; done
+    sleep 30 # the planner re-predicts and the scheduler catches up
+    run realdata/soak_report.py --maintenance "$START" "$(date +%s)" "installed $(basename "$GEM")"
+    ;;
   stop) docker rm -f "$NAME" ;;
   clear)
     docker rm -f "$NAME" >/dev/null 2>&1 || true
     run realdata/soak_setup.py --clear
     ;;
-  *) sed -n '2,10p' "$0"; exit 1 ;;
+  *) sed -n '2,11p' "$0"; exit 1 ;;
 esac

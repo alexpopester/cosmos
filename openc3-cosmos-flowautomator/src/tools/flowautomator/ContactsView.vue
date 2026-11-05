@@ -1492,6 +1492,8 @@ export default {
       let hint = `Fetched by catalog number every few hours (TLE inputs sets how often); a new TLE still passes the safeguards.`
       if (fetch?.source === d.tle_source && fetch.time) {
         hint += ` Last fetch ${this.fmtTime(fetch.time)} UTC: ${fetch.result}${fetch.reason ? ` (${fetch.reason})` : ''}.`
+      } else if (fetch?.source === d.tle_source && fetch.result === 'waiting') {
+        hint += ` Waiting: ${fetch.reason}.`
       } else if (d.tle_source === 'spacetrack') {
         hint += ` Needs COSMOS secrets with your ${label} login (see TLE inputs).`
       }
@@ -1638,7 +1640,7 @@ export default {
     fetchProblem(sat) {
       const fetch = sat.tle_fetch
       if (!fetch || fetch.source !== sat.tle_source?.kind) return ''
-      if (['missing', 'rejected', 'held'].includes(fetch.result)) {
+      if (['missing', 'rejected', 'held', 'waiting'].includes(fetch.result)) {
         return `${fetch.source}: ${fetch.reason || fetch.result}`
       }
       return ''
