@@ -302,6 +302,10 @@ The first run found the race above (the 2 reboot scenarios failed) and a
 poorly designed early-LOS scenario (cFS finished the whole pass in 2.5 s,
 before the link closed at 4 s). After the fixes: 7/7.
 
+First real pass (NOAA 19 over Fairbanks, 2026-11-06 03:11 UTC): telemetry
+acquired 1 s after AOS, both no-ops acknowledged within 2.5 s, nominal on the
+first attempt, and the link closed at the predicted LOS.
+
 ## Open questions
 
 - A SatNOGS API token for higher rate limits (step 2 onwards)?
