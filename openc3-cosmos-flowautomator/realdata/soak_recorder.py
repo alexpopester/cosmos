@@ -29,6 +29,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import soak_common as common  # noqa: E402
+from cfs_setup import outcome as cfs_outcome  # noqa: E402
 
 
 STATE = os.path.join(common.SOAK_DIR, "recorder_state.json")
@@ -67,8 +68,9 @@ def _activity(a):
 
 
 def watched_rules(manifest):
-    """The soak rule and the step 3b post-pass rules."""
-    return {manifest.get("rule_id")} | {v["rule_id"] for v in (manifest.get("realtlm") or {}).values()}
+    """The soak rule, the step 3b post-pass rules and the step 4 cFS pass ops rule."""
+    rules = {manifest.get("rule_id")} | {v["rule_id"] for v in (manifest.get("realtlm") or {}).values()}
+    return rules | ({manifest["cfs"]["rule_id"]} if manifest.get("cfs") else set())
 
 
 def check_outcome(run):
@@ -210,6 +212,14 @@ def record_once(fa, manifest):
             try:
                 run = fa.get(f"/runs/{event['run_id']}")
                 event["outcome"], event["summary"] = check_outcome(run.get("run", run))
+            except Exception as error:  # noqa: BLE001 - the outcome is extra; the event still counts
+                event["outcome"] = f"unknown ({type(error).__name__})"
+        cfs_rule = (manifest.get("cfs") or {}).get("rule_id")
+        if finished and cfs_rule and event.get("rule_id") == cfs_rule and event.get("run_id"):
+            try:
+                run = fa.get(f"/runs/{event['run_id']}")
+                result, los = cfs_outcome(run.get("run", run))
+                event["outcome"], event["los"] = result, los
             except Exception as error:  # noqa: BLE001 - the outcome is extra; the event still counts
                 event["outcome"] = f"unknown ({type(error).__name__})"
     append_events(events, now)

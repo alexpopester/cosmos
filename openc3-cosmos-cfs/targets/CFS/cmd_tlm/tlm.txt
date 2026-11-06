@@ -1,0 +1,84 @@
+# Telemetry header: STREAM_ID, SEQUENCE, PKT_LEN (big endian), cFE time (4 + 2 bytes), 4 spare: payload at byte 16.
+# cFE time here is mission elapsed time since the flight software started, not UTC: COSMOS uses the received time.
+<%
+  def cfs_tlm_header(mid)
+    [
+      "  APPEND_ID_ITEM STREAM_ID 16 UINT #{mid} \"Message id\" BIG_ENDIAN",
+      "  APPEND_ITEM SEQUENCE 16 UINT \"CCSDS sequence flags and count\" BIG_ENDIAN",
+      "  APPEND_ITEM PKT_LEN 16 UINT \"CCSDS length (total - 7)\" BIG_ENDIAN",
+      "  APPEND_ITEM SECONDS 32 UINT \"cFE time: seconds (mission elapsed)\" BIG_ENDIAN",
+      "  APPEND_ITEM SUBSECS 16 UINT \"cFE time: subseconds\" BIG_ENDIAN",
+      "  APPEND_ITEM SPARE_HDR 32 UINT \"Header padding\"",
+    ].join("\n")
+  end
+%>
+
+TELEMETRY <%= target_name %> ES_HK LITTLE_ENDIAN "Executive services housekeeping"
+<%= cfs_tlm_header("0x0800") %>
+  APPEND_ITEM CMD_CNT 8 UINT "Commands accepted"
+  APPEND_ITEM CMD_ERRS 8 UINT "Commands rejected"
+  APPEND_ITEM CORE_CHECKSUM 16 UINT "cFE core checksum"
+  APPEND_ITEM CFE_MAJOR 8 UINT "cFE version"
+  APPEND_ITEM CFE_MINOR 8 UINT ""
+  APPEND_ITEM CFE_REVISION 8 UINT ""
+  APPEND_ITEM CFE_MISSION_REV 8 UINT ""
+  APPEND_ITEM OSAL_MAJOR 8 UINT "OSAL version"
+  APPEND_ITEM OSAL_MINOR 8 UINT ""
+  APPEND_ITEM OSAL_REVISION 8 UINT ""
+  APPEND_ITEM OSAL_MISSION_REV 8 UINT ""
+  APPEND_ITEM PSP_MAJOR 8 UINT "PSP version"
+  APPEND_ITEM PSP_MINOR 8 UINT ""
+  APPEND_ITEM PSP_REVISION 8 UINT ""
+  APPEND_ITEM PSP_MISSION_REV 8 UINT ""
+  APPEND_ITEM SYSLOG_BYTES_USED 32 UINT "System log bytes used"
+  APPEND_ITEM SYSLOG_SIZE 32 UINT "System log size"
+  APPEND_ITEM SYSLOG_ENTRIES 32 UINT "System log entries"
+  APPEND_ITEM SYSLOG_MODE 32 UINT "System log mode"
+  APPEND_ITEM ERLOG_INDEX 32 UINT "Exception and reset log index"
+  APPEND_ITEM ERLOG_ENTRIES 32 UINT "Exception and reset log entries since power on"
+  APPEND_ITEM CORE_APPS 32 UINT "Core apps registered"
+  APPEND_ITEM EXTERNAL_APPS 32 UINT "Other apps registered"
+  APPEND_ITEM TASKS 32 UINT "Tasks registered"
+  APPEND_ITEM LIBS 32 UINT "Libraries registered"
+  APPEND_ITEM RESET_TYPE 32 UINT "Last reset"
+    STATE PROCESSOR 1
+    STATE POWERON 2
+  APPEND_ITEM RESET_SUBTYPE 32 UINT "Reset subtype"
+  APPEND_ITEM PROCESSOR_RESETS 32 UINT "Processor resets since power on"
+  APPEND_ITEM MAX_PROCESSOR_RESETS 32 UINT "Processor resets allowed before a power-on reset"
+  APPEND_ITEM BOOT_SOURCE 32 UINT "Boot source"
+
+TELEMETRY <%= target_name %> EVENT LITTLE_ENDIAN "Event message (cFE event services, long format)"
+<%= cfs_tlm_header("0x0808") %>
+  APPEND_ITEM APP_NAME 160 STRING "App that sent it"
+  APPEND_ITEM EVENT_ID 16 UINT "Event id"
+  APPEND_ITEM EVENT_TYPE 16 UINT "Event type"
+    STATE DEBUG 1
+    STATE INFO 2
+    STATE ERROR 3 RED
+    STATE CRITICAL 4 RED
+  APPEND_ITEM SPACECRAFT_ID 32 UINT "Spacecraft id"
+  APPEND_ITEM PROCESSOR_ID 32 UINT "Processor id"
+  APPEND_ITEM MESSAGE 976 STRING "Event text"
+
+TELEMETRY <%= target_name %> SAMPLE_HK LITTLE_ENDIAN "Sample app housekeeping"
+<%= cfs_tlm_header("0x0883") %>
+  APPEND_ITEM CMD_ERRS 8 UINT "Commands rejected"
+  APPEND_ITEM CMD_CNT 8 UINT "Commands accepted"
+  APPEND_ITEM SPARE 16 UINT ""
+
+TELEMETRY <%= target_name %> TO_LAB_HK LITTLE_ENDIAN "Telemetry output housekeeping"
+<%= cfs_tlm_header("0x0880") %>
+  APPEND_ITEM CMD_CNT 8 UINT "Commands accepted"
+  APPEND_ITEM CMD_ERRS 8 UINT "Commands rejected"
+  APPEND_ITEM SPARE 16 UINT ""
+
+TELEMETRY <%= target_name %> CI_LAB_HK LITTLE_ENDIAN "Command ingest housekeeping"
+<%= cfs_tlm_header("0x0884") %>
+  APPEND_ITEM CMD_ERRS 8 UINT "Commands rejected"
+  APPEND_ITEM CMD_CNT 8 UINT "Commands accepted"
+  APPEND_ITEM CHECKSUMS_ENABLED 8 UINT "Checksums checked"
+  APPEND_ITEM SOCKET_CONNECTED 8 UINT "Command socket up"
+  APPEND_ITEM SPARE1 64 UINT ""
+  APPEND_ITEM INGEST_PACKETS 32 UINT "Commands ingested"
+  APPEND_ITEM INGEST_ERRORS 32 UINT "Ingest errors"

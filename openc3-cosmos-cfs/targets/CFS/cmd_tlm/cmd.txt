@@ -1,0 +1,40 @@
+# Command header: STREAM_ID (message id), SEQUENCE, PKT_LEN (total bytes - 7), FUNCTION_CODE, CHECKSUM
+<%
+  def cfs_cmd_header(mid, fc, payload_bytes, desc)
+    [
+      "  APPEND_ID_PARAMETER STREAM_ID 16 UINT MIN MAX #{mid} \"Message id\" BIG_ENDIAN",
+      "  APPEND_PARAMETER SEQUENCE 16 UINT MIN MAX 0xC000 \"CCSDS sequence flags and count\" BIG_ENDIAN",
+      "  APPEND_PARAMETER PKT_LEN 16 UINT MIN MAX #{8 + payload_bytes - 7} \"CCSDS length (total - 7)\" BIG_ENDIAN",
+      "  APPEND_ID_PARAMETER FUNCTION_CODE 8 UINT MIN MAX #{fc} \"#{desc}\"",
+      "  APPEND_PARAMETER CHECKSUM 8 UINT MIN MAX 0 \"Checksum (not checked by these apps)\"",
+    ].join("\n")
+  end
+%>
+
+COMMAND <%= target_name %> ES_NOOP LITTLE_ENDIAN "Executive services: no-op (command counter +1, an event)"
+<%= cfs_cmd_header("0x1806", 0, 0, "No-op") %>
+COMMAND <%= target_name %> ES_RESET_COUNTERS LITTLE_ENDIAN "Executive services: reset its counters"
+<%= cfs_cmd_header("0x1806", 1, 0, "Reset counters") %>
+COMMAND <%= target_name %> ES_RESTART LITTLE_ENDIAN "Executive services: restart the flight software (a reboot)"
+  HAZARDOUS "Restarts the flight software: the link drops until it's back and telemetry is re-enabled"
+<%= cfs_cmd_header("0x1806", 2, 2, "Restart") %>
+  APPEND_PARAMETER RESTART_TYPE 16 UINT 1 2 1 "1 processor reset, 2 power-on reset"
+    STATE PROCESSOR 1
+    STATE POWERON 2
+
+COMMAND <%= target_name %> SAMPLE_NOOP LITTLE_ENDIAN "Sample app: no-op"
+<%= cfs_cmd_header("0x1882", 0, 0, "No-op") %>
+COMMAND <%= target_name %> SAMPLE_RESET_COUNTERS LITTLE_ENDIAN "Sample app: reset its counters"
+<%= cfs_cmd_header("0x1882", 1, 0, "Reset counters") %>
+COMMAND <%= target_name %> SAMPLE_PROCESS LITTLE_ENDIAN "Sample app: process"
+<%= cfs_cmd_header("0x1882", 2, 0, "Process") %>
+COMMAND <%= target_name %> SAMPLE_BAD_CC LITTLE_ENDIAN "Sample app: an invalid function code, rejected on purpose (error counter +1)"
+<%= cfs_cmd_header("0x1882", 99, 0, "Invalid on purpose") %>
+
+COMMAND <%= target_name %> TO_LAB_ENABLE LITTLE_ENDIAN "Telemetry output: start sending telemetry to DEST_IP:1235"
+<%= cfs_cmd_header("0x1880", 6, 16, "Output enable") %>
+  APPEND_PARAMETER DEST_IP 128 STRING "127.0.0.1" "Where telemetry goes (the contact gate shares cFS's network: 127.0.0.1)"
+COMMAND <%= target_name %> TO_LAB_NOOP LITTLE_ENDIAN "Telemetry output: no-op"
+<%= cfs_cmd_header("0x1880", 0, 0, "No-op") %>
+COMMAND <%= target_name %> CI_LAB_NOOP LITTLE_ENDIAN "Command ingest: no-op"
+<%= cfs_cmd_header("0x1884", 0, 0, "No-op") %>

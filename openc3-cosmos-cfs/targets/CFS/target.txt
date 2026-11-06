@@ -1,0 +1,6 @@
+# CFS: NASA core Flight System (pinned build 0ba1faa) reached through the contact gate (see plugin.txt).
+# Layouts checked against the build's headers: commands have an 8-byte header (CCSDS primary + function
+# code + checksum), telemetry a 16-byte one (primary + 6-byte time + 4 spare). Payloads are little endian.
+LANGUAGE python
+COMMANDS cmd.txt
+TELEMETRY tlm.txt

@@ -1,0 +1,16 @@
+# NASA cFS as the "spacecraft": real flight software, commanded through a contact gate
+# that only passes traffic while a ground station can see the satellite cFS flies
+# (docker/gate). Step 4 of openc3-cosmos-flowautomator/docs/REAL-DATA-TESTING.md.
+#
+# The cFS and gate containers run next to COSMOS (docker/run.sh). COSMOS sends
+# commands to the gate's command port and listens for telemetry on cfs_tlm_port.
+
+VARIABLE cfs_target_name CFS
+VARIABLE cfs_gate_host cfs-gate
+VARIABLE cfs_gate_cmd_port 2234
+VARIABLE cfs_tlm_port 1235
+
+TARGET CFS <%= cfs_target_name %>
+
+INTERFACE <%= cfs_target_name %>_INT openc3/interfaces/udp_interface.py <%= cfs_gate_host %> <%= cfs_gate_cmd_port %> <%= cfs_tlm_port %> None None 128 10.0 None
+  MAP_TARGET <%= cfs_target_name %>

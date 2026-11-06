@@ -21,6 +21,10 @@ versions follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Docs
+- **Commanding real flight software in contacts** (`realdata/cfs_setup.py`,
+  `realdata/soak.sh cfs-faults`, step 4): pass ops on NASA cFS behind a contact
+  gate, in every real NOAA 19 pass over Fairbanks, plus 7 staged fault
+  scenarios (dead pass, early LOS, reboots, packet loss, link after LOS).
 - **Replay regression on recorded real passes** (`realdata/soak.sh replay`,
   step 3c): replays real CANVAS, AEPEX and CatSat passes as recorded, with a
   fault injected, and lost, and checks that the post-pass templates say

@@ -1,0 +1,17 @@
+PLUGIN_NAME = Dir['*.gemspec'][0].split('.')[0..-2].join('.')
+
+task :require_version do
+  unless ENV['VERSION']
+    puts "VERSION is required: rake build VERSION=X.Y.Z"
+    exit 1
+  end
+  changelog = File.exist?('CHANGELOG.md') ? File.read('CHANGELOG.md') : ''
+  unless changelog.match?(/^## \[#{Regexp.escape(ENV['VERSION'])}\]/)
+    puts "CHANGELOG.md has no entry for #{ENV['VERSION']}"
+    exit 1
+  end
+end
+
+task :build => [:require_version] do
+  system("gem build #{PLUGIN_NAME}")
+end

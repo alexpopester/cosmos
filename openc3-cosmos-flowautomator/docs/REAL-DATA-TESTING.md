@@ -54,7 +54,7 @@ and don't book observations on other people's stations at scale.
 | 1 | Predictions vs SatNOGS observations | `orbit.py` pass geometry against real passes and real frame times | Done 2026-11-05 (see Results) |
 | 2 | Real-pass scheduling soak | Planner, rules, retiming and capacity on live passes over real stations | Recording since 2026-11-05 (final report after ≥ 1 week) |
 | 3 | Real telemetry into COSMOS + replay | Flows acting on real values; recorded passes as a regression set | Done 2026-11-06: 3a live telemetry, 3b post-pass checks, 3c replay regression (9/9) |
-| 4 | NOS3 command loop | Contact flows commanding real cFS on a real orbit | Not started |
+| 4 | Commanding real flight software in contacts | Contact flows commanding real cFS on a real orbit, with faults | Built 2026-11-06 (cFS behind a contact gate; NOS3 needs a bigger machine) |
 
 ### Step 1: predictions vs SatNOGS observations
 
@@ -230,16 +230,77 @@ can arrive after a newer one. Seen live: the latest CANVAS beacon went from
 pass. Every packet now also carries `NEWEST_FRAME_TIME`, which never goes back,
 and the checks wait on that.
 
-### Step 4: NOS3 command loop
+### Step 4: commanding real flight software in contacts (cFS behind a contact gate)
 
-- Run NOS3 without its own ground software; install its command/telemetry
-  definitions as a plugin in our COSMOS and connect to its radio ports.
-- Configure 42 to fly a real satellite's TLE starting at the current UTC, at
-  1x speed, and gate the link with a small proxy that only passes traffic
-  while a station can see the spacecraft (computed from 42's position, not
-  from our planner).
-- Contact templates that command cFS (NOOP, counters, mode changes, dumps)
-  and react to resets and early LOS.
+NOS3 needs 8–16 GB of RAM for itself, and the dev laptop (12 GB, already
+swapping with COSMOS) can't host it. So step 4 runs NASA cFS on its own: the
+same flight software NOS3 runs, without the hardware simulators and the 42
+dynamics. cFS uses 4 MB and the gate 46 MB. Full NOS3 stays an option on a
+bigger machine, reusing the same definitions.
+
+**What's built** (plugin `openc3-cosmos-cfs`, repo root):
+
+- **cFS** (NASA cFS bundle, commit 0ba1faa, the one the OpenC3 cFS guide was
+  tested with): executive services, events, the sample app and the command
+  ingest / telemetry output lab apps. The packet definitions were checked
+  against the build's own headers: an 8-byte command header, a 16-byte
+  telemetry header, little-endian payloads.
+- **The contact gate**: the only path between COSMOS and cFS. It passes
+  traffic while Fairbanks can see NOAA 19, computed with skyfield from its
+  own CelesTrak TLE, independently of the planner. That gives about ten real
+  passes a day. Its control port stages passes and faults: closed, open,
+  window, packet loss.
+- **Pass ops** (`realdata/cfs_setup.py`): a rule runs the template in every
+  real pass. At AOS it:
+  1. switches telemetry on (always needed after a restart);
+  2. acquires housekeeping;
+  3. sends executive-services and sample-app no-ops and checks each command
+     counter went up by one;
+  4. on any gap, makes one more full attempt, then raises an alert naming
+     what was lost;
+  5. after LOS, checks that telemetry stopped (the planner's LOS against the
+     gate's).
+
+  The soak recorder logs each pass's outcome; the report shows them as
+  section 6.
+- **Fault scenarios** (`realdata/soak.sh cfs-faults`): staged passes with
+  faults. See Results.
+
+**Found by real flight software:**
+- The sample app reports an invalid function code only as an ERROR event;
+  its error counter stays at 0. Automation has to check acknowledgements
+  (the command counter going up) or events, not error counters.
+- A commanded restart (`ES_RESTART`) restarts the process, and it comes back
+  as a power-on reset (the native build keeps no memory across it) with
+  telemetry output off until it's commanded on again.
+- The OpenC3 guide's `TO_LAB_ENABLE` length (0x12) doesn't match the
+  layout: 8 + 16 bytes is 0x11 by the CCSDS rule. 0x11 is accepted.
+- The planner and the gate (sgp4 + our math against skyfield, each with its
+  own TLE fetch) agreed on the first pass to 1 s at AOS and 0 s at LOS.
+- **A race in the ground system, found by the reboot scenarios:** COSMOS counts
+  a packet before its values reach the current value table. So "wait for a
+  housekeeping packet, then read its command counter" read the counter from
+  before the reboot, and every acknowledgement after a reboot looked like a
+  failure. The template now waits for the packets' own `RECEIVED_COUNT`,
+  which is updated together with the counters. Any flow that does "wait for a
+  packet, then read it" has the same exposure; this is worth a node-level fix
+  (backlog).
+
+**Results (2026-11-06):**
+
+| Scenario (`soak.sh cfs-faults`) | Fault | Expected | Result |
+|---|---|---|---|
+| nominal | none | nominal, link closed at LOS | pass |
+| dead pass | link never opens | failed, alert | pass |
+| early LOS | link cut once housekeeping is acquired | failed, alert | pass |
+| reboot before the pass | `ES_RESTART`: telemetry off at AOS | nominal (it switches it on) | pass |
+| reboot mid-pass | `ES_RESTART` as the sample no-op goes up | recovered on the 2nd attempt | pass |
+| lossy link | 10% packet loss both ways | nominal or recovered | pass (recovered) |
+| link after LOS | link up 60 s past LOS | telemetry after LOS reported | pass |
+
+The first run found the race above (the 2 reboot scenarios failed) and a
+poorly designed early-LOS scenario (cFS finished the whole pass in 2.5 s,
+before the link closed at 4 s). After the fixes: 7/7.
 
 ## Open questions
 

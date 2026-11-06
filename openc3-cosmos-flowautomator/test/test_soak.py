@@ -276,3 +276,16 @@ def test_post_pass_check_outcomes_are_recorded_and_reported():
     assert row["activities"] == 3 and row["finished"] == 2
     assert row["outcomes"] == {"healthy": 1, "anomaly": 1} and row["anomalies"] == ["CANVAS heard by Y: bad"]
     assert row["last_summary"] == "CANVAS heard by Y: bad"
+
+
+def test_cfs_pass_outcomes_are_reported():
+    manifest = {"rule_id": "soak", "cfs": {"rule_id": "c1"}}
+    assert "c1" in soak_recorder.watched_rules(manifest)
+    activities = {
+        "a": {"id": "a", "rule_id": "c1", "time": 1, "outcome": "nominal", "los": "ok"},
+        "b": {"id": "b", "rule_id": "c1", "time": 2, "outcome": "recovered", "los": "ok"},
+        "c": {"id": "c", "rule_id": "c1", "time": 3},
+    }
+    row = soak_report.cfs_passes(manifest, activities)
+    assert row == {"finished": 2, "outcomes": {"nominal": 1, "recovered": 1}, "los": {"ok": 2}}
+    assert soak_report.cfs_passes({"rule_id": "soak"}, activities) is None

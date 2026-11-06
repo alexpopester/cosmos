@@ -287,6 +287,19 @@ def post_pass_checks(manifest, activities):
     return result
 
 
+def cfs_passes(manifest, activities):
+    """Step 4: how the real-pass cFS pass ops came out (nominal / recovered / failed, and the LOS check)."""
+    rule = (manifest.get("cfs") or {}).get("rule_id")
+    if not rule:
+        return None
+    finished = [a for a in activities.values() if a.get("rule_id") == rule and a.get("outcome")]
+    return {
+        "finished": len(finished),
+        "outcomes": dict(collections.Counter(a["outcome"] for a in finished)),
+        "los": dict(collections.Counter(str(a.get("los")) for a in finished)),
+    }
+
+
 # ---- SatNOGS data -----------------------------------------------------------------
 
 
@@ -404,6 +417,14 @@ def markdown(report):
             lines.append(f"  - anomaly: {text}")
         if row["last_summary"]:
             lines.append(f"  - last: {row['last_summary']}")
+    cfs = report.get("cfs")
+    lines += ["", "## 6. Commanding cFS in real passes (step 4)", ""]
+    if not cfs:
+        lines.append("Not set up (realdata/cfs_setup.py).")
+    else:
+        outcomes = ", ".join(f"{k} {v}" for k, v in sorted(cfs["outcomes"].items())) or "none finished yet"
+        los = ", ".join(f"{k} {v}" for k, v in sorted(cfs["los"].items()))
+        lines.append(f"- {cfs['finished']} passes worked: {outcomes}; LOS check: {los or '-'}")
     return "\n".join(lines) + "\n"
 
 
@@ -429,6 +450,7 @@ def build_report(manifest, events, observations, stations):
         "scheduler": scheduler_behaviour(activities, events, manifest.get("maintenance") or []),
         "churn": prediction_churn(events),
         "post_pass": post_pass_checks(manifest, final_activities(events)),
+        "cfs": cfs_passes(manifest, final_activities(events)),
         "accuracy": accuracy,
     }
 
