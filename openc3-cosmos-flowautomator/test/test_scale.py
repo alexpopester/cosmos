@@ -8,6 +8,7 @@ scans, and the slimmer /schedule.
 import gzip
 import json
 import random
+import sys
 import urllib.request
 
 import pytest
@@ -188,3 +189,38 @@ def test_http_responses_are_gzipped_when_asked(engine, planner):
             assert response.headers["Content-Encoding"] is None
     finally:
         server.stop()
+
+
+# ---- packet counts (found by realdata/cfs_faults.py) -----------------------------------------------
+
+
+def test_packet_counts_come_from_each_packets_own_received_count(monkeypatch):
+    """COSMOS's global counter (get_tlm_cnts) is synced about once a second in batches: packets that arrived
+    just before a wait started were counted a moment later as new, and the values read next were the old
+    ones. Each packet's RECEIVED_COUNT moves with its values; the global counter is only the fallback."""
+    import types
+
+    from flow_automator.cosmos_backend import CosmosBackend
+
+    calls = {}
+
+    def get_tlm_values(items, scope):
+        calls["values"] = items
+        table = {"CFS__ES_HK__RECEIVED_COUNT__RAW": [1462, None], "INST__NEVER__RECEIVED_COUNT__RAW": [None, None]}
+        return [table[i] for i in items]
+
+    def get_tlm_cnts(packets, scope):
+        calls["cnts"] = packets
+        return [0 for _ in packets]
+
+    api = types.ModuleType("openc3.api.tlm_api")
+    api.get_tlm_values, api.get_tlm_cnts = get_tlm_values, get_tlm_cnts
+    for name in ("openc3", "openc3.api"):
+        monkeypatch.setitem(sys.modules, name, sys.modules.get(name) or types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "openc3.api.tlm_api", api)
+
+    backend = CosmosBackend.__new__(CosmosBackend)
+    backend.scope = "DEFAULT"
+    assert backend.tlm_counts([("CFS", "ES_HK"), ("INST", "NEVER")]) == [1462, 0]
+    assert calls["values"] == ["CFS__ES_HK__RECEIVED_COUNT__RAW", "INST__NEVER__RECEIVED_COUNT__RAW"]
+    assert calls["cnts"] == [["INST", "NEVER"]]  # only the never-received one falls back

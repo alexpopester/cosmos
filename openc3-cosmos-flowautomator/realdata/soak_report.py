@@ -390,7 +390,9 @@ def markdown(report):
         "",
         f"- Activities: {behaviour['activities']} — "
         + ", ".join(f"{k} {v}" for k, v in sorted(behaviour["statuses"].items())),
-        f"- Left out (during engine restarts for upgrades): {behaviour['left_out_for_maintenance']}",
+        f"- Left out (engine restarts for upgrades, gaps in the recording): {behaviour['left_out_for_maintenance']}",
+        f"- Gaps in the recording (laptop asleep, COSMOS or the recorder down): {len(report['gaps'])}, "
+        f"{sum(g['end'] - g['start'] for g in report['gaps']) / 3600:.1f} h",
         f"- Start lateness s (median / p95 / max): {_fmt(behaviour['start_lateness_s'])}; "
         f"over 5 s late: {behaviour['late_over_5s']}",
         f"- Retimes: {behaviour['retime_events']} events; |drift| s: {_fmt(behaviour['abs_drift_s'])}",
@@ -430,6 +432,9 @@ def markdown(report):
 
 def build_report(manifest, events, observations, stations):
     timeline = TleTimeline(events)
+    # Upgrades (soak.sh install) and gaps in the recording (the laptop slept): left out of the scores
+    gaps = [{"start": e["start"], "end": e["end"], "why": "gap in the recording"} for e in events if e["type"] == "gap"]
+    windows = (manifest.get("maintenance") or []) + gaps
     accuracy = operational_accuracy(observations, timeline, stations)
     activities = final_activities(events)
     checked = [r for r in accuracy if "error" not in r]
@@ -447,7 +452,8 @@ def build_report(manifest, events, observations, stations):
         "accuracy_by_age": accuracy_by_age(checked),
         "worst_frames": worst[:20],
         "coverage": station_coverage(observations, manifest, events, activities),
-        "scheduler": scheduler_behaviour(activities, events, manifest.get("maintenance") or []),
+        "scheduler": scheduler_behaviour(activities, events, windows),
+        "gaps": gaps,
         "churn": prediction_churn(events),
         "post_pass": post_pass_checks(manifest, final_activities(events)),
         "cfs": cfs_passes(manifest, final_activities(events)),

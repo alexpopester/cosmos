@@ -3,6 +3,7 @@
 import collections
 import contextlib
 import copy
+import json
 import threading
 import time
 import uuid
@@ -29,6 +30,7 @@ STORE_FLUSH_SECONDS = 2.0  # how often writes Valkey refused are retried
 SCRIPT_STOP_WAIT_SECONDS = 10.0  # STOP ALL waits this long (in all) for Script Runner to stop scripts
 DETACHED_PRUNE_SECONDS = 60.0  # how often finished fire-and-forget scripts are forgotten
 MAX_DETACHED_SCRIPTS = 1000
+MAX_MEMORY_BYTES = 65536  # what one flow may remember between runs
 ENGINE_HEARTBEAT_SECONDS = 5.0
 ENGINE_STALE_SECONDS = 30.0  # an engine that hasn't written its heartbeat for this long is gone
 RECOVERY_CHECK_SECONDS = 30.0
@@ -104,6 +106,9 @@ class FlowEngine:
         self.logger = logger
         self.flows = {}
         self.runs = {}
+        # Variables a flow remembers between its runs (Set variable with "Remember between runs"): flow id ->
+        # {name: value}. Loaded at start, written through to Valkey
+        self.memory = {}
         self.queues = collections.defaultdict(collections.deque)
         self.detached_scripts = []  # scripts runs started without waiting (pruned once they finish)
         self.finished = collections.OrderedDict()  # run id -> json of runs that just finished
@@ -128,6 +133,7 @@ class FlowEngine:
         with self.lock:
             self.flows = self.store.all_flows()
             self._ensure_versions()
+            self.memory = {k: dict(v.get("values") or {}) for k, v in self.store.records("flow_memory").items()}
         self._check_format()
         self.alerts.load()
         self._recover_interrupted_runs()
@@ -428,6 +434,30 @@ class FlowEngine:
                 raise NotFoundError(f"Flow '{flow_id}' not found")
             return copy.deepcopy(flow)
 
+    # ---- memory between runs ------------------------------------------------
+
+    def flow_memory(self, flow_id):
+        with self.lock:
+            return copy.deepcopy(self.memory.get(flow_id) or {})
+
+    def remember(self, flow_id, values):
+        """Keep these variables for the flow's next runs. Refused if the flow's memory would get too big."""
+        with self.lock:
+            memory = {**(self.memory.get(flow_id) or {}), **values}
+            if len(json.dumps(memory, default=str)) > MAX_MEMORY_BYTES:
+                raise ValueError(
+                    f"Remembering {', '.join(values)} would make this flow's memory over {MAX_MEMORY_BYTES} bytes"
+                )
+            self.memory[flow_id] = memory
+            self.store.save_record(
+                "flow_memory", flow_id, {"id": flow_id, "values": memory, "updated_at": time.time()}, defer=True
+            )
+
+    def forget(self, flow_id):
+        with self.lock:
+            self.memory.pop(flow_id, None)
+            self.store.delete_record("flow_memory", flow_id, defer=True)
+
     def snapshot_flow(self, flow_id):
         """A copy of a flow plus copies of every sub-flow it calls, directly or not (``subflow_snapshots``).
 
@@ -627,6 +657,8 @@ class FlowEngine:
                 raise NotFoundError(f"Flow '{flow_id}' not found")
             # Valkey first: if it refuses, the flow stays (in memory and after a restart) and its runs go on
             self.store.delete_flow(flow_id)
+            self.memory.pop(flow_id, None)
+            self.store.delete_record("flow_memory", flow_id, defer=True)
             self.flows.pop(flow_id, None)
             self.queues.pop(flow_id, None)
             runs = [run for run in self.runs.values() if run.flow.get("id") == flow_id]

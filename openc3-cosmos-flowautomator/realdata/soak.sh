@@ -53,8 +53,9 @@ case "${1:-}" in
       | grep -q "Command succeeded" || { echo "Loading $GEM failed"; exit 1; }
     echo "Loaded $GEM; waiting for the new engine"
     for _ in $(seq 1 300); do
-      docker logs --since "$SINCE" cosmos-openc3-operator-1 2>&1 | grep "FLOW-ENGINE" \
-        | grep -q "$(basename "$GEM")" && break
+      # No "| grep -q" here: under pipefail its early exit fails the pipeline, so this never matched
+      LOGS=$(docker logs --since "$SINCE" cosmos-openc3-operator-1 2>&1 || true)
+      [[ "$LOGS" == *"$(basename "$GEM")"* ]] && break
       sleep 1
     done
     until curl -sf "${COSMOS_URL:-http://localhost:2900}/flow-automator/api/health" >/dev/null; do sleep 2; done

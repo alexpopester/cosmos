@@ -38,6 +38,7 @@ MOVE_S = 0.5
 # one station are at least an orbit, ~90 minutes, apart)
 SAME_PASS_S = 900
 STATUS_EVERY_S = 3600
+GAP_AFTER_S = 900  # this long between reads is a gap (the laptop slept, COSMOS or the recorder was down)
 CONTACT_KEYS = ("aos", "tca", "los", "max_elevation", "partial")
 ACTIVITY_KEYS = ("status", "message", "drift", "run_id", "started_at", "ended_at", "superseded", "anchor", "offset")
 
@@ -76,7 +77,7 @@ def watched_rules(manifest):
 def check_outcome(run):
     """What a post-pass check found: healthy, anomaly, not_heard, or the run's status if it got nowhere."""
     reached = {step.get("node") for step in run.get("steps") or []}
-    endings = (("bad", "anomaly"), ("good", "healthy"), ("silent", "not_heard"))
+    endings = (("bad", "anomaly"), ("good", "healthy"), ("silent", "not_heard"), ("silent_alert", "not_heard"))
     outcome = next((name for node, name in endings if node in reached), run.get("status") or "unknown")
     summary = next((s.get("message") for s in run.get("steps") or [] if s.get("node") == "log"), None)
     return outcome, summary
@@ -180,6 +181,7 @@ def diff(schedule, state, manifest, now):
         # Keep finished activities we've seen even after the planner prunes them
         "activities": {**previous_activities, **activities},
         "last_status": state.get("last_status", 0),
+        "last_run": state.get("last_run"),
     }
     if now - new_state["last_status"] >= STATUS_EVERY_S:
         events.append({"type": "status", **(schedule.get("status") or {})})
@@ -196,9 +198,21 @@ def append_events(events, now):
             file.write(json.dumps({"time": now, **event}) + "\n")
 
 
-def record_once(fa, manifest):
+def gap_event(last_run, now, gap_after=GAP_AFTER_S):
+    """A gap in the recording, or None."""
+    if last_run and now - last_run > gap_after:
+        return {"type": "gap", "start": last_run, "end": now}
+    return None
+
+
+def record_once(fa, manifest, gap_after=GAP_AFTER_S):
     now = time.time()
     state = common.load_json(STATE, {})
+    gap = gap_event(state.get("last_run"), now, gap_after)
+    if gap:  # the laptop slept, or the recorder was stopped: whatever ran then wasn't watched
+        append_events([gap], now)
+    state["last_run"] = now
+    common.save_json(STATE, state)
     try:
         schedule = fa.get("/schedule")
     except Exception as error:  # COSMOS down or token gone: note it and keep going

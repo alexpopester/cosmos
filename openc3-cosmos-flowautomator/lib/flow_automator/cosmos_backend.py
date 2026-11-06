@@ -47,9 +47,25 @@ class CosmosBackend:
         return get_tlm_values(items, scope=self.scope)
 
     def tlm_counts(self, packets):
-        from openc3.api.tlm_api import get_tlm_cnts
+        """How many of each packet COSMOS has received, as each packet's own RECEIVED_COUNT.
 
-        return get_tlm_cnts([list(packet) for packet in packets], scope=self.scope)
+        Not get_tlm_cnts: that global counter is synced about once a second, in batches, so packets that
+        came in just before a wait started get counted a moment later as if they were new, and the values
+        read next are the old ones (after a reboot: the counters from before it; found by
+        realdata/cfs_faults.py). RECEIVED_COUNT is updated with each packet's values. A packet never
+        received has none: then the global counter.
+        """
+        from openc3.api.tlm_api import get_tlm_cnts, get_tlm_values
+
+        packets = [tuple(packet) for packet in packets]
+        values = get_tlm_values([f"{t}__{p}__RECEIVED_COUNT__RAW" for t, p in packets], scope=self.scope)
+        counts = [value[0] if isinstance(value, (list, tuple)) else value for value in values]
+        missing = [i for i, count in enumerate(counts) if count is None]
+        if missing:
+            fallback = get_tlm_cnts([list(packets[i]) for i in missing], scope=self.scope)
+            for i, count in zip(missing, fallback, strict=True):
+                counts[i] = count
+        return [int(count or 0) for count in counts]
 
     def cmd_hazardous(self, command):
         """True if the command, or a state chosen for one of its parameters, is hazardous.

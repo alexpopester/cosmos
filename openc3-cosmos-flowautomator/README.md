@@ -294,6 +294,9 @@ A run's variables start from the flow's *starting variables* and template
 parameters, and nodes add to them:
 
 - **Set variable** sets one or more variables from expressions, in order.
+  With **Remember between runs** they also start the flow's next runs (a
+  count of passes with no beacon, say); a dry run keeps nothing. See and reset
+  what a flow remembers with `GET` / `DELETE /flows/<id>/memory`.
 - **Read packet** reads a whole packet into one variable (`hs['TEMP1']`).
 - **Ask operator** stores the operator's answer.
 - **Run script** sets `script_state`, and `script_result` (or the name you
@@ -325,7 +328,7 @@ parameters, and nodes add to them:
 | Loop | body, done, error | count or while condition, variable, max | Repeat the body; wire the body's end back into the loop |
 | Parallel | out (many) | | Run every wire at once |
 | Join | out | | Wait for all parallel branches |
-| Set variable | out, error | name, expression, more | Store one or more values |
+| Set variable | out, error | name, expression, more, persist | Store one or more values, optionally kept for later runs |
 | Read packet | out, error | packet, variable, type | Read every item of a packet into a variable |
 | **Actions** | | | |
 | Send command | out, error | command, allow hazardous | Send a command (checked and logged by COSMOS like any other) |

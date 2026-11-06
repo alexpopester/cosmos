@@ -32,6 +32,7 @@ import soak_common as common  # noqa: E402
 PREFIX = "RealTLM: "
 WAIT_S = 5400  # frames come in minutes to hours after the pass; the plugin polls every 15 min
 POLL_S = 30  # how often the wait looks at the beacon's FRAME_TIME
+SILENT_ALERT = 3  # passes in a row with no beacon before a notification becomes an alert
 
 
 def _node(node_id, node_type, x, y=120, **data):
@@ -150,14 +151,53 @@ def template_flow(name, target=None, wait_s=WAIT_S, early_s=300, poll_s=POLL_S, 
                 message=f"No {name} beacon heard within {wait_s / 60:g} min of LOS "
                 "(pass over {{ contact_station }}, AOS {{ utc(contact_aos) }})",
             ),
+            # Memory between runs (D31): one silent pass is normal for volunteer stations, several in a row aren't
+            _node(
+                "missed",
+                "set_var",
+                440,
+                300,
+                label="Count silent passes",
+                name="silent_passes",
+                expression="var('silent_passes', 0) + 1",
+                persist=True,
+            ),
+            _node(
+                "many", "if", 660, 400, label=f"{SILENT_ALERT}+ in a row?", condition=f"silent_passes >= {SILENT_ALERT}"
+            ),
+            _node(
+                "silent_alert",
+                "notify",
+                880,
+                400,
+                label="Not heard for a while",
+                level="alert",
+                title=f"{name} not heard",
+                message=f"No {name} beacon for {{{{ silent_passes }}}} passes in a row "
+                "(last: over {{ contact_station }}, AOS {{ utc(contact_aos) }})",
+            ),
+            _node(
+                "heard",
+                "set_var",
+                880,
+                40,
+                label="Heard: reset count",
+                name="silent_passes",
+                expression="0",
+                persist=True,
+            ),
         ],
         "edges": [
             _edge("t", "los"),
             _edge("los", "wait"),
             _edge("wait", "read", "ok"),
-            _edge("wait", "silent", "timeout"),
+            _edge("wait", "missed", "timeout"),
+            _edge("missed", "many"),
+            _edge("many", "silent_alert", "true"),
+            _edge("many", "silent", "false"),
             _edge("read", "log"),
-            _edge("log", "ok"),
+            _edge("log", "heard"),
+            _edge("heard", "ok"),
             _edge("ok", "good", "true"),
             _edge("ok", "bad", "false"),
         ],

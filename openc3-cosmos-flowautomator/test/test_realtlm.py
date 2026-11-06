@@ -166,3 +166,28 @@ def test_a_replay_variant_reads_its_own_target():
     assert wait["timeout"] == 120
     read = next(n for n in flow["nodes"] if n["type"] == "read_packet")["data"]
     assert read["target"] == "REPLAY_CANVAS"
+
+
+def test_silent_passes_in_a_row_escalate_to_an_alert(engine, backend, alerts):
+    from conftest import wait_until  # noqa: PLC0415
+
+    saved, problems = engine.save_flow(quick(realtlm_setup.template_flow("CATSAT")))
+    assert problems == []
+
+    def run_once():
+        result = engine.trigger(saved["id"], manual=True, variables=dict(CONTACT))
+        run_id = result["run"]["id"]
+        assert wait_until(lambda: run_id not in engine.runs, 5.0)
+        return engine.get_run(run_id)
+
+    beacon(backend, "CATSAT", AOS - 6000)  # nothing from this pass
+    for _ in range(realtlm_setup.SILENT_ALERT - 1):
+        assert "No CATSAT beacon heard" in messages(run_once())
+    assert not [a for a in alerts if a[1] == "CATSAT not heard"]
+    third = run_once()
+    assert f"No CATSAT beacon for {realtlm_setup.SILENT_ALERT} passes in a row" in messages(third)
+    assert [a for a in alerts if a[1] == "CATSAT not heard"]
+
+    beacon(backend, "CATSAT", AOS + 120)  # heard again: the count starts over
+    assert "CATSAT healthy after the pass" in messages(run_once())
+    assert engine.flow_memory(saved["id"]) == {"silent_passes": 0}

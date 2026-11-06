@@ -289,3 +289,34 @@ def test_cfs_pass_outcomes_are_reported():
     row = soak_report.cfs_passes(manifest, activities)
     assert row == {"finished": 2, "outcomes": {"nominal": 1, "recovered": 1}, "los": {"ok": 2}}
     assert soak_report.cfs_passes({"rule_id": "soak"}, activities) is None
+
+
+def test_gaps_in_the_recording_are_found_and_left_out():
+    assert soak_recorder.gap_event(None, 1000.0) is None  # the first read
+    assert soak_recorder.gap_event(1000.0, 1300.0) is None  # the usual 5 minutes
+    assert soak_recorder.gap_event(1000.0, 8200.0) == {"type": "gap", "start": 1000.0, "end": 8200.0}
+
+    # An activity whose pass fell in a gap (the laptop slept) isn't a scheduler failure
+    events = [
+        {"time": 8200.0, "type": "gap", "start": 1000.0, "end": 8200.0},
+        {
+            "time": 8300.0,
+            "type": "activity",
+            "id": "slept",
+            "rule_id": "r",
+            "satellite_id": "s",
+            "station_id": "g",
+            "aos": 3000.0,
+            "tca": 3300.0,
+            "los": 3600.0,
+            "status": "missed",
+            "anchor": "aos",
+            "offset": -60,
+            "message": "Missed: engine down",
+            "drift": 0,
+        },
+    ]
+    manifest = {"started": 0.0, "started_iso": "1970-01-01T00:00:00Z", "rule_id": "r", "satellites": {}, "stations": {}}
+    report = soak_report.build_report(manifest, events, [], {})
+    assert report["scheduler"]["left_out_for_maintenance"] == 1 and report["scheduler"]["problems"] == {}
+    assert len(report["gaps"]) == 1 and "Gaps in the recording" in soak_report.markdown(report)

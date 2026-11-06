@@ -34,6 +34,8 @@ which every write records in the audit log.
     POST   <prefix>/api/stop_all                 also pauses the contact scheduler
 
   History:
+    GET    <prefix>/api/flows/<id>/memory        what it remembers between runs (Set variable, Remember)
+    DELETE <prefix>/api/flows/<id>/memory        forget it
     GET    <prefix>/api/flows/<id>/versions      every saved version (who, when, note, what changed)
     GET    <prefix>/api/flows/<id>/versions/<n>  one version, with the whole flow
     GET    <prefix>/api/flows/<id>/diff?from=<n>&to=<m|current>
@@ -147,6 +149,8 @@ def _routes():
         ("POST", r"/api/validate", "validate", True),  # write: validation is costly, and only editors need it
         ("GET", r"/api/flows/deleted", "list_deleted", False),
         ("POST", r"/api/flows/(?P<flow_id>[\w-]+)/undelete", "undelete_flow", True),
+        ("GET", r"/api/flows/(?P<flow_id>[\w-]+)/memory", "get_memory", False),
+        ("DELETE", r"/api/flows/(?P<flow_id>[\w-]+)/memory", "forget_memory", True),
         ("GET", r"/api/flows/(?P<flow_id>[\w-]+)/versions", "list_versions", False),
         ("GET", r"/api/flows/(?P<flow_id>[\w-]+)/versions/(?P<version>\d+)", "get_version", False),
         ("GET", r"/api/flows/(?P<flow_id>[\w-]+)/diff", "diff_versions", False),
@@ -383,6 +387,16 @@ class FlowApi:
         flow, problems = self.engine.restore_deleted(flow_id, user)
         self._audit(user, "restored deleted", "flow", flow_id, flow["name"], f"as v{flow['version']}")
         return {"flow": flow, "problems": problems}
+
+    def get_memory(self, flow_id, **_):
+        self.engine.get_flow(flow_id)  # 404 for a flow that doesn't exist
+        return {"memory": self.engine.flow_memory(flow_id)}
+
+    def forget_memory(self, flow_id, user, **_):
+        flow = self.engine.get_flow(flow_id)
+        self.engine.forget(flow_id)
+        self._audit(user, "reset memory", "flow", flow_id, flow.get("name"), "")
+        return {"memory": {}}
 
     def delete_flow(self, flow_id, user, **_):
         flow = self.engine.delete_flow(flow_id, user)

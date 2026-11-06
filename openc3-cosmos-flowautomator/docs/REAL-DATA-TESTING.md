@@ -277,14 +277,15 @@ bigger machine, reusing the same definitions.
   layout: 8 + 16 bytes is 0x11 by the CCSDS rule. 0x11 is accepted.
 - The planner and the gate (sgp4 + our math against skyfield, each with its
   own TLE fetch) agreed on the first pass to 1 s at AOS and 0 s at LOS.
-- **A race in the ground system, found by the reboot scenarios:** COSMOS counts
-  a packet before its values reach the current value table. So "wait for a
-  housekeeping packet, then read its command counter" read the counter from
-  before the reboot, and every acknowledgement after a reboot looked like a
-  failure. The template now waits for the packets' own `RECEIVED_COUNT`,
-  which is updated together with the counters. Any flow that does "wait for a
-  packet, then read it" has the same exposure; this is worth a node-level fix
-  (backlog).
+- **A race in the ground system, found by the reboot scenarios** (fixed in
+  Flow Automator 1.15.0): COSMOS's global packet count (`get_tlm_cnts`) is
+  synced about once a second, in batches. Packets that arrived just before a
+  flow started waiting (the old process's last housekeeping, before the reboot)
+  were counted a moment later as if new, and the values read next were the old
+  ones. So every acknowledgement after a reboot looked like a failure. Each
+  packet's own `RECEIVED_COUNT` moves with its values, and the engine now uses
+  it for Wait for packet, packet triggers and TLE packet inputs. The pass ops
+  template waits on it directly as well.
 
 **Results (2026-11-06):**
 

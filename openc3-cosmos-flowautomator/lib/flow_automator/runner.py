@@ -102,6 +102,10 @@ class FlowRun:
         # Branches of an isolated Parallel see their own copy of the variables (thread-local)
         self._local = threading.local()
         self.variables = dict(self.flow.get("variables") or {})
+        # What the flow remembered from earlier runs; what this run was started with wins
+        memory = getattr(engine, "flow_memory", None)
+        if memory is not None and self.flow.get("id"):
+            self.variables.update(memory(self.flow["id"]))
         self.variables.update(variables or {})
         self.start_variables = _json_safe(self.variables)
         # What started this run, kept in its history: {"kind": "manual" | "trigger_tlm" | ... |
@@ -729,11 +733,23 @@ def exec_set_var(run, node, data, step):
     value = run.evaluator().evaluate(data.get("expression"))
     run.set_variable(data["name"], value)
     parts = [f"{data['name']} = {_REPR.repr(value)}"]
+    assigned = {data["name"]: value}
     # More assignments, in order; each can use the ones before it
     for name, expression in (data.get("more") or {}).items():
         value = run.evaluator().evaluate(str(expression))
         run.set_variable(name, value)
         parts.append(f"{name} = {_REPR.repr(value)}")
+        assigned[name] = value
+    if data.get("persist"):
+        # Remembered for the flow's next runs (a dry run keeps nothing)
+        if run.dry_run:
+            parts.append("(dry run: not remembered)")
+        else:
+            try:
+                run.engine.remember(run.flow.get("id"), _json_safe(assigned))
+            except ValueError as error:
+                raise ExpressionError(str(error)) from None
+            parts.append("(remembered)")
     step["message"] = "; ".join(parts)[:2000]
     return "out"
 

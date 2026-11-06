@@ -20,6 +20,29 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.15.0] - 2026-11-06
+
+Fixes and a feature from the real-data tests (`docs/REAL-DATA-TESTING.md`).
+
+### Fixed
+- **Wait for packet, packet triggers and TLE packet inputs no longer count
+  old packets as new.** COSMOS's global packet count is synced about once a
+  second, in batches, so packets that came in just before a wait started were
+  counted a moment later, and the values read next were the old ones. After a
+  reboot, every command acknowledgement then looked like a failure. The engine
+  now uses each packet's own `RECEIVED_COUNT`, which moves with its values.
+
+### Added
+- **Variables a flow remembers between its runs**: Set variable's "Remember
+  between runs" (D31). `GET` / `DELETE /api/flows/<id>/memory` show and reset
+  them.
+
+### Docs
+- The real-data post-pass checks escalate: one silent pass is a notification,
+  three in a row an alert (they count silent passes in flow memory).
+- The soak recorder notes gaps (the laptop asleep) and the report leaves
+  them out of the scores, like upgrades.
+
 ### Docs
 - **Commanding real flight software in contacts** (`realdata/cfs_setup.py`,
   `realdata/soak.sh cfs-faults`, step 4): pass ops on NASA cFS behind a contact

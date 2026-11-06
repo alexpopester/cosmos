@@ -459,3 +459,26 @@ open Contacts views could delay activity starts by seconds.
 - Code that changes planner state outside `_save`, `_delete`, `_merge` or
   `load` must call `_changed()`. The cache key also includes the number of
   activities as a backstop.
+
+## D31. A flow can remember variables between its runs
+
+A Set variable node with **Remember between runs** (`persist`) saves what it
+sets for that flow, in Valkey (`flow_memory` records, kept in memory too).
+Every later run of the flow starts with those values. What a run is started
+with (parameters, contact variables, the caller's variables) wins over them.
+A dry run keeps nothing. One flow's memory is capped at 64 KB, and a Set
+variable that would go over fails, like any other node error. Deleting the
+flow deletes its memory, and `DELETE /flows/<id>/memory` resets it.
+
+Scheduled activities run a snapshot of their template, which carries the
+template's id. So every activity from one template shares that template's
+memory, which is what makes a per-satellite count work.
+
+*Why:* found by the real-data tests (docs/REAL-DATA-TESTING.md). Runs had no
+memory, so a post-pass check couldn't tell one silent pass, which is normal
+for volunteer stations, from three in a row, which is a lost satellite.
+Before, the only way to keep state was a script writing to the COSMOS stash.
+
+*Trade-offs:* memory is per flow, not per activity or per contact. A flow that
+needs that keeps one variable per key (for example a name built from the
+satellite).

@@ -314,6 +314,13 @@ export const NODE_TYPES = {
         default: {},
         hint: 'name = expression; each can use the ones before it',
       },
+      {
+        key: 'persist',
+        label: 'Remember between runs',
+        type: 'boolean',
+        default: false,
+        hint: "These variables start this flow's next runs (e.g. a count of passes not heard). A dry run keeps nothing.",
+      },
     ],
     summary: (d) =>
       `${d.name} = ${d.expression}${Object.keys(d.more || {}).length ? ` +${Object.keys(d.more).length}` : ''}`,
