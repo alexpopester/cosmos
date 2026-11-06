@@ -21,6 +21,10 @@ versions follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Docs
+- **Replay regression on recorded real passes** (`realdata/soak.sh replay`,
+  step 3c): replays real CANVAS, AEPEX and CatSat passes as recorded, with a
+  fault injected, and lost, and checks that the post-pass templates say
+  healthy, raise an alert, and say not heard.
 - **Post-pass checks on real telemetry** (`realdata/realtlm_setup.py`, step 3b
   of `docs/REAL-DATA-TESTING.md`): one template per satellite (CANVAS, AEPEX,
   CatSat) that waits after LOS for the pass's SatNOGS beacon, then checks

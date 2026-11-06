@@ -22,6 +22,12 @@ TARGET CANVAS CANVAS
 TARGET AEPEX AEPEX
 TARGET CATSAT CATSAT
 
+# Replays of recorded real passes go to their own targets, never the live ones
+TARGET REPLAY REPLAY
+TARGET CANVAS REPLAY_CANVAS
+TARGET AEPEX REPLAY_AEPEX
+TARGET CATSAT REPLAY_CATSAT
+
 INTERFACE SATNOGS_INT satnogs_interface.py <%= satnogs_poll_seconds %> <%= satnogs_lookback_hours %>
   MAP_TARGET CANVAS
   MAP_TARGET AEPEX
@@ -30,3 +36,14 @@ INTERFACE SATNOGS_INT satnogs_interface.py <%= satnogs_poll_seconds %> <%= satno
   OPTION SATELLITE CANVAS 68635 canvas application_process_id APID
   OPTION SATELLITE AEPEX 68506 aepex application_process_id APID
   OPTION SATELLITE CATSAT 60246 catsat type TYPE
+
+# Replay recorded real passes (lib/recordings) as if happening now, with faults
+# injected on demand: REPLAY PLAY / REPLAY STOP, REPLAY STATUS
+INTERFACE REPLAY_INT satnogs_replay_interface.py
+  MAP_TARGET REPLAY
+  MAP_TARGET REPLAY_CANVAS
+  MAP_TARGET REPLAY_AEPEX
+  MAP_TARGET REPLAY_CATSAT
+  OPTION SATELLITE REPLAY_CANVAS 68635 canvas application_process_id APID
+  OPTION SATELLITE REPLAY_AEPEX 68506 aepex application_process_id APID
+  OPTION SATELLITE REPLAY_CATSAT 60246 catsat type TYPE

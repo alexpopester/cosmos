@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-05
+
+### Added
+- `NEWEST_FRAME_TIME` on every packet: the newest frame time delivered so far
+  for that satellite. It never goes back, unlike `FRAME_TIME`: a station's
+  late upload of an older pass can arrive after a newer one (seen live: the
+  latest CANVAS beacon went from 22:59 back to 21:20). Wait on this one.
+- Replays run in parallel, one per target. `REPLAY STOP` takes an `AS_TARGET`,
+  and `REPLAY STATUS PLAYING` lists the targets with a replay in progress.
+
+## [0.2.0] - 2026-11-05
+
+### Added
+- **Replay of recorded real passes**: a REPLAY target (`PLAY`, `STOP`, `STATUS`)
+  plays a recording into its own `REPLAY_CANVAS` / `REPLAY_AEPEX` /
+  `REPLAY_CATSAT` target as if the pass were happening now. It can run faster,
+  arrive as one upload after LOS or live, have decoded fields overridden (a
+  fault injected into real data), or lose some or all frames. Three real
+  passes are recorded (`tools/record_pass.py`).
+
+### Changed
+- Telemetry definitions use `<%= target_name %>`, so they install under more
+  than one target name.
+
 ## [0.1.2] - 2026-11-05
 
 ### Fixed

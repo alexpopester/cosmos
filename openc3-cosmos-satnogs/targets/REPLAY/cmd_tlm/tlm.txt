@@ -1,0 +1,24 @@
+TELEMETRY <%= target_name %> STATUS BIG_ENDIAN "What the replay is doing"
+  ACCESSOR JsonAccessor
+  APPEND_ITEM STATE 128 STRING "IDLE, PLAYING, DONE or STOPPED"
+    KEY $.state
+  APPEND_ITEM RECORDING 512 STRING "Recording playing"
+    KEY $.recording
+  APPEND_ITEM AS_TARGET 256 STRING "Target it plays into"
+    KEY $.as_target
+  APPEND_ITEM FRAMES_SENT 32 UINT "Frames delivered so far"
+    KEY $.frames_sent
+  APPEND_ITEM FRAMES_TOTAL 32 UINT "Frames in this replay (after DROP)"
+    KEY $.frames_total
+  APPEND_ITEM AOS_TIME 64 FLOAT "Replayed AOS (Unix seconds)"
+    KEY $.aos_time
+  APPEND_ITEM LOS_TIME 64 FLOAT "Replayed LOS (Unix seconds)"
+    KEY $.los_time
+  APPEND_ITEM OVERRIDES 4096 STRING "Fields replaced, JSON"
+    KEY $.overrides
+  APPEND_ITEM RECORDINGS 4096 STRING "Recordings available, comma separated"
+    KEY $.recordings
+  APPEND_ITEM PLAYING 1024 STRING "Targets with a replay in progress, comma separated"
+    KEY $.playing
+  APPEND_ITEM STATUS_TIME 64 FLOAT "When this status was sent"
+    KEY $.time

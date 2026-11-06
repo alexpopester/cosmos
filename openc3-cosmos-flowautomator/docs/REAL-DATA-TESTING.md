@@ -53,7 +53,7 @@ and don't book observations on other people's stations at scale.
 |---|---|---|---|
 | 1 | Predictions vs SatNOGS observations | `orbit.py` pass geometry against real passes and real frame times | Done 2026-11-05 (see Results) |
 | 2 | Real-pass scheduling soak | Planner, rules, retiming and capacity on live passes over real stations | Recording since 2026-11-05 (final report after ≥ 1 week) |
-| 3 | Real telemetry into COSMOS + replay | Flows acting on real values; recorded passes as a regression set | 3a live telemetry and 3b post-pass checks built 2026-11-05; 3c (replay) next |
+| 3 | Real telemetry into COSMOS + replay | Flows acting on real values; recorded passes as a regression set | Done 2026-11-06: 3a live telemetry, 3b post-pass checks, 3c replay regression (9/9) |
 | 4 | NOS3 command loop | Contact flows commanding real cFS on a real orbit | Not started |
 
 ### Step 1: predictions vs SatNOGS observations
@@ -196,9 +196,39 @@ Limits:
 - **Nothing compares one pass with the last** (for example a command counter
   that moved without an uplink): runs have no memory between them.
 
-**3c. Replay (next):** play a recorded pass (its frames at their original
-spacing) through a COSMOS target at real time, for repeatable regression
-runs on real data.
+**3c. Replay regression on recorded real passes (built 2026-11-06):**
+
+- **Recordings:** one real pass per satellite (`openc3-cosmos-satnogs/lib/recordings`,
+  made with `tools/record_pass.py`):
+  - CANVAS: 204 frames, 10 min, heard by F1SXJ
+  - AEPEX: 140 frames, 10 min, heard by mpippins
+  - CatSat: 68 frames, 6.5 min, heard by DUS-NORD
+- **Replay:** the plugin's `REPLAY PLAY` command plays a recording into its own
+  `REPLAY_<SAT>` target as if the pass were happening now. It can run faster,
+  arrive as one upload after LOS or live, have decoded fields overridden (a
+  fault injected into real data), or lose some or all frames.
+- **Runner:** `realdata/replay_test.py` replays each recording three ways and
+  runs the step 3b post-pass template (reading the replay target) against a
+  contact timed to match:
+
+| Case | Expected | 2026-11-06, 10x |
+|---|---|---|
+| as recorded | healthy | 3/3 pass |
+| injected fault (CANVAS rejected commands 3, AEPEX mode 3, CatSat battery 14,000 mV) | an alert naming it | 3/3 pass |
+| lost pass (every frame dropped) | not heard | 3/3 pass |
+
+```bash
+cd openc3-cosmos-flowautomator
+realdata/soak.sh replay              # 10x, about 6 min
+realdata/soak.sh replay --speed 1    # real time, about 35 min
+```
+
+**Found while building it (fixed in openc3-cosmos-satnogs 0.2.1):** COSMOS
+keeps the last packet delivered, and a station's late upload of an older pass
+can arrive after a newer one. Seen live: the latest CANVAS beacon went from
+22:59 back to 21:20. So a post-pass check waiting on `FRAME_TIME` could miss its
+pass. Every packet now also carries `NEWEST_FRAME_TIME`, which never goes back,
+and the checks wait on that.
 
 ### Step 4: NOS3 command loop
 

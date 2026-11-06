@@ -38,7 +38,7 @@ def defined_packets(target):
         if not words:
             continue
         if words[0] == "TELEMETRY":
-            current = packets.setdefault(words[2], {})
+            current = packets.setdefault(words[4] if words[1] == "<%=" else words[2], {})
         elif words[0] == "APPEND_ITEM":
             item = words[1]
         elif words[0] == "KEY":
@@ -256,7 +256,11 @@ def test_a_late_upload_of_older_frames_is_still_delivered():
     feed = feed_for(service, 1793905127.0 + 600)
     assert len(feed.poll()) == 1
     service.pages = [[late, early]]
-    assert [f.document["_observation"] for f in feed.poll()] == [3]
+    late_frames = feed.poll()
+    assert [f.document["_observation"] for f in late_frames] == [3]
+    # Older than what COSMOS already has: FRAME_TIME goes back, NEWEST_FRAME_TIME doesn't
+    assert late_frames[0].document["_frame_time"] < sf.frame_time("data_2_2026-11-05T18-58-47")
+    assert late_frames[0].document["_newest_frame_time"] == sf.frame_time("data_2_2026-11-05T18-58-47")
 
 
 def test_poll_iter_hands_over_one_observation_at_a_time_oldest_first():

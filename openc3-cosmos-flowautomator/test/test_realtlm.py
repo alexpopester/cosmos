@@ -71,9 +71,15 @@ def quick(flow):
     return flow
 
 
-def beacon(backend, name, frame_time, **changes):
+def beacon(backend, name, frame_time, newest=None, **changes):
     target_packet = realtlm_setup.MISSIONS[name]["beacon"]
-    values = {**HEALTHY[target_packet], **changes, "FRAME_TIME": frame_time, "STATION": "EU1AEM"}
+    values = {
+        **HEALTHY[target_packet],
+        **changes,
+        "FRAME_TIME": frame_time,
+        "NEWEST_FRAME_TIME": frame_time if newest is None else newest,
+        "STATION": "EU1AEM",
+    }
     for item, value in values.items():
         backend.values[f"{target_packet} {item}"] = value
 
@@ -142,3 +148,21 @@ def test_rules_are_accepted_by_the_planner(engine):
     assert problems == []
     result = planner.save_rule(realtlm_setup.rule_payload("CANVAS", flow["id"], [sat["id"]], [station["id"]]))
     assert result["rule"]["anchor"] == "los" and result["rule"]["stop_at_los"] is False
+
+
+def test_a_late_upload_of_an_older_pass_doesnt_hide_this_one(engine, backend, alerts):
+    # This pass's beacon came in, then a station's late upload of the orbit before rolled FRAME_TIME back:
+    # NEWEST_FRAME_TIME still says this pass was heard
+    beacon(backend, "CANVAS", AOS - 6000, newest=AOS + 120)
+    run = run_to_end(engine, quick(realtlm_setup.template_flow("CANVAS")), variables=dict(CONTACT))
+    assert "CANVAS healthy after the pass" in messages(run), messages(run)
+
+
+def test_a_replay_variant_reads_its_own_target():
+    flow = realtlm_setup.template_flow("CANVAS", target="REPLAY_CANVAS", wait_s=120, early_s=5, prefix="Replay: ")
+    assert flow["name"] == "Replay: CANVAS post-pass" and validate_flow(flow) == []
+    wait = next(n for n in flow["nodes"] if n["type"] == "wait_tlm")["data"]
+    assert "REPLAY_CANVAS APID_32 NEWEST_FRAME_TIME" in wait["condition"] and "contact_aos - 5" in wait["condition"]
+    assert wait["timeout"] == 120
+    read = next(n for n in flow["nodes"] if n["type"] == "read_packet")["data"]
+    assert read["target"] == "REPLAY_CANVAS"

@@ -1,0 +1,4 @@
+# REPLAY: plays recorded real SatNOGS passes into the REPLAY_* targets (see plugin.txt)
+LANGUAGE python
+COMMANDS cmd.txt
+TELEMETRY tlm.txt

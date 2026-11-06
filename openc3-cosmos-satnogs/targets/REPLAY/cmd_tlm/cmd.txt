@@ -1,0 +1,23 @@
+COMMAND <%= target_name %> PLAY BIG_ENDIAN "Replay a recorded real pass (lib/recordings) as if it were happening now"
+  ACCESSOR JsonAccessor
+  TEMPLATE '{"command":"PLAY"}'
+  APPEND_PARAMETER RECORDING 512 STRING "CANVAS_15365914" "Recording name: <TARGET>_<observation> (STATUS RECORDINGS lists them)"
+    KEY $.recording
+  APPEND_PARAMETER AS_TARGET 256 STRING "" "Target to play into (default REPLAY_<recording's target>)"
+    KEY $.as_target
+  APPEND_PARAMETER AOS_TIME 64 FLOAT 0 1E12 0 "When the replayed pass starts (Unix seconds; 0: now)"
+    KEY $.aos_time
+  APPEND_PARAMETER SPEED 64 FLOAT 0.01 1000 1 "10 plays a 10-minute pass in 1 minute"
+    KEY $.speed
+  APPEND_PARAMETER DELIVERY 64 FLOAT -1 86400 60 "Seconds after LOS when the frames arrive, like an upload (-1: live, as heard)"
+    KEY $.delivery
+  APPEND_PARAMETER OVERRIDES 4096 STRING "{}" "Decoded fields to replace, JSON: a fault injected into real data"
+    KEY $.overrides
+  APPEND_PARAMETER DROP 64 FLOAT 0 1 0 "Fraction of frames lost (1: nobody heard the pass)"
+    KEY $.drop
+
+COMMAND <%= target_name %> STOP BIG_ENDIAN "Stop a replay (AS_TARGET), or all of them"
+  ACCESSOR JsonAccessor
+  TEMPLATE '{"command":"STOP"}'
+  APPEND_PARAMETER AS_TARGET 256 STRING "" "Replay target to stop (empty: all)"
+    KEY $.as_target

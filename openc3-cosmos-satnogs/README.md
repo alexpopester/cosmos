@@ -43,6 +43,29 @@ left out by default because COSMOS logs an error for a missing secret).
 
 It's receive only: the targets have no commands.
 
+## Replaying a recorded pass
+
+Recordings of real passes (`lib/recordings`, made with `tools/record_pass.py`)
+play into their own targets (`REPLAY_CANVAS` and so on), so live data is never
+mixed with them:
+
+```
+REPLAY PLAY with RECORDING 'CANVAS_15365914', AOS_TIME 0, SPEED 10, DELIVERY 60,
+                 OVERRIDES '{"bcn_cmd_rjct_cnt": 3}', DROP 0
+```
+
+- `AOS_TIME`: when the replayed pass starts (Unix seconds; 0 is now). Every
+  frame's `FRAME_TIME` and `PACKET_TIME` move with it.
+- `SPEED`: 10 plays a 10-minute pass in a minute.
+- `DELIVERY`: when the frames arrive. The default, 60, means all of them 60 s
+  after LOS, like a station's upload. -1 means live, each at its own time.
+- `OVERRIDES`: decoded fields to replace, which injects a fault into real data.
+- `DROP`: the fraction of frames lost, spread evenly; 1 means nobody heard the
+  pass.
+
+`REPLAY STATUS` shows the state, frames sent and the replayed AOS/LOS.
+`REPLAY STOP` ends a replay.
+
 ## Adding a satellite
 
 1. Find its decoder in SatNOGS DB (`https://db.satnogs.org/api/satellites/?norad_cat_id=N`,

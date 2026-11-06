@@ -2,10 +2,12 @@
 # (2026-11-05, satnogs-decoders 'canvas'). Raw values: the decoders
 # give no units or conversions.
 
-TELEMETRY CANVAS APID_32 BIG_ENDIAN "CANVAS (CU Boulder / LASP), CCSDS: application_process_id 32 (138 frames seen)"
+TELEMETRY <%= target_name %> APID_32 BIG_ENDIAN "CANVAS (CU Boulder / LASP), CCSDS: application_process_id 32 (138 frames seen)"
   ACCESSOR JsonAccessor
   APPEND_ITEM FRAME_TIME 64 FLOAT "When the SatNOGS station received the frame (Unix seconds)"
     KEY $._frame_time
+  APPEND_ITEM NEWEST_FRAME_TIME 64 FLOAT "Newest FRAME_TIME delivered so far (never goes back)"
+    KEY $._newest_frame_time
   ITEM PACKET_TIME 0 0 DERIVED "When the station received the frame"
     READ_CONVERSION openc3/conversions/unix_time_conversion.py FRAME_TIME
   APPEND_ITEM OBSERVATION 32 UINT "SatNOGS observation id"
@@ -305,10 +307,12 @@ TELEMETRY CANVAS APID_32 BIG_ENDIAN "CANVAS (CU Boulder / LASP), CCSDS: applicat
   APPEND_ITEM TIME_STAMP_SECONDS 64 INT "time_stamp_seconds"
     KEY $.time_stamp_seconds
 
-TELEMETRY CANVAS OTHER BIG_ENDIAN "CANVAS (CU Boulder / LASP), CCSDS: frames decoded only as far as the header"
+TELEMETRY <%= target_name %> OTHER BIG_ENDIAN "CANVAS (CU Boulder / LASP), CCSDS: frames decoded only as far as the header"
   ACCESSOR JsonAccessor
   APPEND_ITEM FRAME_TIME 64 FLOAT "When the SatNOGS station received the frame (Unix seconds)"
     KEY $._frame_time
+  APPEND_ITEM NEWEST_FRAME_TIME 64 FLOAT "Newest FRAME_TIME delivered so far (never goes back)"
+    KEY $._newest_frame_time
   ITEM PACKET_TIME 0 0 DERIVED "When the station received the frame"
     READ_CONVERSION openc3/conversions/unix_time_conversion.py FRAME_TIME
   APPEND_ITEM OBSERVATION 32 UINT "SatNOGS observation id"
@@ -358,10 +362,12 @@ TELEMETRY CANVAS OTHER BIG_ENDIAN "CANVAS (CU Boulder / LASP), CCSDS: frames dec
   APPEND_ITEM TIME_STAMP_SECONDS 64 INT "time_stamp_seconds"
     KEY $.time_stamp_seconds
 
-TELEMETRY CANVAS UNDECODED BIG_ENDIAN "CANVAS (CU Boulder / LASP), CCSDS: frames the decoder can't read"
+TELEMETRY <%= target_name %> UNDECODED BIG_ENDIAN "CANVAS (CU Boulder / LASP), CCSDS: frames the decoder can't read"
   ACCESSOR JsonAccessor
   APPEND_ITEM FRAME_TIME 64 FLOAT "When the SatNOGS station received the frame (Unix seconds)"
     KEY $._frame_time
+  APPEND_ITEM NEWEST_FRAME_TIME 64 FLOAT "Newest FRAME_TIME delivered so far (never goes back)"
+    KEY $._newest_frame_time
   ITEM PACKET_TIME 0 0 DERIVED "When the station received the frame"
     READ_CONVERSION openc3/conversions/unix_time_conversion.py FRAME_TIME
   APPEND_ITEM OBSERVATION 32 UINT "SatNOGS observation id"

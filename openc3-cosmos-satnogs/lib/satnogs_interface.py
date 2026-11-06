@@ -132,7 +132,9 @@ def _newest_frame_time(target, packets):
     newest = None
     for packet in packets:
         try:
-            value = tlm(f"{target} {packet} FRAME_TIME", type="RAW")
+            value = tlm(f"{target} {packet} NEWEST_FRAME_TIME", type="RAW") or tlm(
+                f"{target} {packet} FRAME_TIME", type="RAW"
+            )
         except Exception:  # noqa: BLE001 - never received yet
             continue
         if value:

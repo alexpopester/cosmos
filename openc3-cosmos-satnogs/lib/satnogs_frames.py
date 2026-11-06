@@ -8,7 +8,8 @@ with the ``satnogs-decoders`` package (Kaitai Struct decoders kept by the SatNOG
 community) and turns each one into a JSON document for a COSMOS packet:
 
 - the decoder's fields, under their own names (booleans as 0/1, bytes as hex)
-- ``_frame_time`` (Unix seconds, when the station received it), ``_observation``,
+- ``_frame_time`` (Unix seconds, when the station received it), ``_newest_frame_time``
+  (the newest delivered so far for that satellite: it never goes back), ``_observation``,
   ``_station``, ``_station_id``, ``_norad``, ``_frame_hex`` and ``_frame_bytes``
 
 Each satellite's frames are told apart by one decoded field (a CCSDS APID, a
@@ -157,6 +158,7 @@ class SatnogsFeed:
         self.decoders = {}
         self._last_request = 0.0
         self.recent = {}  # (target, frame hash) -> when it was received, to drop copies from other stations
+        self.delivered = {}  # target -> newest frame time delivered in this run
         self.stats = {"polls": 0, "observations": 0, "frames": 0, "duplicates": 0, "undecoded": 0, "errors": 0}
 
     def _get(self, url, params=None):
@@ -232,6 +234,13 @@ class SatnogsFeed:
                     self.log("error", f"SatNOGS observation {observation.get('id')}: {type(error).__name__}: {error}")
                     continue
                 if frames:
+                    # COSMOS keeps the last packet delivered, and a late upload can be older than what came
+                    # before: _newest_frame_time never goes back, so automation can wait on it
+                    newest = self.delivered.get(satellite.target, self.newest.get(satellite.target, 0.0))
+                    for frame in frames:
+                        newest = max(newest, frame.time)
+                        frame.document["_newest_frame_time"] = newest
+                    self.delivered[satellite.target] = newest
                     yield frames
 
     def _observation_frames(self, satellite, observation):

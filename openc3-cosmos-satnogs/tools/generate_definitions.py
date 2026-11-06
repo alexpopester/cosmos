@@ -48,6 +48,7 @@ RESERVED = {
 
 META_ITEMS = [
     ("FRAME_TIME", "_frame_time", "64 FLOAT", "When the SatNOGS station received the frame (Unix seconds)"),
+    ("NEWEST_FRAME_TIME", "_newest_frame_time", "64 FLOAT", "Newest FRAME_TIME delivered so far (never goes back)"),
     ("OBSERVATION", "_observation", "32 UINT", "SatNOGS observation id"),
     ("STATION", "_station", "256 STRING", "SatNOGS station that received it"),
     ("STATION_ID", "_station_id", "32 UINT", "SatNOGS station id"),
@@ -78,7 +79,8 @@ def item_type(values):
 
 
 def packet_lines(target, packet, description, fields):
-    lines = [f'TELEMETRY {target} {packet} BIG_ENDIAN "{description}"', "  ACCESSOR JsonAccessor"]
+    # <%= target_name %>: the same definitions install as another target too (REPLAY_CANVAS for replays)
+    lines = [f'TELEMETRY <%= target_name %> {packet} BIG_ENDIAN "{description}"', "  ACCESSOR JsonAccessor"]
     for name, key, kind, text in META_ITEMS:
         lines += [f'  APPEND_ITEM {name} {kind} "{text}"', f"    KEY $.{key}"]
         if name == "FRAME_TIME":

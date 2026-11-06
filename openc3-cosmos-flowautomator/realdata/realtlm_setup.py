@@ -95,14 +95,20 @@ MISSIONS = {
 }
 
 
-def template_flow(name):
-    """The post-pass template for one satellite."""
+def template_flow(name, target=None, wait_s=WAIT_S, early_s=300, poll_s=POLL_S, prefix=PREFIX):
+    """The post-pass template for one satellite.
+
+    ``target``: read the beacon from another target (a replay: REPLAY_CANVAS). ``early_s``: how long before
+    AOS a beacon still counts as this pass's (clock and upload slack; replays are exact).
+    """
     mission = MISSIONS[name]
-    target, packet = mission["beacon"].split()
-    # (or 0): nothing received yet counts as not heard, not as an error
-    heard = f"(tlm('{target} {packet} FRAME_TIME') or 0) >= contact_aos - 300"
+    beacon_target, packet = mission["beacon"].split()
+    target = target or beacon_target
+    # NEWEST_FRAME_TIME, not FRAME_TIME: a late upload of an older pass can arrive after this one and roll
+    # FRAME_TIME back. (or 0): nothing received yet counts as not heard, not as an error
+    heard = f"(tlm('{target} {packet} NEWEST_FRAME_TIME') or 0) >= contact_aos - {early_s:g}"
     return {
-        "name": f"{PREFIX}{name} post-pass",
+        "name": f"{prefix}{name} post-pass",
         "description": f"Real telemetry check after each {name} pass (docs/REAL-DATA-TESTING.md step 3b). "
         "Sends no commands.",
         "mode": "run",
@@ -112,7 +118,7 @@ def template_flow(name):
             _node("t", "trigger_manual", 0),
             _node("los", "wait_contact", 220, label="LOS", anchor="los", offset=0),
             _node(
-                "wait", "wait_tlm", 440, label="Beacon from this pass?", condition=heard, timeout=WAIT_S, poll=POLL_S
+                "wait", "wait_tlm", 440, label="Beacon from this pass?", condition=heard, timeout=wait_s, poll=poll_s
             ),
             _node("read", "read_packet", 660, label="Read beacon", target=target, packet=packet, variable="b"),
             _node(
@@ -141,7 +147,7 @@ def template_flow(name):
                 660,
                 300,
                 label="Not heard",
-                message=f"No {name} beacon heard within {WAIT_S // 60} min of LOS "
+                message=f"No {name} beacon heard within {wait_s / 60:g} min of LOS "
                 "(pass over {{ contact_station }}, AOS {{ utc(contact_aos) }})",
             ),
         ],

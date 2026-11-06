@@ -2,10 +2,12 @@
 # (2026-11-05, satnogs-decoders 'catsat'). Raw values: the decoders
 # give no units or conversions.
 
-TELEMETRY CATSAT TYPE_1 BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: type 1 (48 frames seen)"
+TELEMETRY <%= target_name %> TYPE_1 BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: type 1 (48 frames seen)"
   ACCESSOR JsonAccessor
   APPEND_ITEM FRAME_TIME 64 FLOAT "When the SatNOGS station received the frame (Unix seconds)"
     KEY $._frame_time
+  APPEND_ITEM NEWEST_FRAME_TIME 64 FLOAT "Newest FRAME_TIME delivered so far (never goes back)"
+    KEY $._newest_frame_time
   ITEM PACKET_TIME 0 0 DERIVED "When the station received the frame"
     READ_CONVERSION openc3/conversions/unix_time_conversion.py FRAME_TIME
   APPEND_ITEM OBSERVATION 32 UINT "SatNOGS observation id"
@@ -67,10 +69,12 @@ TELEMETRY CATSAT TYPE_1 BIG_ENDIAN "CatSat (University of Arizona), GomSpace bea
   APPEND_ITEM TYPE 64 INT "type"
     KEY $.type
 
-TELEMETRY CATSAT TYPE_2 BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: type 2 (49 frames seen)"
+TELEMETRY <%= target_name %> TYPE_2 BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: type 2 (49 frames seen)"
   ACCESSOR JsonAccessor
   APPEND_ITEM FRAME_TIME 64 FLOAT "When the SatNOGS station received the frame (Unix seconds)"
     KEY $._frame_time
+  APPEND_ITEM NEWEST_FRAME_TIME 64 FLOAT "Newest FRAME_TIME delivered so far (never goes back)"
+    KEY $._newest_frame_time
   ITEM PACKET_TIME 0 0 DERIVED "When the station received the frame"
     READ_CONVERSION openc3/conversions/unix_time_conversion.py FRAME_TIME
   APPEND_ITEM OBSERVATION 32 UINT "SatNOGS observation id"
@@ -158,10 +162,12 @@ TELEMETRY CATSAT TYPE_2 BIG_ENDIAN "CatSat (University of Arizona), GomSpace bea
   APPEND_ITEM TYPE 64 INT "type"
     KEY $.type
 
-TELEMETRY CATSAT TYPE_3 BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: type 3 (20 frames seen)"
+TELEMETRY <%= target_name %> TYPE_3 BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: type 3 (20 frames seen)"
   ACCESSOR JsonAccessor
   APPEND_ITEM FRAME_TIME 64 FLOAT "When the SatNOGS station received the frame (Unix seconds)"
     KEY $._frame_time
+  APPEND_ITEM NEWEST_FRAME_TIME 64 FLOAT "Newest FRAME_TIME delivered so far (never goes back)"
+    KEY $._newest_frame_time
   ITEM PACKET_TIME 0 0 DERIVED "When the station received the frame"
     READ_CONVERSION openc3/conversions/unix_time_conversion.py FRAME_TIME
   APPEND_ITEM OBSERVATION 32 UINT "SatNOGS observation id"
@@ -241,10 +247,12 @@ TELEMETRY CATSAT TYPE_3 BIG_ENDIAN "CatSat (University of Arizona), GomSpace bea
   APPEND_ITEM TYPE 64 INT "type"
     KEY $.type
 
-TELEMETRY CATSAT TYPE_4 BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: type 4 (21 frames seen)"
+TELEMETRY <%= target_name %> TYPE_4 BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: type 4 (21 frames seen)"
   ACCESSOR JsonAccessor
   APPEND_ITEM FRAME_TIME 64 FLOAT "When the SatNOGS station received the frame (Unix seconds)"
     KEY $._frame_time
+  APPEND_ITEM NEWEST_FRAME_TIME 64 FLOAT "Newest FRAME_TIME delivered so far (never goes back)"
+    KEY $._newest_frame_time
   ITEM PACKET_TIME 0 0 DERIVED "When the station received the frame"
     READ_CONVERSION openc3/conversions/unix_time_conversion.py FRAME_TIME
   APPEND_ITEM OBSERVATION 32 UINT "SatNOGS observation id"
@@ -410,10 +418,12 @@ TELEMETRY CATSAT TYPE_4 BIG_ENDIAN "CatSat (University of Arizona), GomSpace bea
   APPEND_ITEM TYPE 64 INT "type"
     KEY $.type
 
-TELEMETRY CATSAT TYPE_5 BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: type 5 (18 frames seen)"
+TELEMETRY <%= target_name %> TYPE_5 BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: type 5 (18 frames seen)"
   ACCESSOR JsonAccessor
   APPEND_ITEM FRAME_TIME 64 FLOAT "When the SatNOGS station received the frame (Unix seconds)"
     KEY $._frame_time
+  APPEND_ITEM NEWEST_FRAME_TIME 64 FLOAT "Newest FRAME_TIME delivered so far (never goes back)"
+    KEY $._newest_frame_time
   ITEM PACKET_TIME 0 0 DERIVED "When the station received the frame"
     READ_CONVERSION openc3/conversions/unix_time_conversion.py FRAME_TIME
   APPEND_ITEM OBSERVATION 32 UINT "SatNOGS observation id"
@@ -545,10 +555,12 @@ TELEMETRY CATSAT TYPE_5 BIG_ENDIAN "CatSat (University of Arizona), GomSpace bea
   APPEND_ITEM TYPE 64 INT "type"
     KEY $.type
 
-TELEMETRY CATSAT TYPE_6 BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: type 6 (42 frames seen)"
+TELEMETRY <%= target_name %> TYPE_6 BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: type 6 (42 frames seen)"
   ACCESSOR JsonAccessor
   APPEND_ITEM FRAME_TIME 64 FLOAT "When the SatNOGS station received the frame (Unix seconds)"
     KEY $._frame_time
+  APPEND_ITEM NEWEST_FRAME_TIME 64 FLOAT "Newest FRAME_TIME delivered so far (never goes back)"
+    KEY $._newest_frame_time
   ITEM PACKET_TIME 0 0 DERIVED "When the station received the frame"
     READ_CONVERSION openc3/conversions/unix_time_conversion.py FRAME_TIME
   APPEND_ITEM OBSERVATION 32 UINT "SatNOGS observation id"
@@ -592,10 +604,12 @@ TELEMETRY CATSAT TYPE_6 BIG_ENDIAN "CatSat (University of Arizona), GomSpace bea
   APPEND_ITEM TYPE 64 INT "type"
     KEY $.type
 
-TELEMETRY CATSAT TYPE_7 BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: type 7 (12 frames seen)"
+TELEMETRY <%= target_name %> TYPE_7 BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: type 7 (12 frames seen)"
   ACCESSOR JsonAccessor
   APPEND_ITEM FRAME_TIME 64 FLOAT "When the SatNOGS station received the frame (Unix seconds)"
     KEY $._frame_time
+  APPEND_ITEM NEWEST_FRAME_TIME 64 FLOAT "Newest FRAME_TIME delivered so far (never goes back)"
+    KEY $._newest_frame_time
   ITEM PACKET_TIME 0 0 DERIVED "When the station received the frame"
     READ_CONVERSION openc3/conversions/unix_time_conversion.py FRAME_TIME
   APPEND_ITEM OBSERVATION 32 UINT "SatNOGS observation id"
@@ -687,10 +701,12 @@ TELEMETRY CATSAT TYPE_7 BIG_ENDIAN "CatSat (University of Arizona), GomSpace bea
   APPEND_ITEM TYPE 64 INT "type"
     KEY $.type
 
-TELEMETRY CATSAT TYPE_11 BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: type 11 (10 frames seen)"
+TELEMETRY <%= target_name %> TYPE_11 BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: type 11 (10 frames seen)"
   ACCESSOR JsonAccessor
   APPEND_ITEM FRAME_TIME 64 FLOAT "When the SatNOGS station received the frame (Unix seconds)"
     KEY $._frame_time
+  APPEND_ITEM NEWEST_FRAME_TIME 64 FLOAT "Newest FRAME_TIME delivered so far (never goes back)"
+    KEY $._newest_frame_time
   ITEM PACKET_TIME 0 0 DERIVED "When the station received the frame"
     READ_CONVERSION openc3/conversions/unix_time_conversion.py FRAME_TIME
   APPEND_ITEM OBSERVATION 32 UINT "SatNOGS observation id"
@@ -816,10 +832,12 @@ TELEMETRY CATSAT TYPE_11 BIG_ENDIAN "CatSat (University of Arizona), GomSpace be
   APPEND_ITEM TYPE 64 INT "type"
     KEY $.type
 
-TELEMETRY CATSAT TYPE_12 BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: type 12 (5 frames seen)"
+TELEMETRY <%= target_name %> TYPE_12 BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: type 12 (5 frames seen)"
   ACCESSOR JsonAccessor
   APPEND_ITEM FRAME_TIME 64 FLOAT "When the SatNOGS station received the frame (Unix seconds)"
     KEY $._frame_time
+  APPEND_ITEM NEWEST_FRAME_TIME 64 FLOAT "Newest FRAME_TIME delivered so far (never goes back)"
+    KEY $._newest_frame_time
   ITEM PACKET_TIME 0 0 DERIVED "When the station received the frame"
     READ_CONVERSION openc3/conversions/unix_time_conversion.py FRAME_TIME
   APPEND_ITEM OBSERVATION 32 UINT "SatNOGS observation id"
@@ -959,10 +977,12 @@ TELEMETRY CATSAT TYPE_12 BIG_ENDIAN "CatSat (University of Arizona), GomSpace be
   APPEND_ITEM WHEEL_TORQUE_3 64 FLOAT "wheel_torque_3"
     KEY $.wheel_torque_3
 
-TELEMETRY CATSAT TYPE_13 BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: type 13 (7 frames seen)"
+TELEMETRY <%= target_name %> TYPE_13 BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: type 13 (7 frames seen)"
   ACCESSOR JsonAccessor
   APPEND_ITEM FRAME_TIME 64 FLOAT "When the SatNOGS station received the frame (Unix seconds)"
     KEY $._frame_time
+  APPEND_ITEM NEWEST_FRAME_TIME 64 FLOAT "Newest FRAME_TIME delivered so far (never goes back)"
+    KEY $._newest_frame_time
   ITEM PACKET_TIME 0 0 DERIVED "When the station received the frame"
     READ_CONVERSION openc3/conversions/unix_time_conversion.py FRAME_TIME
   APPEND_ITEM OBSERVATION 32 UINT "SatNOGS observation id"
@@ -1072,10 +1092,12 @@ TELEMETRY CATSAT TYPE_13 BIG_ENDIAN "CatSat (University of Arizona), GomSpace be
   APPEND_ITEM UKF_ZPRED_9 64 FLOAT "ukf_zpred_9"
     KEY $.ukf_zpred_9
 
-TELEMETRY CATSAT TYPE_14 BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: type 14 (7 frames seen)"
+TELEMETRY <%= target_name %> TYPE_14 BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: type 14 (7 frames seen)"
   ACCESSOR JsonAccessor
   APPEND_ITEM FRAME_TIME 64 FLOAT "When the SatNOGS station received the frame (Unix seconds)"
     KEY $._frame_time
+  APPEND_ITEM NEWEST_FRAME_TIME 64 FLOAT "Newest FRAME_TIME delivered so far (never goes back)"
+    KEY $._newest_frame_time
   ITEM PACKET_TIME 0 0 DERIVED "When the station received the frame"
     READ_CONVERSION openc3/conversions/unix_time_conversion.py FRAME_TIME
   APPEND_ITEM OBSERVATION 32 UINT "SatNOGS observation id"
@@ -1177,10 +1199,12 @@ TELEMETRY CATSAT TYPE_14 BIG_ENDIAN "CatSat (University of Arizona), GomSpace be
   APPEND_ITEM UKF_Z_9 64 FLOAT "ukf_z_9"
     KEY $.ukf_z_9
 
-TELEMETRY CATSAT TYPE_15 BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: type 15 (10 frames seen)"
+TELEMETRY <%= target_name %> TYPE_15 BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: type 15 (10 frames seen)"
   ACCESSOR JsonAccessor
   APPEND_ITEM FRAME_TIME 64 FLOAT "When the SatNOGS station received the frame (Unix seconds)"
     KEY $._frame_time
+  APPEND_ITEM NEWEST_FRAME_TIME 64 FLOAT "Newest FRAME_TIME delivered so far (never goes back)"
+    KEY $._newest_frame_time
   ITEM PACKET_TIME 0 0 DERIVED "When the station received the frame"
     READ_CONVERSION openc3/conversions/unix_time_conversion.py FRAME_TIME
   APPEND_ITEM OBSERVATION 32 UINT "SatNOGS observation id"
@@ -1266,10 +1290,12 @@ TELEMETRY CATSAT TYPE_15 BIG_ENDIAN "CatSat (University of Arizona), GomSpace be
   APPEND_ITEM TYPE 64 INT "type"
     KEY $.type
 
-TELEMETRY CATSAT TYPE_16 BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: type 16 (12 frames seen)"
+TELEMETRY <%= target_name %> TYPE_16 BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: type 16 (12 frames seen)"
   ACCESSOR JsonAccessor
   APPEND_ITEM FRAME_TIME 64 FLOAT "When the SatNOGS station received the frame (Unix seconds)"
     KEY $._frame_time
+  APPEND_ITEM NEWEST_FRAME_TIME 64 FLOAT "Newest FRAME_TIME delivered so far (never goes back)"
+    KEY $._newest_frame_time
   ITEM PACKET_TIME 0 0 DERIVED "When the station received the frame"
     READ_CONVERSION openc3/conversions/unix_time_conversion.py FRAME_TIME
   APPEND_ITEM OBSERVATION 32 UINT "SatNOGS observation id"
@@ -1307,10 +1333,12 @@ TELEMETRY CATSAT TYPE_16 BIG_ENDIAN "CatSat (University of Arizona), GomSpace be
   APPEND_ITEM TYPE 64 INT "type"
     KEY $.type
 
-TELEMETRY CATSAT TYPE_17 BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: type 17 (20 frames seen)"
+TELEMETRY <%= target_name %> TYPE_17 BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: type 17 (20 frames seen)"
   ACCESSOR JsonAccessor
   APPEND_ITEM FRAME_TIME 64 FLOAT "When the SatNOGS station received the frame (Unix seconds)"
     KEY $._frame_time
+  APPEND_ITEM NEWEST_FRAME_TIME 64 FLOAT "Newest FRAME_TIME delivered so far (never goes back)"
+    KEY $._newest_frame_time
   ITEM PACKET_TIME 0 0 DERIVED "When the station received the frame"
     READ_CONVERSION openc3/conversions/unix_time_conversion.py FRAME_TIME
   APPEND_ITEM OBSERVATION 32 UINT "SatNOGS observation id"
@@ -1406,10 +1434,12 @@ TELEMETRY CATSAT TYPE_17 BIG_ENDIAN "CatSat (University of Arizona), GomSpace be
   APPEND_ITEM TYPE 64 INT "type"
     KEY $.type
 
-TELEMETRY CATSAT OTHER BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: frames decoded only as far as the header"
+TELEMETRY <%= target_name %> OTHER BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: frames decoded only as far as the header"
   ACCESSOR JsonAccessor
   APPEND_ITEM FRAME_TIME 64 FLOAT "When the SatNOGS station received the frame (Unix seconds)"
     KEY $._frame_time
+  APPEND_ITEM NEWEST_FRAME_TIME 64 FLOAT "Newest FRAME_TIME delivered so far (never goes back)"
+    KEY $._newest_frame_time
   ITEM PACKET_TIME 0 0 DERIVED "When the station received the frame"
     READ_CONVERSION openc3/conversions/unix_time_conversion.py FRAME_TIME
   APPEND_ITEM OBSERVATION 32 UINT "SatNOGS observation id"
@@ -1437,10 +1467,12 @@ TELEMETRY CATSAT OTHER BIG_ENDIAN "CatSat (University of Arizona), GomSpace beac
   APPEND_ITEM TYPE 64 INT "type"
     KEY $.type
 
-TELEMETRY CATSAT UNDECODED BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: frames the decoder can't read"
+TELEMETRY <%= target_name %> UNDECODED BIG_ENDIAN "CatSat (University of Arizona), GomSpace beacons: frames the decoder can't read"
   ACCESSOR JsonAccessor
   APPEND_ITEM FRAME_TIME 64 FLOAT "When the SatNOGS station received the frame (Unix seconds)"
     KEY $._frame_time
+  APPEND_ITEM NEWEST_FRAME_TIME 64 FLOAT "Newest FRAME_TIME delivered so far (never goes back)"
+    KEY $._newest_frame_time
   ITEM PACKET_TIME 0 0 DERIVED "When the station received the frame"
     READ_CONVERSION openc3/conversions/unix_time_conversion.py FRAME_TIME
   APPEND_ITEM OBSERVATION 32 UINT "SatNOGS observation id"

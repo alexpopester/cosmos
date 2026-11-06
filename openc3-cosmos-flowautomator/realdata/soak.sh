@@ -5,6 +5,7 @@
 #   realdata/soak.sh start                       # start the recorder container (restarts with docker)
 #   realdata/soak.sh status                      # recorder state and the latest events
 #   realdata/soak.sh report                      # fetch SatNOGS data and score the soak so far
+#   realdata/soak.sh replay [--speed 1]          # step 3c: replay recorded real passes, check the post-pass flows
 #   realdata/soak.sh install <gem>               # upgrade the plugin mid-soak; the restart is left out of the scores
 #   realdata/soak.sh stop                        # stop the recorder
 #   COSMOS_PASSWORD=... realdata/soak.sh clear   # stop the recorder and remove the soak from COSMOS
@@ -37,6 +38,7 @@ case "${1:-}" in
     tail -n 3 realdata/cache/soak/events-*.jsonl 2>/dev/null | cut -c1-200 || true
     ;;
   report) run realdata/soak_report.py "${@:2}" ;;
+  replay) run realdata/replay_test.py "${@:2}" ;;
   install)
     # Install a Flow Automator gem without reloading the demo (setup_demo.sh would put the demo rule back on
     # the soak stations), and record the engine restart as a maintenance window the report leaves out
@@ -62,5 +64,5 @@ case "${1:-}" in
     docker rm -f "$NAME" >/dev/null 2>&1 || true
     run realdata/soak_setup.py --clear
     ;;
-  *) sed -n '2,11p' "$0"; exit 1 ;;
+  *) sed -n '2,12p' "$0"; exit 1 ;;
 esac
