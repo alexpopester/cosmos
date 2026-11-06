@@ -160,7 +160,8 @@ def station_coverage(observations, manifest, events, activities):
             predicted[(event["satellite_id"], event["station_id"])].append((event["aos"], event["los"]))
     by_pair = collections.defaultdict(list)
     for activity in activities.values():
-        by_pair[(activity["satellite_id"], activity["station_id"])].append(activity)
+        if activity.get("rule_id") == manifest.get("rule_id"):  # the soak's own, not post-pass checks
+            by_pair[(activity["satellite_id"], activity["station_id"])].append(activity)
 
     rows = []
     for observation in observations:
@@ -265,6 +266,25 @@ def prediction_churn(events):
         group = [r["aos_shift"] for r in rows if _bin(r["lead_h"], [(low, high)]) == label]
         table.append({"first_predicted": f"{label} before AOS", "contacts": len(group), "aos_shift_s": stats(group)})
     return table
+
+
+# ---- 5. post-pass checks on real telemetry (step 3b) ---------------------------------
+
+
+def post_pass_checks(manifest, activities):
+    """Per satellite: how its post-pass checks came out (healthy, anomaly, not_heard ...)."""
+    result = {}
+    for name, info in (manifest.get("realtlm") or {}).items():
+        mine = sorted((a for a in activities.values() if a.get("rule_id") == info["rule_id"]), key=lambda a: a["time"])
+        finished = [a for a in mine if a.get("outcome")]
+        result[name] = {
+            "activities": len(mine),
+            "finished": len(finished),
+            "outcomes": dict(collections.Counter(a["outcome"] for a in finished)),
+            "anomalies": [a.get("summary") or a["id"] for a in finished if a["outcome"] == "anomaly"],
+            "last_summary": next((a.get("summary") for a in reversed(finished) if a.get("summary")), None),
+        }
+    return result
 
 
 # ---- SatNOGS data -----------------------------------------------------------------
@@ -374,6 +394,16 @@ def markdown(report):
     ]
     for row in report["churn"]:
         lines.append(f"| {row['first_predicted']} | {row['contacts']} | {_fmt(row['aos_shift_s'])} |")
+    lines += ["", "## 5. Post-pass checks on real telemetry (step 3b)", ""]
+    if not report["post_pass"]:
+        lines.append("Not set up (realdata/realtlm_setup.py).")
+    for name, row in report["post_pass"].items():
+        counts = ", ".join(f"{k} {v}" for k, v in sorted(row["outcomes"].items())) or "none finished yet"
+        lines.append(f"- **{name}**: {row['finished']} finished of {row['activities']} — {counts}")
+        for text in row["anomalies"][:10]:
+            lines.append(f"  - anomaly: {text}")
+        if row["last_summary"]:
+            lines.append(f"  - last: {row['last_summary']}")
     return "\n".join(lines) + "\n"
 
 
@@ -398,6 +428,7 @@ def build_report(manifest, events, observations, stations):
         "coverage": station_coverage(observations, manifest, events, activities),
         "scheduler": scheduler_behaviour(activities, events, manifest.get("maintenance") or []),
         "churn": prediction_churn(events),
+        "post_pass": post_pass_checks(manifest, final_activities(events)),
         "accuracy": accuracy,
     }
 

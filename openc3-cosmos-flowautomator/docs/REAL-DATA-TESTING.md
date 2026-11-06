@@ -53,7 +53,7 @@ and don't book observations on other people's stations at scale.
 |---|---|---|---|
 | 1 | Predictions vs SatNOGS observations | `orbit.py` pass geometry against real passes and real frame times | Done 2026-11-05 (see Results) |
 | 2 | Real-pass scheduling soak | Planner, rules, retiming and capacity on live passes over real stations | Recording since 2026-11-05 (final report after ≥ 1 week) |
-| 3 | Real telemetry into COSMOS + replay | Flows acting on real values; recorded passes as a regression set | 3a (live telemetry) built 2026-11-05; 3b (flows) and 3c (replay) next |
+| 3 | Real telemetry into COSMOS + replay | Flows acting on real values; recorded passes as a regression set | 3a live telemetry and 3b post-pass checks built 2026-11-05; 3c (replay) next |
 | 4 | NOS3 command loop | Contact flows commanding real cFS on a real orbit | Not started |
 
 ### Step 1: predictions vs SatNOGS observations
@@ -165,11 +165,36 @@ noise.
   booked days ahead first, which used up the page budget for CANVAS and
   AEPEX. Only finished observations are asked for now.
 
-**3b. Flows on real values (next):** contact templates that run after LOS
-plus a delay (the upload lag), wait for the pass's packets, and check real
-values. Examples: command counters didn't jump, battery above a floor, mode
-nominal, a beacon heard from at least one station. Plus a "no beacon heard"
-alert after N passes.
+**3b. Post-pass checks on real values (built 2026-11-05):**
+`realdata/realtlm_setup.py` creates one template per satellite, named
+"RealTLM: <SAT> post-pass" (like a mission's own post-pass procedure), and a
+rule that runs it after every pass at two soak stations that work that
+satellite. They act as its ground stations:
+
+| Satellite | Stations | Healthy means (raw values) | Seen Nov 2026 |
+|---|---|---|---|
+| CANVAS | EU1AEM, MAUSyagi | rejected cmds 0, fail code 0, FP errors 0, ADCS alive 2, battery temps 2000–2250 | 0, 0, 0, 2, 2108–2126 |
+| AEPEX | MAUSyagi, MAUSyagi-AK | rejected 0, fail code 0, mode 1, battery and UHF alive, uplink < 2 days ago | 0, 0, 1, alive, 4–8 h |
+| CatSat | JH4XSY, EU1AEM | battery ≥ 14,500 mV, no latch-ups, board temp 300–420 | 15,576–16,313, 0, 352–382 |
+
+Each check:
+1. starts 30 s before LOS (rules can't start activities after LOS) and runs
+   on past it;
+2. waits up to 90 min for a beacon heard at or after this pass's AOS, from
+   any SatNOGS station;
+3. logs who heard it, when and the key values;
+4. raises an alert naming what's off, or a notification when nothing was
+   heard.
+
+The recorder logs each check's outcome (healthy, anomaly or not heard) with
+its summary, and the soak report adds them as section 5.
+
+Limits:
+- **The check reads the latest beacon, not this pass's.** If a later pass's
+  frames arrive first, it checks those, which is still a health check within
+  an orbit. A per-pass archive would need a history query node.
+- **Nothing compares one pass with the last** (for example a command counter
+  that moved without an uplink): runs have no memory between them.
 
 **3c. Replay (next):** play a recorded pass (its frames at their original
 spacing) through a COSMOS target at real time, for repeatable regression

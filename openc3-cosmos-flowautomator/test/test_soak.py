@@ -250,3 +250,29 @@ def test_maintenance_windows_are_left_out_of_the_scores():
     behaviour = soak_report.scheduler_behaviour(activities, [], windows)
     assert behaviour["left_out_for_maintenance"] == 1
     assert behaviour["statuses"] == {"done": 2} and behaviour["problems"] == {}
+
+
+def test_post_pass_check_outcomes_are_recorded_and_reported():
+    def run(*nodes, status="success"):
+        return {"status": status, "steps": [{"node": n, "message": f"{n} message"} for n in nodes]}
+
+    assert soak_recorder.check_outcome(run("t", "los", "wait", "read", "log", "ok", "good")) == (
+        "healthy",
+        "log message",
+    )
+    assert soak_recorder.check_outcome(run("t", "los", "wait", "read", "log", "ok", "bad"))[0] == "anomaly"
+    assert soak_recorder.check_outcome(run("t", "los", "wait", "silent")) == ("not_heard", None)
+    assert soak_recorder.check_outcome(run("t", "los", status="stopped"))[0] == "stopped"
+
+    manifest = {"rule_id": "soak", "realtlm": {"CANVAS": {"rule_id": "r1"}}}
+    assert soak_recorder.watched_rules(manifest) == {"soak", "r1"}
+    activities = {
+        "a": {"id": "a", "rule_id": "r1", "time": 1, "outcome": "healthy", "summary": "CANVAS heard by X: fine"},
+        "b": {"id": "b", "rule_id": "r1", "time": 2, "outcome": "anomaly", "summary": "CANVAS heard by Y: bad"},
+        "c": {"id": "c", "rule_id": "r1", "time": 3},  # not finished yet
+        "d": {"id": "d", "rule_id": "soak", "time": 4, "outcome": "healthy"},
+    }
+    row = soak_report.post_pass_checks(manifest, activities)["CANVAS"]
+    assert row["activities"] == 3 and row["finished"] == 2
+    assert row["outcomes"] == {"healthy": 1, "anomaly": 1} and row["anomalies"] == ["CANVAS heard by Y: bad"]
+    assert row["last_summary"] == "CANVAS heard by Y: bad"

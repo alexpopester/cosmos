@@ -66,6 +66,20 @@ def _activity(a):
     }
 
 
+def watched_rules(manifest):
+    """The soak rule and the step 3b post-pass rules."""
+    return {manifest.get("rule_id")} | {v["rule_id"] for v in (manifest.get("realtlm") or {}).values()}
+
+
+def check_outcome(run):
+    """What a post-pass check found: healthy, anomaly, not_heard, or the run's status if it got nowhere."""
+    reached = {step.get("node") for step in run.get("steps") or []}
+    endings = (("bad", "anomaly"), ("good", "healthy"), ("silent", "not_heard"))
+    outcome = next((name for node, name in endings if node in reached), run.get("status") or "unknown")
+    summary = next((s.get("message") for s in run.get("steps") or [] if s.get("node") == "log"), None)
+    return outcome, summary
+
+
 def diff(schedule, state, manifest, now):
     """Events for what changed since ``state``, and the new state. Pure: no I/O."""
     sats, stations = set(manifest["satellites"]), set(manifest["stations"])
@@ -144,7 +158,7 @@ def diff(schedule, state, manifest, now):
     previous_activities = state.get("activities", {})
     activities = {}
     for a in schedule["activities"]:
-        if a.get("rule_id") == manifest.get("rule_id"):
+        if a.get("rule_id") in watched_rules(manifest):
             activities[a["id"]] = _activity(a)
     for aid, a in activities.items():
         old = previous_activities.get(aid)
@@ -189,6 +203,15 @@ def record_once(fa, manifest):
         append_events([{"type": "error", "message": f"{type(error).__name__}: {error}"[:500]}], now)
         return 0
     events, new_state = diff(schedule, state, manifest, now)
+    realtlm = {v["rule_id"] for v in (manifest.get("realtlm") or {}).values()}
+    for event in events:
+        finished = event["type"] == "activity" and event["status"] in ("done", "failed", "stopped")
+        if finished and event.get("rule_id") in realtlm and event.get("run_id"):
+            try:
+                run = fa.get(f"/runs/{event['run_id']}")
+                event["outcome"], event["summary"] = check_outcome(run.get("run", run))
+            except Exception as error:  # noqa: BLE001 - the outcome is extra; the event still counts
+                event["outcome"] = f"unknown ({type(error).__name__})"
     append_events(events, now)
     common.save_json(STATE, new_state)
     return len(events)
@@ -207,6 +230,7 @@ def main(argv=None):
         raise SystemExit(f"No soak manifest at {common.MANIFEST}: run soak_setup.py first")
     fa = common.FlowAutomator(args.url, args.scope)
     while True:
+        manifest = common.load_json(common.MANIFEST) or manifest  # picks up rules added since (step 3b)
         count = record_once(fa, manifest)
         print(f"{common.now_iso()} recorded {count} events", flush=True)
         if args.once:

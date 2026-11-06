@@ -20,6 +20,13 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Docs
+- **Post-pass checks on real telemetry** (`realdata/realtlm_setup.py`, step 3b
+  of `docs/REAL-DATA-TESTING.md`): one template per satellite (CANVAS, AEPEX,
+  CatSat) that waits after LOS for the pass's SatNOGS beacon, then checks
+  command counters, mode, power and temperatures. The soak records each
+  outcome and reports them.
+
 ## [1.14.1] - 2026-11-05
 
 ### Fixed
