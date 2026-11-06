@@ -211,11 +211,11 @@ Limits:
   runs the step 3b post-pass template (reading the replay target) against a
   contact timed to match:
 
-| Case | Expected | 2026-11-06, 10x |
+| Case | Expected | 2026-11-06: 10x and real time |
 |---|---|---|
-| as recorded | healthy | 3/3 pass |
-| injected fault (CANVAS rejected commands 3, AEPEX mode 3, CatSat battery 14,000 mV) | an alert naming it | 3/3 pass |
-| lost pass (every frame dropped) | not heard | 3/3 pass |
+| as recorded | healthy | 3/3 and 3/3 pass |
+| injected fault (CANVAS rejected commands 3, AEPEX mode 3, CatSat battery 14,000 mV) | an alert naming it | 3/3 and 3/3 pass |
+| lost pass (every frame dropped) | not heard | 3/3 and 3/3 pass |
 
 ```bash
 cd openc3-cosmos-flowautomator
