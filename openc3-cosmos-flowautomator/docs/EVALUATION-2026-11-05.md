@@ -168,7 +168,7 @@ Effort: **S** < half a day, **M** 1–3 days, **L** > 3 days.
 
 | # | Issue | IDs | Fix | Effort | Status |
 |---|---|---|---|---|---|
-| B48 | **No CI** (TOOL-1). | M-1, M-14 | `flowautomator.yml`, path-filtered: pytest + coverage ≥ 85 on 3.11–3.13, ruff check and format, pnpm frozen install + lint `--max-warnings 0` + build + source-hash check, gem build, CHANGELOG gate. | S | Open |
+| B48 | **No CI** (TOOL-1). | M-1, M-14 | `flowautomator.yml`, path-filtered: pytest + coverage ≥ 85 on 3.11–3.13, ruff check and format, pnpm frozen install + lint `--max-warnings 0` + build + source-hash check, gem build, CHANGELOG gate. | S | Workflow added in 1.16.0 (`.github/workflows/flowautomator.yml`); not run yet: Actions is off on the fork |
 | B49 | **Contract tests** for the node registries and backend parity. | M-3 | `test_contracts.py`: `nodeTypes.js` keys and handles = `NODE_TYPES` = `EXECUTORS`; `CosmosBackend` vs `FakeBackend` method signatures. | S | Fixed in 1.16.0 |
 | B50 | **API tests:** `http_api` 76%, `cosmos_backend` 39%; the PUT every save uses is untested. | M-4, TOOL-8 | Table-driven `test_http_api.py` over all 62 routes (read/write status, happy shape, 4xx); a stubbed `openc3.api` for `CosmosBackend`. | M | Open |
 | B51 | **Frontend unit tests** (TOOL-2). | M-2 | vitest + @vue/test-utils: `nodeTypes`, `flowApi.errorInfo`, `format.js`, then FlowNode, ParamForm, ApprovalPanel, NodeInspector, KeyValueEditor (B13). | M | Open |
