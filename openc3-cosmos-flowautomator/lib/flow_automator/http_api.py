@@ -28,7 +28,8 @@ which every write records in the audit log.
     POST   <prefix>/api/flows/<id>/run        {"trigger_node"?, "variables"?, "mode"?, "dry_run"?, "skip_waits"?,
                                                "contact"?: {"contact_id"} or {"aos_in", "duration", ...}}
     GET    <prefix>/api/runs?flow_id=&limit=
-    GET    <prefix>/api/runs/<id>
+    GET    <prefix>/api/runs/<id>?since=<n>    with since: only steps from sequence n on ("steps_from"); a polling
+                                               log asks from its first unfinished step (B47)
     POST   <prefix>/api/runs/<id>/stop
     POST   <prefix>/api/runs/<id>/approve     {"approval_id": id, "decision": "go" | "run" | "abort"}
     POST   <prefix>/api/stop_all                 also pauses the contact scheduler
@@ -470,8 +471,9 @@ class FlowApi:
             search=arg("search"),
         )
 
-    def get_run(self, run_id, **_):
-        return self.engine.get_run(run_id)
+    def get_run(self, run_id, query=None, **_):
+        since = self._query_number(query or {}, "since")
+        return self.engine.get_run(run_id, since=None if since is None else int(since))
 
     def approve(self, run_id, payload, user, **_):
         run = self.engine.runs.get(run_id)

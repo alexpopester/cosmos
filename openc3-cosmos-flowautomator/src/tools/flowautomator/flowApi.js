@@ -92,8 +92,11 @@ export default {
     post(`/flows/${id}/versions/${version}/restore`, { note }),
   deletedFlows: () => get('/flows/deleted'),
   undelete: (id) => post(`/flows/${id}/undelete`),
-  getRun: (id) =>
-    Api.get(`${BASE}/runs/${id}`, { headers: handled }).then(unwrap),
+  getRun: (id, since) =>
+    Api.get(`${BASE}/runs/${id}`, {
+      headers: handled,
+      params: since === undefined ? undefined : { since },
+    }).then(unwrap),
   stopRun: (id) =>
     Api.post(`${BASE}/runs/${id}/stop`, { data: {}, headers: handled }).then(
       unwrap,

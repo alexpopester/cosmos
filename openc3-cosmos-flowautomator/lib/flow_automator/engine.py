@@ -31,6 +31,8 @@ SCRIPT_STOP_WAIT_SECONDS = 10.0  # STOP ALL waits this long (in all) for Script 
 DETACHED_PRUNE_SECONDS = 60.0  # how often finished fire-and-forget scripts are forgotten
 MAX_DETACHED_SCRIPTS = 1000
 MAX_MEMORY_BYTES = 65536  # what one flow may remember between runs
+DELETED_HISTORY_DAYS = 30  # a deleted flow's versions and runs are kept this long, for restoring it
+PURGE_DELETED_EVERY_SECONDS = 86400
 ENGINE_HEARTBEAT_SECONDS = 5.0
 ENGINE_STALE_SECONDS = 30.0  # an engine that hasn't written its heartbeat for this long is gone
 RECOVERY_CHECK_SECONDS = 30.0
@@ -134,6 +136,13 @@ class FlowEngine:
             self.flows = self.store.all_flows()
             self._ensure_versions()
             self.memory = {k: dict(v.get("values") or {}) for k, v in self.store.records("flow_memory").items()}
+        moved = self.store.migrate_run_history(self._history_flow_ids())
+        if moved:
+            self.log("info", f"Moved {moved} runs to the new history layout (summaries, steps and an index)")
+        moved = self.store.migrate_version_history(self._history_flow_ids())
+        if moved:
+            self.log("info", f"Moved {moved} saved versions to the new layout (metadata and bodies)")
+        self.purge_deleted()
         self._check_format()
         self.alerts.load()
         self._recover_interrupted_runs()
@@ -229,6 +238,7 @@ class FlowEngine:
 
     def _store_loop(self):
         last_prune = time.monotonic()
+        last_purge = time.monotonic()
         last_heartbeat = last_recovery = 0.0
         while not self._store_stop.is_set():
             self.store.wait_for_writes(STORE_FLUSH_SECONDS)
@@ -250,6 +260,9 @@ class FlowEngine:
             if time.monotonic() - last_prune >= DETACHED_PRUNE_SECONDS:
                 last_prune = time.monotonic()
                 self.prune_detached_scripts()
+            if time.monotonic() - last_purge >= PURGE_DELETED_EVERY_SECONDS:
+                last_purge = time.monotonic()
+                self.purge_deleted()
 
     def _note_store_health(self):
         health = self.store.health()
@@ -400,7 +413,7 @@ class FlowEngine:
             active = collections.Counter(run.flow.get("id") for run in self.runs.values() if run.parent is None)
         result = []
         for flow in sorted(flows, key=lambda f: str(f.get("name", "")).lower()):
-            last = self.store.runs(flow["id"], 1)
+            last = self.store.run_summaries(flow["id"], 1)
             result.append(
                 {
                     "id": flow["id"],
@@ -678,6 +691,26 @@ class FlowEngine:
             run.stop()
         self.log("info", f"Flow '{flow.get('name')}' deleted")
         return flow
+
+    def purge_deleted(self, now=None):
+        """Delete the history (versions, runs) of flows deleted more than DELETED_HISTORY_DAYS ago (B46).
+        Until then a deleted flow can be restored and its runs looked up."""
+        now = time.time() if now is None else now
+        purged = 0
+        try:
+            for record in self.list_deleted():
+                if now - float(record.get("deleted_at") or now) >= DELETED_HISTORY_DAYS * 86400:
+                    with self.lock:
+                        if record["id"] in self.flows:  # restored since: keep it
+                            continue
+                    self.store.purge_flow_history(record["id"])
+                    self.store.delete_record("deleted_flows", record["id"])
+                    purged += 1
+        except Exception as error:  # noqa: BLE001 - housekeeping: try again next time
+            self.log("warn", f"Purging deleted flows' history failed: {error}")
+        if purged:
+            self.log("info", f"Purged the history of {purged} flows deleted over {DELETED_HISTORY_DAYS} days ago")
+        return purged
 
     def list_deleted(self):
         deleted = list(self.store.records("deleted_flows").values())
@@ -1156,19 +1189,22 @@ class FlowEngine:
             ids = list(self.flows.keys())
         return ids + [d["id"] for d in self.list_deleted() if d["id"] not in ids]
 
-    def get_run(self, run_id):
+    def get_run(self, run_id, since=None):
+        """A run with its steps. With ``since`` (a step sequence number: steps_dropped + position), only the
+        steps from there on, and ``steps_from`` says where they start: a polling log asks from its first
+        unfinished step instead of fetching every step every time (B47)."""
         with self.lock:
             run = self.runs.get(run_id)
             finished = self.finished.get(run_id)
         if run is not None:
-            return run.as_json()
-        if finished is not None:
-            return finished
-        for flow_id in self._history_flow_ids():
-            for record in self.store.runs(flow_id):
-                if record.get("id") == run_id:
-                    return record
-        raise NotFoundError(f"Run '{run_id}' not found")
+            record = run.as_json(since=since)
+        elif finished is not None:
+            record = finished
+        else:
+            record = self.store.find_run(run_id)  # an index lookup, not a scan of every flow's history
+        if record is None:
+            raise NotFoundError(f"Run '{run_id}' not found")
+        return steps_since(record, since)
 
     def list_runs(self, flow_id=None, limit=50, **filters):
         """Runs, newest first, across flows (including deleted ones).
@@ -1181,11 +1217,7 @@ class FlowEngine:
         flow_ids = [flow_id] if flow_id else self._history_flow_ids()
         if flow_id:
             active = [r for r in active if r["flow_id"] == flow_id]
-        history = []
-        for fid in flow_ids:
-            for record in self.store.runs(fid):
-                record.pop("steps", None)
-                history.append(record)
+        history = [record for fid in flow_ids for record in self.store.run_summaries(fid)]
         active_ids = {r["id"] for r in active}
         runs = [r for r in active + [r for r in history if r["id"] not in active_ids] if _run_matches(r, filters)]
         runs.sort(key=lambda r: r.get("started_at") or 0, reverse=True)
@@ -1206,6 +1238,19 @@ class FlowEngine:
                 "store": self.store.health(),
                 "time": time.time(),
             }
+
+
+def steps_since(record, since):
+    """The run record with only its steps from sequence number ``since`` on (steps_dropped + position)."""
+    if since is None:
+        return record
+    dropped = int(record.get("steps_dropped") or 0)
+    start = max(int(since), dropped)
+    steps = record.get("steps") or []
+    if record.get("steps_from") is not None:  # already sliced by the run (as_json(since=...))
+        offset = start - int(record["steps_from"])
+        return {**record, "steps": steps[max(0, offset) :], "steps_from": start}
+    return {**record, "steps": steps[start - dropped :], "steps_from": start}
 
 
 def subflow_ids(flow):

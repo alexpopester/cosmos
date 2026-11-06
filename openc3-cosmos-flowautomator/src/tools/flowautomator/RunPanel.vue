@@ -269,7 +269,7 @@
             <tbody>
               <tr
                 v-for="(step, i) in run.steps"
-                :key="i"
+                :key="(run.steps_dropped || 0) + i"
                 class="fa-clickable"
                 @click="$emit('focus-node', step.node)"
               >

@@ -139,12 +139,12 @@ class FlowVersions:
         return entry
 
     def list(self, flow_id):
-        return [{k: v for k, v in entry.items() if k != "flow"} for entry in self.store.versions(flow_id)]
+        return self.store.version_list(flow_id)  # metadata only: the bodies are read one at a time (B46)
 
     def get(self, flow_id, version):
-        for entry in self.store.versions(flow_id):
-            if entry["version"] == version:
-                return entry
+        for meta in self.store.version_list(flow_id):
+            if meta["version"] == version:
+                return {**meta, "flow": self.store.version_body(flow_id, version)}
         return None
 
     def latest(self, flow_id):

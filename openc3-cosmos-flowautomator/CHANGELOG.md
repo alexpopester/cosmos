@@ -20,6 +20,34 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.16.0] - 2026-11-06
+
+Backlog items from EVALUATION-2026-11-05 section 2.3 (performance) and 2.4.
+
+**Upgrade note:** run history and saved versions move to a new layout the first
+time 1.16.0 starts (the engine logs how many). It's one way: don't go back to an
+older version afterwards, or it won't find saved versions' flows (D32).
+
+### Fixed
+- **Run history scales (B44).** A run's summary, its steps and a run id -> flow
+  index are kept apart, and summaries are cached in memory. Listing runs across
+  20 flows x 200 runs takes milliseconds (it read every step of every run), and
+  looking up one run is a lookup, not a scan of every flow.
+- **Version history scales (B46).** Version metadata is kept apart from flow
+  bodies: listing 200 versions of a 2,000-node flow is under 50 ms (2.2 s), and
+  an old version reads one body. A deleted flow's history (versions, runs) is
+  purged 30 days after it was deleted; until then it can still be restored.
+- **The run log polls only new steps (B47).** `GET /runs/<id>?since=<n>`
+  returns the steps from sequence n on, and the log asks from its first
+  unfinished step instead of refetching up to 1,000 steps every half second.
+  Rows are keyed by sequence number and node labels come from a map.
+
+### Added
+- Contract tests (B49): the editor's and the engine's node registries name the
+  same types, outputs and error ports, and FakeBackend has every CosmosBackend
+  method.
+- `test/js/`: unit tests for the run log's incremental polling (`node --test`).
+
 ## [1.15.0] - 2026-11-06
 
 Fixes and a feature from the real-data tests (`docs/REAL-DATA-TESTING.md`).

@@ -117,8 +117,9 @@ memory and are rebuilt (or lost) on restart.
 | Key | Type | Contents |
 | --- | --- | --- |
 | `…__flows` | hash id → flow | Current version of every flow |
-| `…__versions__<flow id>` | list, newest first | Version snapshots (limit 200) |
-| `…__runs__<flow id>` | list, newest first | Finished runs with steps (limit `run_history`) |
+| `…__versions__<flow id>` | list, newest first | Version metadata (limit 200); flow bodies in `…__version_bodies__<flow id>` (hash: version -> flow) (D32) |
+| `…__runs__<flow id>` | list, newest first | Finished runs' summaries (limit `run_history`); steps in `…__run_steps__<flow id>` (hash: run id -> steps), and `…__run_index` (hash: run id -> flow id) (D32) |
+| `…__flow_memory` | hash | What each flow remembers between runs (D31) |
 | `…__audit` | list, newest first | Audit entries (limit 10,000) |
 | `…__satellites`, `…__stations`, `…__activities`, `…__rules` | hash id → record | Contact planner records |
 | `…__deleted_flows` | hash id → summary | Deleted flows that can be restored |

@@ -2,7 +2,9 @@
 
 Keys (per scope):
     flow_automator__<scope>__flows            hash: flow id -> flow JSON
-    flow_automator__<scope>__runs__<flow id>  list: newest first, run JSON
+    flow_automator__<scope>__runs__<flow id>  list: newest first, run summaries (no steps)
+    flow_automator__<scope>__run_steps__<flow id>  hash: run id -> its steps (JSON list)
+    flow_automator__<scope>__run_index        hash: run id -> flow id
     flow_automator__<scope>__versions__<flow id>  list: newest first, saved versions
     flow_automator__<scope>__audit            list: newest first, audit entries
     flow_automator__<scope>__meta             hash: "format" -> the newest format written here
@@ -55,6 +57,7 @@ class FlowStore:
         self.meta_key = f"flow_automator__{scope}__meta"
         self.unreadable = {}  # (kind, id) -> the format it was saved in
         self._pending = collections.deque()  # (sequence, ("list", key, value, limit) | ("hash", key, field, value))
+        self._summaries = {}  # flow id -> its runs' summaries, newest first (loaded on first use)
         self._pending_lock = threading.Lock()
         self._flush_lock = threading.Lock()  # one flush at a time, so writes land in order
         self._sequence = 0
@@ -125,24 +128,169 @@ class FlowStore:
     def _versions_key(self, flow_id):
         return f"flow_automator__{self.scope}__versions__{flow_id}"
 
-    def add_version(self, flow_id, entry, limit):
-        self._append(self._versions_key(flow_id), entry, limit)
+    # A version's metadata (who, when, note, summary) goes in the flow's list and its flow body in a hash beside
+    # it, so listing versions doesn't read every body: a 2,000-node flow with 200 versions was a 92 MB list and
+    # listing it took 2.2 s (EVALUATION-2026-11-05 B46).
 
-    def versions(self, flow_id, limit=None):
+    def _version_bodies_key(self, flow_id):
+        return f"flow_automator__{self.scope}__version_bodies__{flow_id}"
+
+    def add_version(self, flow_id, entry, limit):
+        meta = {k: v for k, v in entry.items() if k != "flow"}
+        self._queue(
+            (
+                "split",
+                self._versions_key(flow_id),
+                json.dumps(stamp(meta)),
+                limit,
+                self._version_bodies_key(flow_id),
+                str(entry["version"]),
+                json.dumps(stamp(entry.get("flow") or {})),
+                None,
+                None,
+                "version",
+            )
+        )
+
+    def version_list(self, flow_id, limit=None):
+        """A flow's saved versions, newest first, without their flow bodies."""
         end = (limit - 1) if limit else -1
         return self._load_list("version", self._versions_key(flow_id), 0, end)
 
+    def version_body(self, flow_id, version):
+        raw = self.redis.hget(self._version_bodies_key(flow_id), str(version))
+        return self._load("flow", f"{flow_id}@{version}", raw) if raw else None
+
+    def versions(self, flow_id, limit=None):
+        """A flow's saved versions with their flow bodies (backups, the latest version)."""
+        return [
+            {**meta, "flow": self.version_body(flow_id, meta["version"])} for meta in self.version_list(flow_id, limit)
+        ]
+
+    def migrate_version_history(self, flow_ids):
+        """Once: move saved versions from the old layout (whole flows in one list) to metadata + bodies."""
+        meta = {_text(k): _text(v) for k, v in (self.redis.hgetall(self.meta_key) or {}).items()}
+        if meta.get("versions_layout") == "2":
+            return 0
+        moved = 0
+        for flow_id in flow_ids:
+            entries = self._load_list("version", self._versions_key(flow_id), 0, -1)
+            if not any("flow" in e for e in entries):
+                continue
+            self.redis.delete(self._versions_key(flow_id))
+            for entry in reversed(entries):  # oldest first, so the list ends newest first
+                body = entry.pop("flow", None) or {}
+                self.redis.hset(self._version_bodies_key(flow_id), str(entry["version"]), json.dumps(stamp(body)))
+                self.redis.lpush(self._versions_key(flow_id), json.dumps(stamp(entry)))
+                moved += 1
+        self.redis.hset(self.meta_key, "versions_layout", "2")
+        return moved
+
+    def purge_flow_history(self, flow_id):
+        """Delete everything kept for a deleted flow: its versions, runs (with steps and index entries)."""
+        for summary in self.run_summaries(flow_id):
+            self.redis.hdel(self._run_index_key, summary.get("id"))
+        for key in (
+            self._versions_key(flow_id),
+            self._version_bodies_key(flow_id),
+            self._runs_key(flow_id),
+            self._steps_key(flow_id),
+        ):
+            self.redis.delete(key)
+        with self._pending_lock:
+            self._summaries.pop(flow_id, None)
+
     # ---- run history ---------------------------------------------------------------
+
+    # A run's summary (no steps) goes in the flow's list, its steps in a hash beside it, and run id -> flow id in
+    # an index, so listing runs reads small summaries and finding one run is a lookup, not a scan of every flow
+    # (EVALUATION-2026-11-05 B44). Summaries are also cached in memory per flow (one engine per scope).
 
     def _runs_key(self, flow_id):
         return f"flow_automator__{self.scope}__runs__{flow_id}"
 
+    def _steps_key(self, flow_id):
+        return f"flow_automator__{self.scope}__run_steps__{flow_id}"
+
+    @property
+    def _run_index_key(self):
+        return f"flow_automator__{self.scope}__run_index"
+
     def add_run(self, flow_id, run_json):
-        self._append(self._runs_key(flow_id), run_json, self.history_limit)
+        summary = {k: v for k, v in run_json.items() if k != "steps"}
+        steps = run_json.get("steps") or []
+        with self._pending_lock:
+            cached = self._summaries.get(flow_id)
+            if cached is not None:
+                cached.insert(0, stamp(dict(summary)))
+                del cached[self.history_limit :]
+        self._queue(
+            (
+                "split",
+                self._runs_key(flow_id),
+                json.dumps(stamp(summary)),
+                self.history_limit,
+                self._steps_key(flow_id),
+                summary.get("id"),
+                json.dumps(steps),
+                self._run_index_key,
+                flow_id,
+                "id",
+            )
+        )
+
+    def run_summaries(self, flow_id, limit=None):
+        """A flow's runs, newest first, without their steps."""
+        with self._pending_lock:
+            cached = self._summaries.get(flow_id)
+        if cached is None:
+            cached = self._load_list("run", self._runs_key(flow_id), 0, self.history_limit - 1)
+            with self._pending_lock:
+                cached = self._summaries.setdefault(flow_id, cached)
+        return [dict(r) for r in cached[: (limit or self.history_limit)]]
+
+    def run_steps(self, flow_id, run_id):
+        raw = self.redis.hget(self._steps_key(flow_id), run_id)
+        return json.loads(_text(raw)) if raw else []
+
+    def find_run(self, run_id):
+        """A finished run with its steps, by id (None if it isn't in history)."""
+        flow_id = self.redis.hget(self._run_index_key, run_id)
+        if not flow_id:
+            return None
+        flow_id = _text(flow_id)
+        summary = next((r for r in self.run_summaries(flow_id) if r.get("id") == run_id), None)
+        if summary is None:
+            return None
+        return {**summary, "steps": self.run_steps(flow_id, run_id)}
 
     def runs(self, flow_id, limit=None):
-        end = (limit or self.history_limit) - 1
-        return self._load_list("run", self._runs_key(flow_id), 0, end)
+        """A flow's runs with their steps (backups)."""
+        return [{**r, "steps": self.run_steps(flow_id, r.get("id"))} for r in self.run_summaries(flow_id, limit)]
+
+    def migrate_run_history(self, flow_ids):
+        """Once: move run history from the old layout (whole runs in one list) to summaries + steps + index.
+
+        Returns how many runs it moved. Marked done in the meta hash, so it runs once per scope.
+        """
+        meta = {_text(k): _text(v) for k, v in (self.redis.hgetall(self.meta_key) or {}).items()}
+        if meta.get("runs_layout") == "2":
+            return 0
+        moved = 0
+        for flow_id in flow_ids:
+            records = self._load_list("run", self._runs_key(flow_id), 0, -1)
+            if not any("steps" in r for r in records):
+                continue
+            self.redis.delete(self._runs_key(flow_id))
+            for record in reversed(records):  # oldest first, so the list ends newest first
+                steps = record.pop("steps", None) or []
+                self.redis.hset(self._steps_key(flow_id), record.get("id"), json.dumps(steps))
+                self.redis.hset(self._run_index_key, record.get("id"), flow_id)
+                self.redis.lpush(self._runs_key(flow_id), json.dumps(stamp(record)))
+                moved += 1
+            self._summaries.pop(flow_id, None)
+        self.redis.hset(self.meta_key, "runs_layout", "2")
+        return moved
 
     # ---- audit log -----------------------------------------------------------
 
@@ -234,7 +382,15 @@ class FlowStore:
                     return 0
                 sequence, write = self._pending[0]
             try:
-                if write[0] == "list":
+                if write[0] == "split":
+                    # A summary in a list, its body in a hash (and maybe an index entry): runs and versions.
+                    # Body and index first: writing them twice is harmless; the summary makes it visible
+                    _kind, list_key, summary, _limit, body_key, field, body, index_key, index_value, _id_field = write
+                    self.redis.hset(body_key, field, body)
+                    if index_key:
+                        self.redis.hset(index_key, field, index_value)
+                    self.redis.lpush(list_key, summary)
+                elif write[0] == "list":
                     self.redis.lpush(write[1], write[2])
                 elif write[0] == "hdel":
                     self.redis.hdel(write[1], write[2])
@@ -246,13 +402,26 @@ class FlowStore:
                     if self.failing_since is None:
                         self.failing_since = time.time()
                     return len(self._pending)
-            if write[0] == "list":
+            if write[0] == "split":
+                with contextlib.suppress(Exception):  # can wait for the next write, like a list trim
+                    self._trim_split(write[1], write[3], write[4], write[7], write[9])
+            elif write[0] == "list":
                 # Trimming can wait for the next append: retrying the push would add the entry twice
                 with contextlib.suppress(Exception):
                     self.redis.ltrim(write[1], 0, write[3] - 1)
             with self._pending_lock:
                 if self._pending and self._pending[0][0] == sequence:
                     self._pending.popleft()
+
+    def _trim_split(self, list_key, limit, body_key, index_key, id_field):
+        """Drop the entries beyond the limit, with their bodies and index entries."""
+        for raw in self.redis.lrange(list_key, limit, -1) or []:
+            with contextlib.suppress(ValueError, TypeError):
+                field = str(json.loads(_text(raw)).get(id_field))
+                self.redis.hdel(body_key, field)
+                if index_key:
+                    self.redis.hdel(index_key, field)
+        self.redis.ltrim(list_key, 0, limit - 1)
 
     def health(self):
         with self._pending_lock:
@@ -279,6 +448,9 @@ class MemoryRedis:
 
     def hgetall(self, key):
         return dict(self.hashes.get(key, {}))
+
+    def hget(self, key, field):
+        return self.hashes.get(key, {}).get(field)
 
     def hset(self, key, field, value):
         self.hashes.setdefault(key, {})[field] = value

@@ -584,7 +584,7 @@ class FlowRun:
     def log(self, level, message):
         self.engine.log(level, f"Flow '{self.flow.get('name')}' run {self.id}: {message}")
 
-    def as_json(self, include_steps=True):
+    def as_json(self, include_steps=True, since=None):
         with self._lock:
             result = {
                 "id": self.id,
@@ -615,7 +615,11 @@ class FlowRun:
                 "steps_dropped": self.steps_dropped,
             }
             if include_steps:
-                result["steps"] = [dict(step) for step in self.steps]
+                # With since: copy only the steps from that sequence number on (a polling log, B47)
+                start = 0 if since is None else max(0, int(since) - self.steps_dropped)
+                result["steps"] = [dict(step) for step in self.steps[start:]]
+                if since is not None:
+                    result["steps_from"] = self.steps_dropped + start
         return result
 
 

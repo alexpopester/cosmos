@@ -482,3 +482,19 @@ Before, the only way to keep state was a script writing to the COSMOS stash.
 *Trade-offs:* memory is per flow, not per activity or per contact. A flow that
 needs that keeps one variable per key (for example a name built from the
 satellite).
+
+## D32. Storage layout changes migrate once, marked in the meta hash
+
+Run history and saved versions changed layout in 1.16.0: summaries or metadata
+in the list, bodies in a hash beside it, and a run index (B44, B46). The
+records themselves didn't change shape, so D26's format version doesn't
+apply. Instead, the first engine that starts migrates the old keys and records
+`runs_layout` / `versions_layout` = 2 in the scope's meta hash, so the
+migration runs once.
+
+*Why:* a format bump would mark every record as newer for older engines. The
+layout change is about where records live, not what's in them.
+
+*Trade-off:* it's one way. An older engine reading the new layout finds run
+summaries without steps (harmless) and versions without their flows (restore
+fails). The changelog says not to downgrade past it.

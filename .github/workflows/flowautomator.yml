@@ -1,0 +1,97 @@
+# Flow Automator and its real-data test plugins (openc3-cosmos-satnogs, openc3-cosmos-cfs):
+# engine tests on the supported Pythons, ruff, and the tool's lint, unit tests and build.
+# EVALUATION-2026-11-05 B48 (openc3-cosmos-flowautomator/docs).
+
+name: Flow Automator
+
+on:
+  pull_request:
+    branches-ignore:
+      - "dependabot/**"
+    types:
+      - opened
+      - reopened
+      - synchronize
+    paths:
+      - ".github/workflows/flowautomator.yml"
+      - "openc3-cosmos-flowautomator/**"
+      - "openc3-cosmos-satnogs/**"
+      - "openc3-cosmos-cfs/**"
+  push:
+    branches:
+      - automation_flowgraph
+    paths:
+      - ".github/workflows/flowautomator.yml"
+      - "openc3-cosmos-flowautomator/**"
+      - "openc3-cosmos-satnogs/**"
+      - "openc3-cosmos-cfs/**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    if: ${{ github.actor != 'dependabot[bot]' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up uv and Python
+        uses: ./.github/actions/setup-uv-python
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache-suffix: ${{ matrix.python-version }}
+      # The engine needs sgp4 on top of openc3/python's environment (pytest, numpy, requests, valkey)
+      - name: Flow Automator engine tests
+        working-directory: openc3/python
+        run: uv run --no-sync --with "sgp4>=2.23,<3" python -m pytest -q ../openc3-cosmos-flowautomator/test
+      - name: SatNOGS plugin tests
+        working-directory: openc3/python
+        run: uv run --no-sync --with "satnogs-decoders>=1.132,<2" --with requests python -m pytest -q ../openc3-cosmos-satnogs/test
+      - name: Ruff
+        if: ${{ matrix.python-version == '3.12' }}
+        working-directory: openc3/python
+        run: |
+          dirs="../openc3-cosmos-flowautomator/lib ../openc3-cosmos-flowautomator/microservices ../openc3-cosmos-flowautomator/test ../openc3-cosmos-flowautomator/realdata ../openc3-cosmos-satnogs/lib ../openc3-cosmos-satnogs/test ../openc3-cosmos-satnogs/tools ../openc3-cosmos-cfs/docker/gate"
+          uv run --no-sync ruff check --config pyproject.toml $dirs
+          uv run --no-sync ruff format --check --config pyproject.toml $dirs
+
+  tool:
+    if: ${{ github.actor != 'dependabot[bot]' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: openc3-cosmos-flowautomator
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 11
+      - name: Install
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Lint (CI fails on any warning)
+        run: pnpm lint --max-warnings 0
+      - name: Unit tests
+        run: node --test test/js/*.test.mjs
+      - name: Build
+        run: pnpm run build
+      - name: Every built version has a CHANGELOG entry
+        run: grep -q '^## \[Unreleased\]' CHANGELOG.md

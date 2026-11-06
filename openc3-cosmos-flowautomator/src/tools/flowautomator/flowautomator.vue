@@ -1034,6 +1034,7 @@ import { TopBar } from '@openc3/vue-common/components'
 import FlowNode from './FlowNode.vue'
 import NodeInspector from './NodeInspector.vue'
 import RunPanel from './RunPanel.vue'
+import { firstOpenStep, mergeRunSteps } from './runSteps.js'
 import ApprovalPanel from './ApprovalPanel.vue'
 import ContactsView from './ContactsView.vue'
 import ParamForm from './ParamForm.vue'
@@ -1191,6 +1192,19 @@ export default {
     }
   },
   computed: {
+    // Node id -> label, for the run log (it asked for each step's label with a search of every node)
+    nodeLabels() {
+      const labels = new Map()
+      for (const node of this.nodes) {
+        labels.set(
+          node.id,
+          node.data.config.label ||
+            NODE_TYPES[node.data.kind]?.label ||
+            node.id,
+        )
+      }
+      return labels
+    },
     // What the run dialog describes: the flow that will run (see runSource)
     runSrc() {
       return (
@@ -2288,9 +2302,10 @@ export default {
       if (!run || run.status !== 'running' || this.pollingRun) return
       this.pollingRun = true
       try {
-        const updated = await flowApi.getRun(run.id)
+        // Only the steps it doesn't have: from its first unfinished one (B47)
+        const updated = await flowApi.getRun(run.id, firstOpenStep(run))
         if (this.selectedRun && this.selectedRun.id === updated.id) {
-          this.selectedRun = updated
+          this.selectedRun = mergeRunSteps(this.selectedRun, updated)
         }
       } catch {
         // Engine restarted or run expired from history
@@ -2583,9 +2598,7 @@ export default {
       this.validateSoon()
     },
     nodeLabel(id) {
-      const node = this.nodes.find((n) => n.id === id)
-      if (!node) return id
-      return node.data.config.label || NODE_TYPES[node.data.kind]?.label || id
+      return this.nodeLabels.get(id) ?? id
     },
     focusNode(id) {
       // From the log-only layout, bring the flow back so the node can be seen
